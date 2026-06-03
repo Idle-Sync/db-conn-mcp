@@ -1,14 +1,36 @@
 """Tests for the CLI: argument dispatch and the wizard's pure helpers.
 
-The interactive prompt loop itself (input/print) is intentionally thin and not unit
-tested; all decision logic it relies on lives in pure, tested helpers.
+The interactive prompt loop's decision logic lives in pure, tested helpers; the
+wizard's transactional behavior (commit-at-end, graceful Ctrl+C) is tested by
+driving it with scripted ``input``.
 """
 
+import builtins
 import json
 
 import pytest
 
 from db_conn_mcp import cli, config
+
+
+def _scripted_input(answers):
+    """Return a fake ``input`` that yields each answer, then raises KeyboardInterrupt.
+
+    A sentinel of ``KeyboardInterrupt`` in the list simulates Ctrl+C at that prompt.
+    """
+    it = iter(answers)
+
+    def _input(prompt=""):
+        try:
+            value = next(it)
+        except StopIteration as exc:
+            raise KeyboardInterrupt from exc
+        if value is KeyboardInterrupt:
+            raise KeyboardInterrupt
+        return value
+
+    return _input
+
 
 # ---- argument parsing & dispatch ---------------------------------------------
 
@@ -226,3 +248,53 @@ def test_selection_scales_to_n_clients():
     assert cli.parse_client_selection("8", 8) == [7]
     assert cli.parse_client_selection("9", 8) == []  # 9 out of range for 8 clients
     assert cli.parse_client_selection("all", 0) == []  # no clients -> nothing
+
+
+# ---- wizard: transactional behavior & graceful Ctrl+C ------------------------
+
+
+def test_wizard_completes_and_saves(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])  # no injection prompts
+    monkeypatch.setattr(builtins, "input", _scripted_input(["r", "mydb", "postgresql://h/db", "r"]))
+    rc = cli.run_setup_wizard()
+    assert rc == 0
+    cfg = config.load(str(config.repo_config_path()))
+    assert cfg.connections[0].name == "mydb"
+
+
+def test_wizard_ctrl_c_at_start_saves_nothing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(builtins, "input", _scripted_input([KeyboardInterrupt]))
+    rc = cli.run_setup_wizard()
+    assert rc == 130
+    assert not config.repo_config_path().is_file()
+
+
+def test_wizard_ctrl_c_after_db_prompts_saves_nothing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client_cfg = tmp_path / "claude.json"
+    client_cfg.write_text("{}", encoding="utf-8")
+    fake = cli.ClientSpec("claude", "Claude Desktop", client_cfg, "mcpServers")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [fake])
+    # Answer all DB prompts, then Ctrl+C at the injection selection.
+    monkeypatch.setattr(
+        builtins,
+        "input",
+        _scripted_input(["r", "mydb", "postgresql://h/db", "r", KeyboardInterrupt]),
+    )
+    rc = cli.run_setup_wizard()
+    assert rc == 130
+    assert not config.repo_config_path().is_file()  # connection NOT persisted
+    assert client_cfg.read_text(encoding="utf-8") == "{}"  # client config untouched
+
+
+def test_wizard_duplicate_name_returns_1_without_saving_more(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "mydb", "postgresql://h/a", "read")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    monkeypatch.setattr(builtins, "input", _scripted_input(["r", "mydb", "postgresql://h/b", "r"]))
+    rc = cli.run_setup_wizard()
+    assert rc == 1
+    cfg = config.load(str(config.repo_config_path()))
+    assert [c.name for c in cfg.connections] == ["mydb"]  # unchanged

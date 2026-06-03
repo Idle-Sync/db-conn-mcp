@@ -67,24 +67,37 @@ def scope_to_path(scope: Scope) -> Path:
     return config.global_config_path() if scope == "global" else config.repo_config_path()
 
 
-def register_database(scope: Scope, name: str, dsn: str, mode: str, yolo: bool = False) -> Path:
-    """Validate and append a connection to the scoped config; return its path.
-
-    Raises ``ValueError`` for an unknown DSN scheme or a duplicate name.
-    """
-    dialect_for(dsn)  # validates the scheme; raises ValueError naming supported schemes
+def _load_scope(scope: Scope) -> tuple[Path, Config]:
+    """Return the scoped config path and its current contents (empty if absent)."""
     path = scope_to_path(scope)
     cfg = config.load(str(path)) if path.is_file() else Config()
+    return path, cfg
+
+
+def _ensure_new_connection(cfg: Config, name: str, dsn: str) -> None:
+    """Validate a candidate connection against ``cfg``; raise ``ValueError`` if invalid.
+
+    Checks: known DSN scheme, unique name, and unique connection string. The DSN is
+    never echoed in any error (Rule 6) — duplicate-DSN errors name the existing entry.
+    """
+    dialect_for(dsn)  # validates the scheme; raises ValueError naming supported schemes
     if any(c.name == name for c in cfg.connections):
-        raise ValueError(f"A connection named {name!r} already exists in {path}.")
-    # Guard against the same database registered twice. Note: only `name` is named in
-    # the error — never echo the DSN (Rule 6).
+        raise ValueError(f"A connection named {name!r} already exists.")
     existing = next((c for c in cfg.connections if c.dsn == dsn), None)
     if existing is not None:
         raise ValueError(
             f"That connection string is already registered as {existing.name!r}. "
             "Use that name, or remove it first if you want to re-add it."
         )
+
+
+def register_database(scope: Scope, name: str, dsn: str, mode: str, yolo: bool = False) -> Path:
+    """Validate and append a connection to the scoped config; return its path.
+
+    Raises ``ValueError`` for an unknown DSN scheme, a duplicate name, or a duplicate DSN.
+    """
+    path, cfg = _load_scope(scope)
+    _ensure_new_connection(cfg, name, dsn)
     cfg.connections.append(Connection(name=name, dsn=dsn, mode=mode, yolo=yolo))
     config.save(cfg, path)
     return path
@@ -207,7 +220,19 @@ def parse_client_selection(raw: str, count: int) -> list[int]:
 
 
 def run_setup_wizard() -> int:
-    """Interactively register the first database and offer agent injection."""
+    """Interactively register a database and offer agent injection.
+
+    Transactional: *all* questions are asked first; nothing is written until the
+    very end. Ctrl+C (or EOF) at any prompt cancels cleanly with nothing saved.
+    """
+    try:
+        return _wizard()
+    except (KeyboardInterrupt, EOFError):
+        print("\nSetup cancelled. Nothing was saved.")
+        return 130
+
+
+def _wizard() -> int:
     print("db-conn-mcp setup")
     scope = input("Config scope - [g]lobal or [r]epo? (g/r): ").strip().lower() or "g"
     scope_name: Scope = "repo" if scope.startswith("r") else "global"
@@ -217,20 +242,32 @@ def run_setup_wizard() -> int:
     mode = input("Mode - [r]ead or [w]rite? (r/w): ").strip().lower()
     mode_name = "write" if mode.startswith("w") else "read"
 
+    # Validate up front so the user gets feedback before the injection questions —
+    # but DO NOT write anything yet.
+    path, cfg = _load_scope(scope_name)
     try:
-        path = register_database(scope_name, name, dsn, mode_name)
+        _ensure_new_connection(cfg, name, dsn)
     except ValueError as exc:
         print(f"Could not register: {exc}")
         return 1
+
+    # Gather injection choices (still no writes — Ctrl+C here saves nothing).
+    chosen = _choose_injection_targets()
+
+    # Commit: now persist the connection, then inject into the chosen clients.
+    cfg.connections.append(Connection(name=name, dsn=dsn, mode=mode_name))
+    config.save(cfg, path)
     # Echo only the name — never the DSN (Rule 6).
     print(f"Registered {name!r} ({mode_name}) -> {path}")
 
-    _offer_injection(path)
+    args = server_args(path)
+    for spec in chosen:
+        _inject_into_client(spec, args)
     return 0
 
 
-def _offer_injection(config_path: Path) -> None:
-    """List the detected MCP clients, then offer to inject per client (right format each)."""
+def _choose_injection_targets() -> list[ClientSpec]:
+    """List detected MCP clients and return the ones the user picks (no writes)."""
     detected = detected_clients()
     if not detected:
         print(
@@ -238,7 +275,7 @@ def _offer_injection(config_path: Path) -> None:
             + ", ".join(s.label for s in client_specs())
             + "). Skipping injection."
         )
-        return
+        return []
 
     print("\nDetected MCP client config(s):")
     for i, spec in enumerate(detected, 1):
@@ -247,17 +284,18 @@ def _offer_injection(config_path: Path) -> None:
     chosen = [detected[i] for i in parse_client_selection(raw, len(detected))]
     if not chosen:
         print("No clients selected. Skipping injection.")
-        return
+    return chosen
 
-    args = server_args(config_path)
-    for spec in chosen:
-        try:
-            existing = json.loads(spec.path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            existing = {}
-        updated = inject_entry(existing, spec.fmt, "db-conn-mcp", SERVER_COMMAND, args)
-        spec.path.write_text(json.dumps(updated, indent=2) + "\n", encoding="utf-8")
-        print(f"  Updated {spec.label} config.")
+
+def _inject_into_client(spec: ClientSpec, args: list[str]) -> None:
+    """Read-merge-write a server entry into one client's config, in its own format."""
+    try:
+        existing = json.loads(spec.path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        existing = {}
+    updated = inject_entry(existing, spec.fmt, "db-conn-mcp", SERVER_COMMAND, args)
+    spec.path.write_text(json.dumps(updated, indent=2) + "\n", encoding="utf-8")
+    print(f"  Updated {spec.label} config.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -265,7 +303,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "setup":
         return run_setup_wizard()
-    server.run(transport=args.transport, config_path=args.config)
+    try:
+        server.run(transport=args.transport, config_path=args.config)
+    except KeyboardInterrupt:
+        return 130
     return 0
 
 
