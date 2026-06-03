@@ -1,6 +1,9 @@
 # ---- Local-only files ----
 progress.txt
 
+# ---- Internal planning docs (kept local, not published) ----
+docs/
+
 # ---- Secrets / local config (NEVER commit real DSNs or credentials) ----
 connections.json
 .env
