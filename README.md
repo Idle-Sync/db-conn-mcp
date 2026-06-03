@@ -167,7 +167,7 @@ VS Code (`servers` key, `"type": "stdio"`) and Zed (`context_servers`, nested `c
 ## Development
 
 ```bash
-git clone https://github.com/lazy-coder-03/db-conn-mcp
+git clone https://github.com/Idle-Sync/db-conn-mcp
 cd db-conn-mcp
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"

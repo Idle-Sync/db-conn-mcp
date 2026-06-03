@@ -40,8 +40,9 @@ dev = [
 db-conn-mcp = "db_conn_mcp.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/lazy-coder-03/db-conn-mcp"
-Repository = "https://github.com/lazy-coder-03/db-conn-mcp"
+Homepage = "https://github.com/Idle-Sync/db-conn-mcp"
+Repository = "https://github.com/Idle-Sync/db-conn-mcp"
+Issues = "https://github.com/Idle-Sync/db-conn-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/db_conn_mcp"]
