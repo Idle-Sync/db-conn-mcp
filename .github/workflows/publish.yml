@@ -46,3 +46,26 @@ jobs:
           path: dist/
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-mcp:
+    name: Publish to MCP Registry
+    needs: publish # ensure the PyPI package (with the mcp-name marker) is live first
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # GitHub OIDC -> tokenless auth, io.github.<owner> namespace
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+      - name: Sync server.json version to the release tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.tmp
+          mv server.tmp server.json
+          cat server.json
+      - name: Authenticate (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish
