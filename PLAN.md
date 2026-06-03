@@ -52,8 +52,8 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 
 ## Phase 6: The Setup Wizard (CLI)
 - [x] **Interactive Prompts:** `cli.py` flow asking for scope (Global vs Repo) and the first database DSN + mode.
-- [x] **OS-Agnostic Auto-Discovery:** Locate config files for Claude Desktop (Windows/macOS/Linux), Cursor (`~/.cursor/mcp.json`), and Agy/Antigravity (`~/.gemini/config/mcp_config.json`). The wizard lists the **detected** clients (those whose config file exists) before offering to inject.
-- [x] **Auto-Injection:** Safely parse the discovered JSON configs and inject the `db-conn-mcp` execution command (`mcpServers` entry), asking per client.
+- [x] **OS-Agnostic Auto-Discovery:** Locate config files for 8 MCP clients via `ClientSpec` (key, path, format): Claude Desktop, Cursor, Agy/Antigravity (`~/.gemini/config/mcp_config.json`), Windsurf (`~/.codeium/windsurf/mcp_config.json`), Claude Code (`~/.claude.json`), Cline, VS Code, and Zed. The wizard lists the **detected** clients (config file exists) before offering to inject. *(Gemini CLI deliberately excluded — retired 2026-06-18, superseded by Agy.)*
+- [x] **Auto-Injection:** Safely read-merge-write each client's JSON in its **own format** — `mcpServers` (Claude Desktop/Cursor/Agy/Windsurf/Claude Code/Cline), `servers` + `type:stdio` (VS Code), `context_servers` + nested `command:{path,args}` + `source:custom` (Zed) — asking per client and preserving existing entries.
 
 ## Phase 7: Future Dialects (Post-v1, Extensibility Payoff)
 > Not part of v1. Listed to prove the seam works — each is a single new file + one registry line, no changes above the dialect layer.

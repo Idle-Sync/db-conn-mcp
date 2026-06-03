@@ -3,7 +3,10 @@
 Two responsibilities, no DB knowledge:
   * ``db-conn-mcp [--transport stdio|http] [--config PATH]`` — launch the server.
   * ``db-conn-mcp setup`` — interactive wizard to register the first DB and
-    (optionally) inject the server into Claude Desktop / Cursor configs.
+    (optionally) inject the server into detected MCP client configs. Each client
+    carries its own config path and entry format (``mcpServers`` for Claude
+    Desktop/Cursor/Agy/Windsurf/Claude Code/Cline, ``servers`` for VS Code,
+    ``context_servers`` for Zed) via :class:`ClientSpec`.
 
 The wizard's *logic* (path resolution, DB registration, config injection) lives in
 pure helpers so it stays testable; the interactive loop is a thin shell over them.
@@ -14,6 +17,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -22,6 +26,13 @@ from .dialects.registry import dialect_for
 from .models import Config, Connection
 
 Scope = Literal["global", "repo"]
+
+#: How an MCP client stores server entries. Each value maps to a container key +
+#: entry shape in :func:`inject_entry`.
+ClientFormat = Literal["mcpServers", "vscode", "zed"]
+
+#: The executable an MCP client launches to start this server.
+SERVER_COMMAND = "db-conn-mcp"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,38 +81,98 @@ def register_database(scope: Scope, name: str, dsn: str, mode: str, yolo: bool =
     return path
 
 
-def mcp_server_entry(config_path: Path) -> dict:
-    """The MCP-client entry that launches this server against a given config."""
-    return {"command": "db-conn-mcp", "args": ["--config", str(config_path)]}
+@dataclass(frozen=True)
+class ClientSpec:
+    """One MCP client: where its config lives and which entry format it uses."""
+
+    key: str  # short id, e.g. "vscode"
+    label: str  # human-facing name
+    path: Path  # config file (may not exist yet)
+    fmt: ClientFormat
 
 
-def inject_server(existing: dict, name: str, entry: dict) -> dict:
-    """Insert/overwrite an ``mcpServers[name]`` entry in a client config dict."""
-    existing.setdefault("mcpServers", {})[name] = entry
+#: Container key (top-level JSON object) each format stores server entries under.
+_CONTAINER_KEY: dict[ClientFormat, str] = {
+    "mcpServers": "mcpServers",
+    "vscode": "servers",
+    "zed": "context_servers",
+}
+
+
+def server_args(config_path: Path) -> list[str]:
+    """The CLI args an MCP client passes to launch this server for a given config."""
+    return ["--config", str(config_path)]
+
+
+def _build_entry(fmt: ClientFormat, command: str, args: list[str]) -> dict:
+    """Build a single server entry in the shape the given client format expects."""
+    if fmt == "vscode":
+        return {"type": "stdio", "command": command, "args": args}
+    if fmt == "zed":
+        return {"source": "custom", "command": {"path": command, "args": args}}
+    return {"command": command, "args": args}  # mcpServers (Claude/Cursor/Windsurf/...)
+
+
+def inject_entry(
+    existing: dict, fmt: ClientFormat, name: str, command: str, args: list[str]
+) -> dict:
+    """Insert/overwrite the server entry under the format's container key, preserving the rest."""
+    existing.setdefault(_CONTAINER_KEY[fmt], {})[name] = _build_entry(fmt, command, args)
     return existing
 
 
-def agent_config_paths() -> dict[str, Path]:
-    """OS-aware config locations for known MCP clients (may not exist yet)."""
+def client_specs() -> list[ClientSpec]:
+    """OS-aware specs for known MCP clients (config files may not exist yet)."""
     home = Path.home()
+    appdata = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
     if sys.platform == "win32":
-        appdata = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
         claude = appdata / "Claude" / "claude_desktop_config.json"
+        vscode_user = appdata / "Code" / "User"
+        zed = appdata / "Zed" / "settings.json"
     elif sys.platform == "darwin":
-        claude = home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+        support = home / "Library" / "Application Support"
+        claude = support / "Claude" / "claude_desktop_config.json"
+        vscode_user = support / "Code" / "User"
+        zed = home / ".config" / "zed" / "settings.json"
     else:
         claude = home / ".config" / "Claude" / "claude_desktop_config.json"
-    return {
-        "claude": claude,
-        "cursor": home / ".cursor" / "mcp.json",
+        vscode_user = home / ".config" / "Code" / "User"
+        zed = home / ".config" / "zed" / "settings.json"
+    cline = (
+        vscode_user
+        / "globalStorage"
+        / "saoudrizwan.claude-dev"
+        / "settings"
+        / "cline_mcp_settings.json"
+    )
+    return [
+        ClientSpec("claude", "Claude Desktop", claude, "mcpServers"),
+        ClientSpec("cursor", "Cursor", home / ".cursor" / "mcp.json", "mcpServers"),
         # Agy (Google Antigravity) — unified MCP config shared by its CLI and IDE.
-        "agy": home / ".gemini" / "config" / "mcp_config.json",
-    }
+        ClientSpec(
+            "agy",
+            "Agy (Antigravity)",
+            home / ".gemini" / "config" / "mcp_config.json",
+            "mcpServers",
+        ),
+        ClientSpec(
+            "windsurf", "Windsurf", home / ".codeium" / "windsurf" / "mcp_config.json", "mcpServers"
+        ),
+        ClientSpec("claude-code", "Claude Code", home / ".claude.json", "mcpServers"),
+        ClientSpec("cline", "Cline", cline, "mcpServers"),
+        ClientSpec("vscode", "VS Code", vscode_user / "mcp.json", "vscode"),
+        ClientSpec("zed", "Zed", zed, "zed"),
+    ]
 
 
-def detected_agent_configs() -> dict[str, Path]:
-    """Like :func:`agent_config_paths`, but only clients whose config file exists."""
-    return {client: path for client, path in agent_config_paths().items() if path.is_file()}
+def agent_config_paths() -> dict[str, Path]:
+    """Back-compat view: ``{client_key: config_path}`` for all known clients."""
+    return {s.key: s.path for s in client_specs()}
+
+
+def detected_clients() -> list[ClientSpec]:
+    """The subset of :func:`client_specs` whose config file actually exists."""
+    return [s for s in client_specs() if s.path.is_file()]
 
 
 # ---- Interactive wizard (thin shell over the helpers) ------------------------
@@ -131,31 +202,33 @@ def run_setup_wizard() -> int:
 
 
 def _offer_injection(config_path: Path) -> None:
-    """Show which MCP client configs were detected, then offer to inject per client."""
-    detected = detected_agent_configs()
+    """List the detected MCP clients, then offer to inject per client (right format each)."""
+    detected = detected_clients()
     if not detected:
-        print("No MCP client configs detected (looked for Claude Desktop, Cursor). Skipping.")
+        print(
+            "\nNo MCP client configs detected (looked for: "
+            + ", ".join(s.label for s in client_specs())
+            + "). Skipping injection."
+        )
         return
 
     print("\nDetected MCP client config(s):")
-    for client, path in detected.items():
-        print(f"  - {client}: {path}")
+    for spec in detected:
+        print(f"  - {spec.label} [{spec.fmt}]: {spec.path}")
     if not input("Inject db-conn-mcp into them? (y/N): ").strip().lower().startswith("y"):
         return
 
-    entry = mcp_server_entry(config_path)
-    for client, path in detected.items():
-        if not input(f"  Add to {client}? (y/N): ").strip().lower().startswith("y"):
+    args = server_args(config_path)
+    for spec in detected:
+        if not input(f"  Add to {spec.label}? (y/N): ").strip().lower().startswith("y"):
             continue
         try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
+            existing = json.loads(spec.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             existing = {}
-        path.write_text(
-            json.dumps(inject_server(existing, "db-conn-mcp", entry), indent=2) + "\n",
-            encoding="utf-8",
-        )
-        print(f"  Updated {client} config.")
+        updated = inject_entry(existing, spec.fmt, "db-conn-mcp", SERVER_COMMAND, args)
+        spec.path.write_text(json.dumps(updated, indent=2) + "\n", encoding="utf-8")
+        print(f"  Updated {spec.label} config.")
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -73,25 +73,43 @@ def test_register_database_rejects_duplicate_name(tmp_path, monkeypatch):
         cli.register_database("repo", "dup", "postgresql://h/b", "read")
 
 
-# ---- MCP injection helpers ---------------------------------------------------
+# ---- format-aware injection --------------------------------------------------
 
 
-def test_mcp_server_entry_shape(tmp_path):
-    entry = cli.mcp_server_entry(tmp_path / "connections.json")
-    assert entry["command"] == "db-conn-mcp"
-    assert "--config" in entry["args"]
+def test_server_command_and_args(tmp_path):
+    assert cli.SERVER_COMMAND == "db-conn-mcp"
+    args = cli.server_args(tmp_path / "connections.json")
+    assert args[0] == "--config"
+    assert str(tmp_path / "connections.json") in args
 
 
-def test_inject_server_adds_entry():
-    existing = {"mcpServers": {"other": {"command": "x"}}}
-    result = cli.inject_server(existing, "db-conn-mcp", {"command": "db-conn-mcp"})
-    assert "other" in result["mcpServers"]
-    assert result["mcpServers"]["db-conn-mcp"]["command"] == "db-conn-mcp"
+def test_inject_mcpservers_format():
+    out = cli.inject_entry({}, "mcpServers", "db-conn-mcp", "db-conn-mcp", ["--config", "x"])
+    assert out["mcpServers"]["db-conn-mcp"] == {"command": "db-conn-mcp", "args": ["--config", "x"]}
 
 
-def test_inject_server_creates_mcpservers_key():
-    result = cli.inject_server({}, "db-conn-mcp", {"command": "db-conn-mcp"})
-    assert result["mcpServers"]["db-conn-mcp"]["command"] == "db-conn-mcp"
+def test_inject_preserves_existing_entries():
+    existing = {"mcpServers": {"other": {"command": "y"}}}
+    out = cli.inject_entry(existing, "mcpServers", "db-conn-mcp", "db-conn-mcp", [])
+    assert "other" in out["mcpServers"]
+    assert "db-conn-mcp" in out["mcpServers"]
+
+
+def test_inject_vscode_format_uses_servers_key_and_type():
+    out = cli.inject_entry({}, "vscode", "db-conn-mcp", "db-conn-mcp", ["--config", "x"])
+    assert out["servers"]["db-conn-mcp"] == {
+        "type": "stdio",
+        "command": "db-conn-mcp",
+        "args": ["--config", "x"],
+    }
+
+
+def test_inject_zed_format_uses_context_servers_nested_command():
+    out = cli.inject_entry({}, "zed", "db-conn-mcp", "db-conn-mcp", ["--config", "x"])
+    assert out["context_servers"]["db-conn-mcp"] == {
+        "source": "custom",
+        "command": {"path": "db-conn-mcp", "args": ["--config", "x"]},
+    }
 
 
 # ---- OS-aware agent config discovery -----------------------------------------
@@ -120,15 +138,37 @@ def test_agy_path_present(monkeypatch):
     assert ".gemini" in str(paths["agy"])
 
 
-def test_detected_agent_configs_only_returns_existing(tmp_path, monkeypatch):
-    claude = tmp_path / "claude_desktop_config.json"
-    claude.write_text("{}", encoding="utf-8")
-    cursor = tmp_path / "mcp.json"  # intentionally NOT created
-    monkeypatch.setattr(cli, "agent_config_paths", lambda: {"claude": claude, "cursor": cursor})
-    detected = cli.detected_agent_configs()
-    assert detected == {"claude": claude}
+def test_client_specs_cover_expected(monkeypatch):
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    keys = {s.key for s in cli.client_specs()}
+    assert {
+        "claude",
+        "cursor",
+        "agy",
+        "windsurf",
+        "claude-code",
+        "cline",
+        "vscode",
+        "zed",
+    } <= keys
 
 
-def test_detected_agent_configs_empty_when_none_exist(tmp_path, monkeypatch):
-    monkeypatch.setattr(cli, "agent_config_paths", lambda: {"claude": tmp_path / "nope.json"})
-    assert cli.detected_agent_configs() == {}
+def test_client_spec_formats_and_paths(monkeypatch):
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    by_key = {s.key: s for s in cli.client_specs()}
+    assert by_key["vscode"].fmt == "vscode"
+    assert by_key["vscode"].path.name == "mcp.json"
+    assert by_key["zed"].fmt == "zed"
+    assert by_key["zed"].path.name == "settings.json"
+    assert by_key["windsurf"].fmt == "mcpServers"
+    assert ".codeium" in str(by_key["windsurf"].path)
+    assert by_key["claude-code"].path.name == ".claude.json"
+    assert by_key["cline"].path.name == "cline_mcp_settings.json"
+
+
+def test_detected_clients_only_returns_existing(tmp_path, monkeypatch):
+    present = cli.ClientSpec("a", "A", tmp_path / "a.json", "mcpServers")
+    missing = cli.ClientSpec("b", "B", tmp_path / "b.json", "mcpServers")
+    (tmp_path / "a.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli, "client_specs", lambda: [present, missing])
+    assert [s.key for s in cli.detected_clients()] == ["a"]
