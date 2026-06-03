@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,8 +33,22 @@ Scope = Literal["global", "repo"]
 #: entry shape in :func:`inject_entry`.
 ClientFormat = Literal["mcpServers", "vscode", "zed"]
 
-#: The executable an MCP client launches to start this server.
-SERVER_COMMAND = "db-conn-mcp"
+#: The console-script name declared in pyproject (its absolute path is what we inject).
+SERVER_SCRIPT = "db-conn-mcp"
+
+
+def server_launch(config_path: Path) -> tuple[str, list[str]]:
+    """Return a ``(command, args)`` an MCP client can use to launch this server.
+
+    Prefers the **absolute path** of the installed console script (``shutil.which``),
+    which resolves whether the install is in a project ``.venv`` or a global/pipx
+    environment — so the client never needs the script on its own PATH. Falls back to
+    the current interpreter running the package as a module (``python -m db_conn_mcp``).
+    """
+    exe = shutil.which(SERVER_SCRIPT)
+    if exe:
+        return exe, ["--config", str(config_path)]
+    return sys.executable, ["-m", "db_conn_mcp", "--config", str(config_path)]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -119,11 +134,6 @@ _CONTAINER_KEY: dict[ClientFormat, str] = {
     "vscode": "servers",
     "zed": "context_servers",
 }
-
-
-def server_args(config_path: Path) -> list[str]:
-    """The CLI args an MCP client passes to launch this server for a given config."""
-    return ["--config", str(config_path)]
 
 
 def _build_entry(fmt: ClientFormat, command: str, args: list[str]) -> dict:
@@ -260,9 +270,9 @@ def _wizard() -> int:
     # Echo only the name — never the DSN (Rule 6).
     print(f"Registered {name!r} ({mode_name}) -> {path}")
 
-    args = server_args(path)
+    command, args = server_launch(path)
     for spec in chosen:
-        _inject_into_client(spec, args)
+        _inject_into_client(spec, command, args)
     return 0
 
 
@@ -287,13 +297,13 @@ def _choose_injection_targets() -> list[ClientSpec]:
     return chosen
 
 
-def _inject_into_client(spec: ClientSpec, args: list[str]) -> None:
+def _inject_into_client(spec: ClientSpec, command: str, args: list[str]) -> None:
     """Read-merge-write a server entry into one client's config, in its own format."""
     try:
         existing = json.loads(spec.path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         existing = {}
-    updated = inject_entry(existing, spec.fmt, "db-conn-mcp", SERVER_COMMAND, args)
+    updated = inject_entry(existing, spec.fmt, "db-conn-mcp", command, args)
     spec.path.write_text(json.dumps(updated, indent=2) + "\n", encoding="utf-8")
     print(f"  Updated {spec.label} config.")
 

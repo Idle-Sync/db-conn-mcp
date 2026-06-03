@@ -115,10 +115,21 @@ def test_register_database_duplicate_dsn_error_is_sanitized(tmp_path, monkeypatc
 # ---- format-aware injection --------------------------------------------------
 
 
-def test_server_command_and_args(tmp_path):
-    assert cli.SERVER_COMMAND == "db-conn-mcp"
-    args = cli.server_args(tmp_path / "connections.json")
-    assert args[0] == "--config"
+def test_server_launch_prefers_installed_script(monkeypatch, tmp_path):
+    # When the console script resolves on PATH, inject its ABSOLUTE path so the
+    # MCP client doesn't need it on its own PATH.
+    monkeypatch.setattr(cli.shutil, "which", lambda name: r"C:\venv\Scripts\db-conn-mcp.exe")
+    command, args = cli.server_launch(tmp_path / "connections.json")
+    assert command == r"C:\venv\Scripts\db-conn-mcp.exe"
+    assert args == ["--config", str(tmp_path / "connections.json")]
+
+
+def test_server_launch_falls_back_to_module(monkeypatch, tmp_path):
+    # No console script found -> run the package via the current interpreter.
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    command, args = cli.server_launch(tmp_path / "connections.json")
+    assert command == cli.sys.executable
+    assert args[:2] == ["-m", "db_conn_mcp"]
     assert str(tmp_path / "connections.json") in args
 
 
