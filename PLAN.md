@@ -5,9 +5,11 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 > **v1 scope:** PostgreSQL only, built behind a `Dialect` seam so adding MySQL/SQLite later is a single new file (see Phase 7). Per project rules, keep PRD/PLAN/ARCHITECTURE in sync with every decision.
 
 ## Phase 1: Project Scaffolding & Tooling
+- [ ] **Virtual Environment:** Create and use a project-local `.venv` (`python -m venv .venv`) for all work (git-ignored).
 - [ ] **Repository Structure:** Set up the standard Python package layout (`src/db_conn_mcp/`) per the module map in `ARCHITECTURE.md`.
 - [ ] **Code Quality:** Initialize `ruff` configuration for aggressive, consistent linting and formatting.
-- [ ] **Dependencies:** Create `pyproject.toml` and `requirements.txt` (including `mcp`, `asyncpg`, and `pydantic`).
+- [ ] **Dependencies:** Declare all packages in `pyproject.toml` (the single source of truth — `mcp`, `asyncpg`, `pydantic`); install with `pip install -e .`. No `requirements.txt`.
+- [ ] **.gitignore:** Python caches, `.venv`, build artifacts, and secrets (`connections.json`, `.env`).
 
 ## Phase 2: Configuration Management
 - [ ] **Models:** `models.py` — pydantic `Connection{name, dsn, mode, yolo}` and `Config{connections: [...]}`.

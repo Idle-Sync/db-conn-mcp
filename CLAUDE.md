@@ -25,6 +25,7 @@ When assisting the user with the `db-conn-mcp` project, please strictly adhere t
 - Keep the project in Python.
 - Use the official `mcp` SDK (`pip install mcp`).
 - Use standard, modern async libraries where applicable (e.g., `asyncpg`).
+- **`pyproject.toml` is the single source of truth for dependencies** — declare all packages there. Do NOT maintain a separate `requirements.txt`.
 - **v1 ships PostgreSQL only**, but all DB-specific code lives behind a `Dialect` abstraction (`dialects/`) so adding MySQL/SQLite later is a single new file. Never leak a specific database's SQL above the dialect layer.
 
 ## 5. MCP Transport Modes
@@ -46,5 +47,11 @@ When assisting the user with the `db-conn-mcp` project, please strictly adhere t
 
 ## 8. Commit Hygiene (No Agent Watermarks)
 - **NEVER** add agent/AI watermarks, attributions, or trailers to commits, PRs, or any other output — e.g. no `Co-Authored-By: Claude …`, no "Generated with Claude Code", no 🤖 lines. Commits and messages must read like a normal human developer's work.
+
+## 9. Environment & Sanitation
+- **Always work inside a project-local virtual environment** (`.venv`): `python -m venv .venv`, activate it, and install there. NEVER install dependencies into the global/system Python. `.venv` is git-ignored.
+- **Install from `pyproject.toml`** (the single source of truth — see Rule 4): `pip install -e .`. Do not hand-maintain a `requirements.txt`.
+- **Input sanitation:** validate and safely quote any identifier (database/table/column names) before placing it into catalog/introspection queries — never naive string concatenation. Route user-supplied *values* through driver parameterization. (Raw SQL in `execute_read_query`/`execute_write_query` is intentional and governed by the `mode` → `yolo` → `user_consent` gate.)
+- **Secrets sanitation:** never commit `connections.json` or `.env` (both git-ignored); never print or log DSNs, hosts, or credentials; keep all error/diagnostic output sanitized (see Rule 6).
 
 Follow these rules rigidly to ensure `db-conn-mcp` remains the cleanest, most straightforward open-source database MCP server available.
