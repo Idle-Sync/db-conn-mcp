@@ -14,6 +14,13 @@ they can never make a ``read`` DB writable.
 
 from .models import Connection
 
+#: Returned to the agent when a write needs explicit consent (step 4).
+CONSENT_INSTRUCTION = (
+    "This database requires explicit consent for writes. First read the target "
+    "table and its schema, then show the user the exact SQL you intend to run and "
+    "ask for permission. Only call again with user_consent=true if they agree."
+)
+
 
 class WriteRejected(Exception):  # noqa: N818 — spec-named; not an "*Error" by design
     """Raised when a write must not proceed, carrying the precise next step."""
@@ -21,4 +28,13 @@ class WriteRejected(Exception):  # noqa: N818 — spec-named; not an "*Error" by
 
 def authorize_write(conn: Connection, user_consent: bool) -> None:
     """Allow the write (return ``None``) or raise :class:`WriteRejected`."""
-    raise NotImplementedError
+    if conn.mode != "write":
+        raise WriteRejected(
+            f"Database {conn.name!r} is read-only (mode=read). Writes are blocked at "
+            "the database level and cannot be enabled by yolo or consent."
+        )
+    if conn.yolo:
+        return None
+    if user_consent:
+        return None
+    raise WriteRejected(CONSENT_INSTRUCTION)

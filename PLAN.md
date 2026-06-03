@@ -28,8 +28,8 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 - [ ] **Read-Only Guard:** Inside `PostgresDialect.connect(read_only=True)`, force `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;`. Read-only enforcement is the dialect's own responsibility — it must never leak upward.
 
 ## Phase 4: Safety & Diagnostics
-- [ ] **Write Gate:** `safety.py` — a pure decision function: `mode` (hard reject if not `write`) → `yolo` (proceed) → `user_consent` (proceed if `true`, else reject with the "show SQL, get consent" instruction).
-- [ ] **Diagnostics:** `diagnostics.py` — `explain(error)` classifies driver exceptions into `AUTH_FAILED` / `HOST_UNREACHABLE` / `DB_NOT_FOUND` / `DNS_FAILURE` / `SSL_REQUIRED` / `POOL_EXHAUSTED` / `UNKNOWN`, each with a **sanitized** cause + fix. Must receive only the exception, never the DSN/connection.
+- [x] **Write Gate:** `safety.py` — a pure decision function: `mode` (hard reject if not `write`) → `yolo` (proceed) → `user_consent` (proceed if `true`, else reject with the "show SQL, get consent" instruction).
+- [x] **Diagnostics:** `diagnostics.py` — `explain(error)` classifies driver exceptions into `AUTH_FAILED` / `HOST_UNREACHABLE` / `DB_NOT_FOUND` / `DNS_FAILURE` / `SSL_REQUIRED` / `POOL_EXHAUSTED` / `UNKNOWN`, each with a **sanitized** cause + fix. Must receive only the exception, never the DSN/connection.
 
 ## Phase 5: MCP Tool & Prompt Implementation
 - [ ] **Initialize Server:** Set up the core `mcp.server.Server` instance in `server.py`.
