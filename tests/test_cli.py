@@ -565,3 +565,35 @@ def test_main_dispatches_clients_remove_and_check(monkeypatch):
     assert cli.main(["clients", "--remove"]) == 0
     assert cli.main(["check", "db1"]) == 0
     assert seen == {"clients": True, "check": "db1"}
+
+
+# ---- reset (delete the whole config — fresh slate) --------------------------
+
+
+def test_parser_has_reset():
+    assert cli.build_parser().parse_args(["reset"]).command == "reset"
+
+
+def test_cmd_reset_deletes_on_confirm(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    p = config.repo_config_path()
+    assert p.is_file()
+    monkeypatch.setattr(builtins, "input", _scripted_input(["y"]))
+    rc = cli.cmd_reset(str(p))
+    assert rc == 0
+    assert not p.is_file()  # whole config removed
+
+
+def test_cmd_reset_cancel_keeps_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    p = config.repo_config_path()
+    monkeypatch.setattr(builtins, "input", _scripted_input(["n"]))
+    rc = cli.cmd_reset(str(p))
+    assert rc == 0
+    assert p.is_file()  # untouched on decline
+
+
+def test_cmd_reset_no_config_is_already_fresh(tmp_path):
+    assert cli.cmd_reset(str(tmp_path / "nope.json")) == 0

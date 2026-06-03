@@ -107,6 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add("remove", "Remove a database connection by name.").add_argument(
         "name", help="The connection name to remove."
     )
+    _add("reset", "Remove ALL connections (delete connections.json) for a fresh slate.")
     p_yolo = _add("yolo", "Enable/disable yolo (write-consent bypass) for one database.")
     p_yolo.add_argument("name", help="The database name.")
     p_yolo.add_argument("state", choices=["on", "off"], help="Turn yolo on or off.")
@@ -528,6 +529,25 @@ def cmd_remove(config_arg: str | None, name: str) -> int:
     return 0
 
 
+def cmd_reset(config_arg: str | None = None) -> int:
+    """Delete the whole ``connections.json`` (remove ALL connections) for a fresh slate."""
+    path = _existing_config(config_arg)
+    if path is None:
+        print("No configuration found — already fresh.")
+        return 0
+    try:
+        confirm = input(f"Delete ALL connections by removing {path}? (y/N): ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled. Nothing deleted.")
+        return 130
+    if not confirm.startswith("y"):
+        print("Cancelled. Nothing deleted.")
+        return 0
+    path.unlink()
+    print(f"Removed all connections (deleted {path}). Run `db-conn-mcp setup` to start fresh.")
+    return 0
+
+
 def cmd_yolo(config_arg: str | None, name: str, state: str) -> int:
     """Enable/disable yolo (write-consent bypass) for one database, persisted."""
     path = _existing_config(config_arg)
@@ -553,6 +573,7 @@ _COMMANDS = {
     "clients": lambda a: cmd_clients(a.config, remove=a.remove),
     "check": lambda a: cmd_check(a.config, a.name),
     "remove": lambda a: cmd_remove(a.config, a.name),
+    "reset": lambda a: cmd_reset(a.config),
     "yolo": lambda a: cmd_yolo(a.config, a.name, a.state),
 }
 

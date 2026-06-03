@@ -144,8 +144,10 @@ The server exposes **10 tools** and **1 prompt**:
 | `db-conn-mcp clients` | Inject the server into detected MCP clients. |
 | `db-conn-mcp clients --remove` | Uninject the server from chosen clients. |
 | `db-conn-mcp check [name]` | Probe connectivity (exit `0` all-OK, `2` if any unreachable). |
-| `db-conn-mcp remove <name>` | Remove a connection. |
+| `db-conn-mcp remove <name>` | Remove one connection. |
+| `db-conn-mcp reset` | Remove **all** connections (delete `connections.json`) — fresh slate. |
 | `db-conn-mcp yolo <name> on\|off` | Toggle `yolo` for one database. |
+| `db-conn-mcp -v` / `--version` | Print the installed version and exit. |
 
 `--config <path>` works before or after any subcommand.
 
