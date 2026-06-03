@@ -111,7 +111,7 @@ This is the recommended setup for any database that holds data you care about.
 
 ## MCP tools
 
-The server exposes **8 tools** and **1 prompt**:
+The server exposes **10 tools** and **1 prompt**:
 
 | Tool | Kind | Description |
 |------|------|-------------|
@@ -119,6 +119,8 @@ The server exposes **8 tools** and **1 prompt**:
 | `list_tables` | explore | Tables and views in a database. |
 | `get_table_schema` | explore | Columns, types, primary/foreign keys for a table. |
 | `sample_table_rows` | explore | First N rows of a table (default 10). |
+| `find_columns` | search | Find columns by name across all tables (fuzzy, case-insensitive). |
+| `search_value` | search | Find **where** a value appears across tables (fuzzy); returns table/column hits + samples. Pass `tables=[…]` to scope it. |
 | `execute_read_query` | execute | Run a single read-only statement (`SELECT`/`WITH`/…) inside a read-only transaction. |
 | `execute_write_query` | execute | Run a mutation — gated by the safety model above. |
 | `set_yolo_mode` | config | Enable/disable `yolo` for one database (persisted). |

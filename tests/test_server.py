@@ -71,6 +71,15 @@ class FakeDialect:
         # Permissive stub; the real read-only gate is covered in test_postgres.py.
         return None
 
+    async def find_columns(self, conn, pattern):
+        return [{"schema": "public", "table": "users", "column": "email"}]
+
+    async def search_value(self, conn, value, tables=None, limit_per_column=5):
+        return {
+            "results": [{"schema": "public", "table": "users", "column": "email"}],
+            "truncated": False,
+        }
+
 
 def _patch_dialect(monkeypatch, dialect):
     # Handlers resolves the dialect via its own imported name — patch there.
@@ -99,6 +108,27 @@ async def test_list_tables_connects_read_only(cfg_path, monkeypatch):
     result = await h.list_tables("prod")
     assert dialect.connected_read_only is True
     assert result[0]["name"] == "users"
+    assert dialect.conn.closed is True
+
+
+async def test_find_columns_connects_read_only(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.find_columns("prod", "email")
+    assert dialect.connected_read_only is True
+    assert result[0]["column"] == "email"
+    assert dialect.conn.closed is True
+
+
+async def test_search_value_connects_read_only(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.search_value("prod", "x@y.com", tables=["users"])
+    assert dialect.connected_read_only is True
+    assert result["results"][0]["table"] == "users"
+    assert result["truncated"] is False
     assert dialect.conn.closed is True
 
 

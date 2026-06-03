@@ -68,6 +68,65 @@ _KEYS_SQL = """
 """
 
 
+#: Fuzzy column-name search (Tool A). ``$1`` is the parameterized pattern.
+_FIND_COLUMNS_SQL = """
+    SELECT table_schema AS schema,
+           table_name   AS table,
+           column_name  AS column,
+           data_type    AS type,
+           (is_nullable = 'YES') AS nullable
+    FROM information_schema.columns
+    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+      AND column_name ILIKE '%' || $1 || '%'
+    ORDER BY table_schema, table_name, ordinal_position
+"""
+
+#: Base-table columns (excludes views/system schemas); ``$1::text[]`` (NULL = all)
+#: restricts to specific table names for a scoped value search.
+_SEARCH_COLUMNS_SQL = """
+    SELECT c.table_schema AS schema,
+           c.table_name   AS table,
+           c.column_name  AS column
+    FROM information_schema.columns c
+    JOIN information_schema.tables t
+      ON t.table_schema = c.table_schema
+     AND t.table_name = c.table_name
+     AND t.table_type = 'BASE TABLE'
+    WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema')
+      AND ($1::text[] IS NULL OR c.table_name = ANY($1::text[]))
+    ORDER BY c.table_schema, c.table_name, c.ordinal_position
+"""
+
+#: Bound a value-search scan so a wide/huge scan fails safe instead of hanging.
+_SEARCH_TIMEOUT_SQL = "SET statement_timeout = '8s'"
+
+#: Tables skipped by default in an unscoped value search (framework/replication/stats).
+_JUNK_TABLES = frozenset({"migrations", "jobs", "failed_jobs", "password_resets"})
+_JUNK_PREFIXES = ("awsdms_", "pg_stat")
+
+
+def _is_junk_table(name: str) -> bool:
+    """Whether a table is noise skipped by default (an explicit ``tables=`` overrides this)."""
+    return name in _JUNK_TABLES or name.startswith(_JUNK_PREFIXES)
+
+
+def _build_table_search_sql(schema: str, table: str, columns: list[str], limit: int) -> str:
+    """Single-pass aggregate that, per column, counts and samples fuzzy text matches.
+
+    Scans the table once. ``$1`` is the (parameterized) search value; every column is
+    cast to text and matched case-insensitively (``ILIKE``). Identifiers are safely
+    quoted (Rule 9); the value is never interpolated.
+    """
+    qtable = f"{_quote_identifier(schema)}.{_quote_identifier(table)}"
+    parts: list[str] = []
+    for i, col in enumerate(columns):
+        qc = f"{_quote_identifier(col)}::text"
+        cond = f"{qc} ILIKE '%' || $1 || '%'"
+        parts.append(f"count(*) FILTER (WHERE {cond}) AS m_{i}")
+        parts.append(f"(array_agg(DISTINCT {qc}) FILTER (WHERE {cond}))[1:{limit}] AS s_{i}")
+    return f"SELECT {', '.join(parts)} FROM {qtable}"
+
+
 def _quote_identifier(identifier: str) -> str:
     """Safely quote a (optionally ``schema.table``) SQL identifier (Rule 9).
 
@@ -178,6 +237,52 @@ class PostgresDialect(Dialect):
                 f"{allowed}. Got {leader.upper()!r}. Use a write-mode database and "
                 "execute_write_query for INSERT/UPDATE/DELETE/DDL or SET."
             )
+
+    async def find_columns(self, conn: Any, pattern: str) -> list[dict]:
+        rows = await conn.fetch(_FIND_COLUMNS_SQL, pattern)
+        return [dict(r) for r in rows]
+
+    async def search_value(
+        self, conn: Any, value: str, tables: list[str] | None = None, limit_per_column: int = 5
+    ) -> dict:
+        limit = max(1, int(limit_per_column))
+        await conn.execute(_SEARCH_TIMEOUT_SQL)  # fail safe on a wide/huge scan
+        col_rows = await conn.fetch(_SEARCH_COLUMNS_SQL, list(tables) if tables else None)
+
+        grouped: dict[tuple[str, str], list[str]] = {}
+        for r in col_rows:
+            d = dict(r)
+            grouped.setdefault((d["schema"], d["table"]), []).append(d["column"])
+
+        results: list[dict] = []
+        truncated = False
+        for (schema, table), cols in grouped.items():
+            if not tables and _is_junk_table(table):
+                continue
+            sql = _build_table_search_sql(schema, table, cols, limit)
+            try:
+                row = await conn.fetchrow(sql, value)
+            except asyncpg.QueryCanceledError:  # statement_timeout tripped
+                truncated = True
+                break
+            except asyncpg.PostgresError:  # one unscannable table — skip, keep going
+                continue
+            if row is None:
+                continue
+            mapped = dict(row)
+            for i, col in enumerate(cols):
+                matches = mapped.get(f"m_{i}") or 0
+                if matches:
+                    results.append(
+                        {
+                            "schema": schema,
+                            "table": table,
+                            "column": col,
+                            "matches": int(matches),
+                            "samples": list(mapped.get(f"s_{i}") or []),
+                        }
+                    )
+        return {"results": results, "truncated": truncated}
 
     @staticmethod
     def _is_row_returning(sql: str) -> bool:

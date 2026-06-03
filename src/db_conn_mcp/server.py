@@ -1,4 +1,4 @@
-"""The MCP server: 8 tools + 1 prompt, plus transport wiring (FastMCP).
+"""The MCP server: 10 tools + 1 prompt, plus transport wiring (FastMCP).
 
 Knows nothing about PostgreSQL. It wires the pure/abstract layers together: the
 :class:`~db_conn_mcp.handlers.Handlers` service (which uses ``config``, the dialect
@@ -37,7 +37,7 @@ Database connection troubleshooting checklist:
 
 
 def build_server(config_path: Path | str | None = None) -> FastMCP:
-    """Construct the FastMCP app with all 8 tools and the troubleshoot prompt."""
+    """Construct the FastMCP app with all 10 tools and the troubleshoot prompt."""
     resolved = resolve_path(str(config_path) if config_path else None)
     handlers = Handlers(resolved)
     app = FastMCP("db-conn-mcp")
@@ -62,6 +62,32 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
     async def sample_table_rows(database: str, table: str, n: int = 10) -> list[dict]:
         """Fetch the first N rows of a table to learn its data shape."""
         return await handlers.sample_table_rows(database, table, n)
+
+    # ---- Discovery / search tools --------------------------------------------
+    @app.tool()
+    async def find_columns(database: str, pattern: str) -> list[dict]:
+        """Find columns by name across all tables (fuzzy, case-insensitive substring).
+
+        e.g. pattern "email" matches user_email, EMAIL_ADDRESS. Use this to locate where
+        a concept lives before querying.
+        """
+        return await handlers.find_columns(database, pattern)
+
+    @app.tool()
+    async def search_value(
+        database: str,
+        value: str,
+        tables: list[str] | None = None,
+        limit_per_column: int = 5,
+    ) -> dict:
+        """Find WHERE a value appears across tables (fuzzy, case-insensitive substring).
+
+        Returns the tables/columns containing the value, with match counts and samples.
+        For speed on large databases, first narrow with list_tables/find_columns and pass
+        a `tables` shortlist; otherwise it scans all non-system tables (bounded, may
+        return partial results flagged `truncated`).
+        """
+        return await handlers.search_value(database, value, tables, limit_per_column)
 
     # ---- Execution tools -----------------------------------------------------
     @app.tool()

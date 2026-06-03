@@ -80,6 +80,30 @@ class Handlers:
         finally:
             await db.close()
 
+    async def find_columns(self, database: str, pattern: str) -> list[dict]:
+        """Fuzzy-search for columns by name across all tables in a database."""
+        conn = config.get(self._load(), database)
+        dialect, db = await self._connect(conn, read_only=True)
+        try:
+            return await dialect.find_columns(db, pattern)
+        finally:
+            await db.close()
+
+    async def search_value(
+        self,
+        database: str,
+        value: str,
+        tables: list[str] | None = None,
+        limit_per_column: int = 5,
+    ) -> dict:
+        """Fuzzy-search for a value across (optionally scoped) tables' data."""
+        conn = config.get(self._load(), database)
+        dialect, db = await self._connect(conn, read_only=True)
+        try:
+            return await dialect.search_value(db, value, tables, limit_per_column)
+        finally:
+            await db.close()
+
     # ---- Execution tools -----------------------------------------------------
 
     async def execute_read_query(self, database: str, sql: str) -> dict:

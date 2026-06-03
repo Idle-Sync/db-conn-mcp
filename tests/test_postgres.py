@@ -12,18 +12,24 @@ import pytest
 
 from db_conn_mcp.dialects.postgres import (
     PostgresDialect,
+    _build_table_search_sql,
+    _is_junk_table,
     _leading_keyword,
     _quote_identifier,
 )
 
 
 class FakeConn:
-    """Records executed SQL and serves queued fetch() results in order."""
+    """Records executed/fetched SQL (and args) and serves queued results in order."""
 
-    def __init__(self, fetch_results=None):
+    def __init__(self, fetch_results=None, fetchrow_results=None):
         self.executed: list[str] = []
         self._fetch_queue = list(fetch_results or [])
+        self._fetchrow_queue = list(fetchrow_results or [])
         self.fetched: list[str] = []
+        self.fetch_args: list[tuple] = []
+        self.fetchrow_calls: list[str] = []
+        self.fetchrow_args: list[tuple] = []
 
     async def execute(self, sql, *args):
         self.executed.append(sql)
@@ -31,7 +37,13 @@ class FakeConn:
 
     async def fetch(self, sql, *args):
         self.fetched.append(sql)
+        self.fetch_args.append(args)
         return self._fetch_queue.pop(0) if self._fetch_queue else []
+
+    async def fetchrow(self, sql, *args):
+        self.fetchrow_calls.append(sql)
+        self.fetchrow_args.append(args)
+        return self._fetchrow_queue.pop(0) if self._fetchrow_queue else None
 
     async def close(self):
         pass
@@ -208,3 +220,76 @@ def test_validate_read_only_accepts_read_statements(sql):
 def test_validate_read_only_rejects_non_read_statements(sql):
     with pytest.raises(ValueError):
         PostgresDialect().validate_read_only(sql)
+
+
+# ---- find_columns (fuzzy column-name search) --------------------------------
+
+
+async def test_find_columns_ilike_and_maps():
+    rows = [
+        {"schema": "public", "table": "users", "column": "email", "type": "text", "nullable": True}
+    ]
+    conn = FakeConn(fetch_results=[rows])
+    result = await PostgresDialect().find_columns(conn, "mail")
+    assert result == rows
+    assert "ILIKE" in conn.fetched[0].upper()  # fuzzy match
+    assert conn.fetch_args[0] == ("mail",)  # pattern is parameterized, not concatenated
+
+
+# ---- junk-table filter (pure) ------------------------------------------------
+
+
+def test_is_junk_table():
+    assert _is_junk_table("migrations")
+    assert _is_junk_table("failed_jobs")
+    assert _is_junk_table("awsdms_apply_exceptions")
+    assert _is_junk_table("pg_stat_statements")
+    assert not _is_junk_table("users")
+    assert not _is_junk_table("company_employee")
+
+
+# ---- per-table search SQL builder (pure) ------------------------------------
+
+
+def test_build_table_search_sql_quotes_casts_ilikes():
+    sql = _build_table_search_sql("public", "users", ["email", 'we"ird'], 5)
+    assert '"public"."users"' in sql  # schema.table quoted
+    assert '"email"::text ILIKE' in sql  # cast to text + fuzzy
+    assert '"we""ird"::text ILIKE' in sql  # hostile column name safely quoted
+    assert "$1" in sql  # value parameterized
+    assert "[1:5]" in sql  # sample limit applied
+
+
+# ---- search_value (fuzzy cross-table value search) --------------------------
+
+
+async def test_search_value_explicit_tables_maps_hits():
+    cols = [
+        {"schema": "public", "table": "users", "column": "email"},
+        {"schema": "public", "table": "users", "column": "name"},
+    ]
+    agg = {"m_0": 2, "s_0": ["a@x.com", "b@x.com"], "m_1": 0, "s_1": None}
+    conn = FakeConn(fetch_results=[cols], fetchrow_results=[agg])
+    out = await PostgresDialect().search_value(conn, "x.com", tables=["users"])
+    assert out["truncated"] is False
+    assert out["results"] == [
+        {
+            "schema": "public",
+            "table": "users",
+            "column": "email",
+            "matches": 2,
+            "samples": ["a@x.com", "b@x.com"],
+        }
+    ]
+    assert conn.fetchrow_args[0] == ("x.com",)  # value parameterized
+
+
+async def test_search_value_skips_junk_when_unscoped():
+    cols = [
+        {"schema": "public", "table": "migrations", "column": "name"},
+        {"schema": "public", "table": "users", "column": "email"},
+    ]
+    conn = FakeConn(fetch_results=[cols], fetchrow_results=[{"m_0": 1, "s_0": ["a@x"]}])
+    out = await PostgresDialect().search_value(conn, "x", tables=None)
+    assert [r["table"] for r in out["results"]] == ["users"]  # migrations skipped
+    assert len(conn.fetchrow_calls) == 1  # only the non-junk table was scanned

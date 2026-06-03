@@ -48,3 +48,22 @@ class Dialect(ABC):
         This pure check rejects anything that isn't one read-only, row-returning
         statement, *before* a connection is opened.
         """
+
+    @abstractmethod
+    async def find_columns(self, conn: Any, pattern: str) -> list[dict]:
+        """Fuzzy (case-insensitive substring) search for columns by name across tables.
+
+        Returns ``[{schema, table, column, type, nullable}]`` for columns whose name
+        matches ``pattern``.
+        """
+
+    @abstractmethod
+    async def search_value(
+        self, conn: Any, value: str, tables: list[str] | None = None, limit_per_column: int = 5
+    ) -> dict:
+        """Fuzzy search for ``value`` in the data across (optionally scoped) tables.
+
+        When ``tables`` is given, only those are scanned; otherwise all non-system,
+        non-junk base tables. Returns
+        ``{"results": [{schema, table, column, matches, samples}], "truncated": bool}``.
+        """
