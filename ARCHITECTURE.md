@@ -39,7 +39,8 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 | `dialects/registry.py` | Map DSN scheme → `Dialect`; clear error on unknown scheme | No |
 | `safety.py` | Pure write-gate decision (`mode` + `yolo` + `consent`) | No |
 | `diagnostics.py` | Classify driver errors → **sanitized** cause + fix; the doctor | No |
-| `server.py` | MCP `Server`, the 8 tool handlers, the prompt, transport wiring | No |
+| `handlers.py` | The 8 tool handlers as plain async methods (transport-free, unit-testable) | No |
+| `server.py` | `FastMCP` app: registers the 8 tools + the prompt onto `handlers`, transport wiring | No |
 
 The **dialect layer is the only place that knows a database is PostgreSQL.** Everything above it speaks the abstract `Dialect` contract.
 

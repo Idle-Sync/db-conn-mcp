@@ -32,23 +32,23 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 - [x] **Diagnostics:** `diagnostics.py` — `explain(error)` classifies driver exceptions into `AUTH_FAILED` / `HOST_UNREACHABLE` / `DB_NOT_FOUND` / `DNS_FAILURE` / `SSL_REQUIRED` / `POOL_EXHAUSTED` / `UNKNOWN`, each with a **sanitized** cause + fix. Must receive only the exception, never the DSN/connection.
 
 ## Phase 5: MCP Tool & Prompt Implementation
-- [ ] **Initialize Server:** Set up the core `mcp.server.Server` instance in `server.py`.
-- [ ] **Exploration Tools:**
+- [x] **Initialize Server:** Set up the server in `server.py` using the SDK's high-level `FastMCP` API (simpler than the low-level `mcp.server.Server`; Rule 1). Tool logic lives in `handlers.py` so it is unit-testable without a transport.
+- [x] **Exploration Tools:**
   - `list_databases`: Return configured databases (name + mode + yolo).
   - `list_tables`: Query the DB catalog for tables/views.
   - `get_table_schema`: Query the DB catalog for column definitions.
   - `sample_table_rows`: Fetch the first 10 rows (default).
-- [ ] **Execution Tools:**
+- [x] **Execution Tools:**
   - `execute_read_query`: Raw SELECT execution inside a read-only transaction.
   - `execute_write_query`: Raw mutation execution, routed through the `safety.py` gate (`mode` → `yolo` → `user_consent`).
-- [ ] **Configuration Tool:**
+- [x] **Configuration Tool:**
   - `set_yolo_mode(database, enabled)`: Persist the `yolo` flag for one DB via `config.py`.
-- [ ] **Diagnostics Tool:**
+- [x] **Diagnostics Tool:**
   - `check_database(database?)`: Test one DB or all; return `OK` or sanitized diagnostic.
-- [ ] **Prompt:**
+- [x] **Prompt:**
   - `troubleshoot_connection`: Expose the full connection-gotchas checklist as an MCP prompt.
-- [ ] **Error Wrapping:** Every tool that connects routes failures through `diagnostics.explain()` so agents never see raw/leaky errors.
-- [ ] **Transports:** Entry points for both `--transport stdio` and `--transport http` (SSE).
+- [x] **Error Wrapping:** Every tool that connects routes failures through `diagnostics.explain()` so agents never see raw/leaky errors.
+- [x] **Transports:** Entry points for both `--transport stdio` and `--transport http` (SSE).
 
 ## Phase 6: The Setup Wizard (CLI)
 - [ ] **Interactive Prompts:** `cli.py` flow asking for scope (Global vs Repo) and the first database DSN + mode.

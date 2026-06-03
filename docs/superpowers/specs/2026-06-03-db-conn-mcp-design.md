@@ -39,10 +39,16 @@ src/db_conn_mcp/
 │   └── registry.py  # scheme -> Dialect
 ├── safety.py        # pure write-gate decision
 ├── diagnostics.py   # classify driver errors -> sanitized cause + fix
-└── server.py        # MCP Server: 8 tools + 1 prompt, transport wiring
+├── handlers.py      # the 8 tool handlers as plain async methods (transport-free)
+└── server.py        # FastMCP app: registers tools + prompt onto handlers, transport
 ```
 
-**Dependency direction:** `server` → (`config`, `safety`, `diagnostics`, `dialects/registry`) → `dialects/postgres` → `asyncpg`. `safety` and `diagnostics` are pure and import no DB driver.
+**SDK choice:** the server uses the official SDK's high-level `FastMCP` API rather than
+the low-level `mcp.server.Server` — it is radically simpler (Rule 1) and the same SDK.
+Tool *logic* lives in `handlers.py` (plain async methods) so it is unit-testable without
+a transport; `server.py` only wires those methods onto FastMCP tools/prompts.
+
+**Dependency direction:** `server` → `handlers` → (`config`, `safety`, `diagnostics`, `dialects/registry`) → `dialects/postgres` → `asyncpg`. `safety` and `diagnostics` are pure and import no DB driver.
 
 ---
 
