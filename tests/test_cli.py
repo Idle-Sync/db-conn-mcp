@@ -189,3 +189,40 @@ def test_detected_clients_only_returns_existing(tmp_path, monkeypatch):
     (tmp_path / "a.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(cli, "client_specs", lambda: [present, missing])
     assert [s.key for s in cli.detected_clients()] == ["a"]
+
+
+# ---- client selection parsing ------------------------------------------------
+
+
+def test_selection_empty_is_none():
+    assert cli.parse_client_selection("", 3) == []
+    assert cli.parse_client_selection("   ", 3) == []
+
+
+def test_selection_all_keyword():
+    assert cli.parse_client_selection("all", 3) == [0, 1, 2]
+    assert cli.parse_client_selection("ALL", 2) == [0, 1]
+
+
+def test_selection_comma_and_space_separated():
+    assert cli.parse_client_selection("1,3", 3) == [0, 2]
+    assert cli.parse_client_selection("1 3", 3) == [0, 2]
+    assert cli.parse_client_selection("2", 3) == [1]
+
+
+def test_selection_dedups_and_sorts():
+    assert cli.parse_client_selection("3,1,1", 3) == [0, 2]
+
+
+def test_selection_ignores_out_of_range_and_garbage():
+    assert cli.parse_client_selection("1, x, 9", 3) == [0]
+    assert cli.parse_client_selection("0", 3) == []  # 1-based; 0 is invalid
+
+
+def test_selection_scales_to_n_clients():
+    # Not hardcoded to 3 — works for however many clients are detected.
+    assert cli.parse_client_selection("all", 8) == [0, 1, 2, 3, 4, 5, 6, 7]
+    assert cli.parse_client_selection("2,5,8", 8) == [1, 4, 7]
+    assert cli.parse_client_selection("8", 8) == [7]
+    assert cli.parse_client_selection("9", 8) == []  # 9 out of range for 8 clients
+    assert cli.parse_client_selection("all", 0) == []  # no clients -> nothing

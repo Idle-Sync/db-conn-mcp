@@ -16,6 +16,7 @@ Only the connection *name* is ever echoed — never the DSN (Rule 6).
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -183,6 +184,25 @@ def detected_clients() -> list[ClientSpec]:
     return [s for s in client_specs() if s.path.is_file()]
 
 
+def parse_client_selection(raw: str, count: int) -> list[int]:
+    """Parse a user selection string into sorted, unique 0-based indices.
+
+    Accepts ``"all"`` (case-insensitive), comma/space-separated 1-based numbers
+    (e.g. ``"1,3"`` or ``"1 3"``), or empty for none. Out-of-range and non-numeric
+    tokens are ignored so a typo never injects into the wrong client.
+    """
+    text = raw.strip().lower()
+    if not text:
+        return []
+    if text == "all":
+        return list(range(count))
+    chosen: set[int] = set()
+    for token in re.split(r"[,\s]+", text):
+        if token.isdigit() and 1 <= int(token) <= count:
+            chosen.add(int(token) - 1)
+    return sorted(chosen)
+
+
 # ---- Interactive wizard (thin shell over the helpers) ------------------------
 
 
@@ -221,15 +241,16 @@ def _offer_injection(config_path: Path) -> None:
         return
 
     print("\nDetected MCP client config(s):")
-    for spec in detected:
-        print(f"  - {spec.label} [{spec.fmt}]: {spec.path}")
-    if not input("Inject db-conn-mcp into them? (y/N): ").strip().lower().startswith("y"):
+    for i, spec in enumerate(detected, 1):
+        print(f"  {i}. {spec.label} [{spec.fmt}]: {spec.path}")
+    raw = input("Inject db-conn-mcp into which? (e.g. 1,3 or 'all'; Enter to skip): ")
+    chosen = [detected[i] for i in parse_client_selection(raw, len(detected))]
+    if not chosen:
+        print("No clients selected. Skipping injection.")
         return
 
     args = server_args(config_path)
-    for spec in detected:
-        if not input(f"  Add to {spec.label}? (y/N): ").strip().lower().startswith("y"):
-            continue
+    for spec in chosen:
         try:
             existing = json.loads(spec.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
