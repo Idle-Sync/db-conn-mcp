@@ -73,6 +73,23 @@ def test_register_database_rejects_duplicate_name(tmp_path, monkeypatch):
         cli.register_database("repo", "dup", "postgresql://h/b", "read")
 
 
+def test_register_database_rejects_duplicate_dsn(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "first", "postgresql://u:p@h/db", "read")
+    # Same DSN under a different name should be refused, naming the existing one.
+    with pytest.raises(ValueError, match="first"):
+        cli.register_database("repo", "second", "postgresql://u:p@h/db", "write")
+
+
+def test_register_database_duplicate_dsn_error_is_sanitized(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    secret = "postgresql://u:SUPERSECRET@h/db"
+    cli.register_database("repo", "first", secret, "read")
+    with pytest.raises(ValueError) as exc:
+        cli.register_database("repo", "second", secret, "read")
+    assert "SUPERSECRET" not in str(exc.value)
+
+
 # ---- format-aware injection --------------------------------------------------
 
 

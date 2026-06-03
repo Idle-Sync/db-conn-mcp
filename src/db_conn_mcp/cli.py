@@ -76,6 +76,14 @@ def register_database(scope: Scope, name: str, dsn: str, mode: str, yolo: bool =
     cfg = config.load(str(path)) if path.is_file() else Config()
     if any(c.name == name for c in cfg.connections):
         raise ValueError(f"A connection named {name!r} already exists in {path}.")
+    # Guard against the same database registered twice. Note: only `name` is named in
+    # the error — never echo the DSN (Rule 6).
+    existing = next((c for c in cfg.connections if c.dsn == dsn), None)
+    if existing is not None:
+        raise ValueError(
+            f"That connection string is already registered as {existing.name!r}. "
+            "Use that name, or remove it first if you want to re-add it."
+        )
     cfg.connections.append(Connection(name=name, dsn=dsn, mode=mode, yolo=yolo))
     config.save(cfg, path)
     return path

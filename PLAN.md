@@ -51,7 +51,7 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 - [x] **Transports:** Entry points for both `--transport stdio` and `--transport http` (SSE).
 
 ## Phase 6: The Setup Wizard (CLI)
-- [x] **Interactive Prompts:** `cli.py` flow asking for scope (Global vs Repo) and the first database DSN + mode.
+- [x] **Interactive Prompts:** `cli.py` flow asking for scope (Global vs Repo) and the first database DSN + mode. `register_database` validates the DSN scheme and refuses both a **duplicate name** and a **duplicate connection string** (the latter naming the existing connection, never echoing the DSN). `config.load` stays permissive so the same DSN under two names/modes (e.g. a read + a write entry) remains a hand-editable advanced pattern.
 - [x] **OS-Agnostic Auto-Discovery:** Locate config files for 8 MCP clients via `ClientSpec` (key, path, format): Claude Desktop, Cursor, Agy/Antigravity (`~/.gemini/config/mcp_config.json`), Windsurf (`~/.codeium/windsurf/mcp_config.json`), Claude Code (`~/.claude.json`), Cline, VS Code, and Zed. The wizard lists the **detected** clients (config file exists) before offering to inject. *(Gemini CLI deliberately excluded — retired 2026-06-18, superseded by Agy.)*
 - [x] **Auto-Injection:** Safely read-merge-write each client's JSON in its **own format** — `mcpServers` (Claude Desktop/Cursor/Agy/Windsurf/Claude Code/Cline), `servers` + `type:stdio` (VS Code), `context_servers` + nested `command:{path,args}` + `source:custom` (Zed) — asking per client and preserving existing entries.
 
