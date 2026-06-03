@@ -12,14 +12,14 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 - [x] **.gitignore:** Python caches, `.venv`, build artifacts, and secrets (`connections.json`, `.env`).
 
 ## Phase 2: Configuration Management
-- [ ] **Models:** `models.py` — pydantic `Connection{name, dsn, mode, yolo}` and `Config{connections: [...]}`.
-- [ ] **Config Parser:** `config.py` — read and validate `connections.json` (top-level `{"connections": [...]}` object; `yolo` optional, defaults `false`).
-- [ ] **Fallback Resolution Strategy:** Implement the 3-tier lookup:
+- [x] **Models:** `models.py` — pydantic `Connection{name, dsn, mode, yolo}` and `Config{connections: [...]}`.
+- [x] **Config Parser:** `config.py` — read and validate `connections.json` (top-level `{"connections": [...]}` object; `yolo` optional, defaults `false`).
+- [x] **Fallback Resolution Strategy:** Implement the 3-tier lookup:
   1. `--config` argument
   2. `./connections.json` (repo-scoped)
   3. `~/.db-conn-mcp/connections.json` (global-scoped)
-- [ ] **Validation:** Strictly enforce the `read`/`write` mode and a known DSN scheme.
-- [ ] **Save support:** `config.py` can rewrite `connections.json` (needed by `set_yolo_mode`).
+- [x] **Validation:** Strictly enforce the `read`/`write` mode and a known DSN scheme.
+- [x] **Save support:** `config.py` can rewrite `connections.json` (needed by `set_yolo_mode`).
 
 ## Phase 3: Database Interaction Layer (Dialect Seam)
 - [ ] **Dialect ABC:** `dialects/base.py` — the contract: `connect(dsn, *, read_only)`, `list_tables`, `get_schema`, `sample_rows`, `execute`.
