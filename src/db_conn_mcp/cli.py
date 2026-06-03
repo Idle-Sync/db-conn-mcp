@@ -52,25 +52,49 @@ def server_launch(config_path: Path) -> tuple[str, list[str]]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the top-level argument parser (server flags + ``setup`` subcommand)."""
+    """Build the parser: server flags plus the management subcommands.
+
+    ``--config`` is shared (via a parent parser) so it works both before a
+    subcommand (``db-conn-mcp --config X status``) and after it
+    (``db-conn-mcp status --config X``).
+    """
+    common = argparse.ArgumentParser(add_help=False)
+    # SUPPRESS (not None) so that when --config is omitted on the subparser it does
+    # not clobber a value supplied before the subcommand (a known argparse gotcha).
+    common.add_argument(
+        "--config",
+        metavar="PATH",
+        default=argparse.SUPPRESS,
+        help="Explicit path to connections.json (overrides repo/global lookup).",
+    )
+
     parser = argparse.ArgumentParser(
         prog="db-conn-mcp",
+        parents=[common],
         description="A dead-simple, self-hosted MCP server for querying databases.",
     )
     parser.add_argument(
         "--transport",
         choices=["stdio", "http"],
         default="stdio",
-        help="MCP transport to launch (default: stdio).",
+        help="MCP transport to launch when no subcommand is given (default: stdio).",
     )
-    parser.add_argument(
-        "--config",
-        metavar="PATH",
-        default=None,
-        help="Explicit path to connections.json (overrides repo/global lookup).",
+
+    sub = parser.add_subparsers(dest="command")
+
+    def _add(name: str, help_text: str) -> argparse.ArgumentParser:
+        return sub.add_parser(name, parents=[common], help=help_text)
+
+    _add("setup", "Guided setup; shows status if already configured.")
+    _add("status", "Show configured databases and MCP client injection state.")
+    _add("add", "Add another database connection.")
+    _add("clients", "Show/inject db-conn-mcp into detected MCP clients.")
+    _add("remove", "Remove a database connection by name.").add_argument(
+        "name", help="The connection name to remove."
     )
-    subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("setup", help="Interactive wizard to register a database.")
+    p_yolo = _add("yolo", "Enable/disable yolo (write-consent bypass) for one database.")
+    p_yolo.add_argument("name", help="The database name.")
+    p_yolo.add_argument("state", choices=["on", "off"], help="Turn yolo on or off.")
     return parser
 
 
@@ -207,6 +231,16 @@ def detected_clients() -> list[ClientSpec]:
     return [s for s in client_specs() if s.path.is_file()]
 
 
+def is_injected(spec: ClientSpec, name: str = "db-conn-mcp") -> bool:
+    """Whether ``name`` is already registered under ``spec``'s container key."""
+    try:
+        data = json.loads(spec.path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    container = data.get(_CONTAINER_KEY[spec.fmt])
+    return isinstance(container, dict) and name in container
+
+
 def parse_client_selection(raw: str, count: int) -> list[int]:
     """Parse a user selection string into sorted, unique 0-based indices.
 
@@ -226,74 +260,42 @@ def parse_client_selection(raw: str, count: int) -> list[int]:
     return sorted(chosen)
 
 
-# ---- Interactive wizard (thin shell over the helpers) ------------------------
+# ---- Shared interactive building blocks --------------------------------------
 
 
-def run_setup_wizard() -> int:
-    """Interactively register a database and offer agent injection.
-
-    Transactional: *all* questions are asked first; nothing is written until the
-    very end. Ctrl+C (or EOF) at any prompt cancels cleanly with nothing saved.
-    """
+def _existing_config(config_arg: str | None) -> Path | None:
+    """Return the config path that resolves (explicit/repo/global), or None."""
     try:
-        return _wizard()
-    except (KeyboardInterrupt, EOFError):
-        print("\nSetup cancelled. Nothing was saved.")
-        return 130
+        return config.resolve_path(config_arg)
+    except config.ConfigError:
+        return None
 
 
-def _wizard() -> int:
-    print("db-conn-mcp setup")
+def _ask_scope() -> Scope:
+    """Prompt for where a brand-new config should live."""
     scope = input("Config scope - [g]lobal or [r]epo? (g/r): ").strip().lower() or "g"
-    scope_name: Scope = "repo" if scope.startswith("r") else "global"
-
-    name = input("Connection name: ").strip()
-    dsn = input("DSN (e.g. postgresql://user:pass@host:5432/db): ").strip()
-    mode = input("Mode - [r]ead or [w]rite? (r/w): ").strip().lower()
-    mode_name = "write" if mode.startswith("w") else "read"
-
-    # Validate up front so the user gets feedback before the injection questions —
-    # but DO NOT write anything yet.
-    path, cfg = _load_scope(scope_name)
-    try:
-        _ensure_new_connection(cfg, name, dsn)
-    except ValueError as exc:
-        print(f"Could not register: {exc}")
-        return 1
-
-    # Gather injection choices (still no writes — Ctrl+C here saves nothing).
-    chosen = _choose_injection_targets()
-
-    # Commit: now persist the connection, then inject into the chosen clients.
-    cfg.connections.append(Connection(name=name, dsn=dsn, mode=mode_name))
-    config.save(cfg, path)
-    # Echo only the name — never the DSN (Rule 6).
-    print(f"Registered {name!r} ({mode_name}) -> {path}")
-
-    command, args = server_launch(path)
-    for spec in chosen:
-        _inject_into_client(spec, command, args)
-    return 0
+    return "repo" if scope.startswith("r") else "global"
 
 
 def _choose_injection_targets() -> list[ClientSpec]:
-    """List detected MCP clients and return the ones the user picks (no writes)."""
+    """List detected MCP clients (flagging already-injected) and return the picks."""
     detected = detected_clients()
     if not detected:
         print(
             "\nNo MCP client configs detected (looked for: "
             + ", ".join(s.label for s in client_specs())
-            + "). Skipping injection."
+            + ")."
         )
         return []
 
     print("\nDetected MCP client config(s):")
     for i, spec in enumerate(detected, 1):
-        print(f"  {i}. {spec.label} [{spec.fmt}]: {spec.path}")
+        marker = " [already injected]" if is_injected(spec) else ""
+        print(f"  {i}. {spec.label} [{spec.fmt}]{marker}: {spec.path}")
     raw = input("Inject db-conn-mcp into which? (e.g. 1,3 or 'all'; Enter to skip): ")
     chosen = [detected[i] for i in parse_client_selection(raw, len(detected))]
     if not chosen:
-        print("No clients selected. Skipping injection.")
+        print("No clients selected.")
     return chosen
 
 
@@ -308,15 +310,187 @@ def _inject_into_client(spec: ClientSpec, command: str, args: list[str]) -> None
     print(f"  Updated {spec.label} config.")
 
 
+def _inject_clients_interactive(path: Path) -> None:
+    """Choose clients and inject the server (pointed at ``path``) into each."""
+    chosen = _choose_injection_targets()
+    command, args = server_launch(path)
+    for spec in chosen:
+        _inject_into_client(spec, command, args)
+
+
+def _add_connection_interactive(path: Path) -> bool:
+    """Prompt for one database, validate, gather injection, then commit.
+
+    Transactional: nothing is written until the end, so Ctrl+C saves nothing.
+    Returns True if a connection was added, False on a validation error.
+    """
+    cfg = config.load(str(path)) if path.is_file() else Config()
+    name = input("Connection name: ").strip()
+    dsn = input("DSN (e.g. postgresql://user:pass@host:5432/db): ").strip()
+    mode = input("Mode - [r]ead or [w]rite? (r/w): ").strip().lower()
+    mode_name = "write" if mode.startswith("w") else "read"
+
+    try:
+        _ensure_new_connection(cfg, name, dsn)
+    except ValueError as exc:
+        print(f"Could not add: {exc}")
+        return False
+
+    chosen = _choose_injection_targets()
+    cfg.connections.append(Connection(name=name, dsn=dsn, mode=mode_name))
+    config.save(cfg, path)
+    # Echo only the name — never the DSN (Rule 6).
+    print(f"Registered {name!r} ({mode_name}) -> {path}")
+    command, args = server_launch(path)
+    for spec in chosen:
+        _inject_into_client(spec, command, args)
+    return True
+
+
+def _print_status(path: Path) -> None:
+    """Print configured databases (no DSN) and per-client injection state."""
+    cfg = config.load(str(path))
+    print(f"Config: {path}")
+    print("Databases:")
+    if not cfg.connections:
+        print("  (none)")
+    for c in cfg.connections:
+        view = c.public_view()
+        print(f"  - {view['name']}  (mode={view['mode']}, yolo={view['yolo']})")
+
+    print("\nMCP clients:")
+    detected = detected_clients()
+    if not detected:
+        print("  (none detected)")
+    for spec in detected:
+        print(f"  - {spec.label}: {'injected' if is_injected(spec) else 'not injected'}")
+
+
+# ---- Command handlers --------------------------------------------------------
+
+
+def run_setup_wizard(config_arg: str | None = None) -> int:
+    """Guided setup. First run registers a database; if already configured, shows
+    status and offers follow-up actions. Ctrl+C / EOF cancels cleanly (nothing saved)."""
+    try:
+        existing = _existing_config(config_arg)
+        if existing is not None:
+            print("db-conn-mcp is already configured.\n")
+            _print_status(existing)
+            return _setup_menu(existing)
+        print("db-conn-mcp setup")
+        path = scope_to_path(_ask_scope())
+        return 0 if _add_connection_interactive(path) else 1
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled. Nothing was saved.")
+        return 130
+
+
+def _setup_menu(path: Path) -> int:
+    """Offer follow-up actions when a config already exists."""
+    while True:
+        choice = input("\nNext: [a]dd database, [c]lients, [q]uit? (a/c/q): ").strip().lower()
+        if choice.startswith("a"):
+            _add_connection_interactive(path)
+        elif choice.startswith("c"):
+            _inject_clients_interactive(path)
+        else:
+            return 0
+
+
+def cmd_status(config_arg: str | None = None) -> int:
+    """Show configured databases and MCP client injection state."""
+    path = _existing_config(config_arg)
+    if path is None:
+        print("No configuration found. Run `db-conn-mcp setup` to create one.")
+        return 1
+    _print_status(path)
+    return 0
+
+
+def cmd_add(config_arg: str | None = None) -> int:
+    """Add another database connection (creating the config if none exists yet)."""
+    try:
+        path = _existing_config(config_arg) or scope_to_path(_ask_scope())
+        return 0 if _add_connection_interactive(path) else 1
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled. Nothing was saved.")
+        return 130
+
+
+def cmd_clients(config_arg: str | None = None) -> int:
+    """Show detected MCP clients and inject db-conn-mcp into the chosen ones."""
+    path = _existing_config(config_arg)
+    if path is None:
+        print("No configuration found. Run `db-conn-mcp setup` first.")
+        return 1
+    try:
+        _inject_clients_interactive(path)
+        return 0
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled.")
+        return 130
+
+
+def cmd_remove(config_arg: str | None, name: str) -> int:
+    """Remove a database connection by name."""
+    path = _existing_config(config_arg)
+    if path is None:
+        print("No configuration found.")
+        return 1
+    cfg = config.load(str(path))
+    if not any(c.name == name for c in cfg.connections):
+        available = ", ".join(c.name for c in cfg.connections) or "(none)"
+        print(f"No connection named {name!r}. Available: {available}.")
+        return 1
+    cfg.connections = [c for c in cfg.connections if c.name != name]
+    config.save(cfg, path)
+    print(f"Removed {name!r} from {path}.")
+    return 0
+
+
+def cmd_yolo(config_arg: str | None, name: str, state: str) -> int:
+    """Enable/disable yolo (write-consent bypass) for one database, persisted."""
+    path = _existing_config(config_arg)
+    if path is None:
+        print("No configuration found.")
+        return 1
+    enabled = state == "on"
+    try:
+        updated = config.set_yolo(path, name, enabled)
+    except config.ConfigError as exc:
+        print(exc)
+        return 1
+    print(f"Set yolo={'on' if enabled else 'off'} for {name!r} (persisted to {path}).")
+    if enabled and config.get(updated, name).mode != "write":
+        print("Note: yolo only affects write-mode databases; this one is read-only.")
+    return 0
+
+
+_COMMANDS = {
+    "setup": lambda a: run_setup_wizard(a.config),
+    "status": lambda a: cmd_status(a.config),
+    "add": lambda a: cmd_add(a.config),
+    "clients": lambda a: cmd_clients(a.config),
+    "remove": lambda a: cmd_remove(a.config, a.name),
+    "yolo": lambda a: cmd_yolo(a.config, a.name, a.state),
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point (declared in ``pyproject.toml`` as ``db-conn-mcp``)."""
     args = build_parser().parse_args(argv)
-    if args.command == "setup":
-        return run_setup_wizard()
+    args.config = getattr(args, "config", None)  # SUPPRESS means it may be absent
+    if args.command in _COMMANDS:
+        return _COMMANDS[args.command](args)
+    # No subcommand -> run the server.
     try:
         server.run(transport=args.transport, config_path=args.config)
     except KeyboardInterrupt:
         return 130
+    except config.ConfigError as exc:
+        print(exc)
+        return 1
     return 0
 
 

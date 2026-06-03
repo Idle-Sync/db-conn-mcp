@@ -32,6 +32,13 @@ def _scripted_input(answers):
     return _input
 
 
+@pytest.fixture(autouse=True)
+def _isolate_global_config(tmp_path_factory, monkeypatch):
+    """Point the global config at an empty temp dir so tests never touch the real one."""
+    gdir = tmp_path_factory.mktemp("global-home")
+    monkeypatch.setattr(config, "global_config_path", lambda: gdir / "connections.json")
+
+
 # ---- argument parsing & dispatch ---------------------------------------------
 
 
@@ -52,7 +59,7 @@ def test_main_launches_server(monkeypatch):
 def test_main_setup_dispatches(monkeypatch):
     marker = {}
 
-    def fake_wizard():
+    def fake_wizard(config_arg=None):
         marker["ran"] = True
         return 0
 
@@ -60,6 +67,47 @@ def test_main_setup_dispatches(monkeypatch):
     rc = cli.main(["setup"])
     assert rc == 0
     assert marker["ran"] is True
+
+
+def test_parser_has_management_subcommands():
+    p = cli.build_parser()
+    assert p.parse_args(["status"]).command == "status"
+    assert p.parse_args(["add"]).command == "add"
+    assert p.parse_args(["clients"]).command == "clients"
+    rm = p.parse_args(["remove", "db1"])
+    assert rm.command == "remove" and rm.name == "db1"
+    yo = p.parse_args(["yolo", "db1", "on"])
+    assert yo.command == "yolo" and yo.name == "db1" and yo.state == "on"
+
+
+def test_config_flag_works_after_subcommand():
+    # --config is accepted both before and after the subcommand.
+    assert cli.build_parser().parse_args(["status", "--config", "x.json"]).config == "x.json"
+    assert cli.build_parser().parse_args(["--config", "x.json", "status"]).config == "x.json"
+
+
+def test_main_dispatches_management_commands(monkeypatch):
+    seen = {}
+
+    def fake_status(config_arg):
+        seen["status"] = config_arg
+        return 0
+
+    def fake_remove(config_arg, name):
+        seen["remove"] = name
+        return 0
+
+    def fake_yolo(config_arg, name, state):
+        seen["yolo"] = (name, state)
+        return 0
+
+    monkeypatch.setattr(cli, "cmd_status", fake_status)
+    monkeypatch.setattr(cli, "cmd_remove", fake_remove)
+    monkeypatch.setattr(cli, "cmd_yolo", fake_yolo)
+    assert cli.main(["--config", "c.json", "status"]) == 0
+    assert cli.main(["remove", "db1"]) == 0
+    assert cli.main(["yolo", "db1", "off"]) == 0
+    assert seen == {"status": "c.json", "remove": "db1", "yolo": ("db1", "off")}
 
 
 # ---- register_database (pure, writes config) ---------------------------------
@@ -300,12 +348,114 @@ def test_wizard_ctrl_c_after_db_prompts_saves_nothing(tmp_path, monkeypatch):
     assert client_cfg.read_text(encoding="utf-8") == "{}"  # client config untouched
 
 
-def test_wizard_duplicate_name_returns_1_without_saving_more(tmp_path, monkeypatch):
+def test_setup_existing_config_shows_status_and_menu(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     cli.register_database("repo", "mydb", "postgresql://h/a", "read")
     monkeypatch.setattr(cli, "detected_clients", lambda: [])
-    monkeypatch.setattr(builtins, "input", _scripted_input(["r", "mydb", "postgresql://h/b", "r"]))
-    rc = cli.run_setup_wizard()
+    # Config exists -> setup shows status, then we quit the menu.
+    monkeypatch.setattr(builtins, "input", _scripted_input(["q"]))
+    rc = cli.run_setup_wizard(str(config.repo_config_path()))
+    assert rc == 0
+    assert "mydb" in capsys.readouterr().out
+
+
+# ---- management commands -----------------------------------------------------
+
+
+def test_is_injected_detects_presence(tmp_path):
+    f = tmp_path / "c.json"
+    spec = cli.ClientSpec("x", "X", f, "mcpServers")
+    f.write_text(json.dumps({"mcpServers": {"db-conn-mcp": {}}}), encoding="utf-8")
+    assert cli.is_injected(spec) is True
+    f.write_text(json.dumps({"mcpServers": {"other": {}}}), encoding="utf-8")
+    assert cli.is_injected(spec) is False
+    # honors the per-format container key
+    vs = cli.ClientSpec("v", "V", f, "vscode")
+    f.write_text(json.dumps({"servers": {"db-conn-mcp": {}}}), encoding="utf-8")
+    assert cli.is_injected(vs) is True
+    missing = cli.ClientSpec("m", "M", tmp_path / "nope.json", "mcpServers")
+    assert cli.is_injected(missing) is False
+
+
+def test_cmd_status_lists_dbs_without_dsn(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://u:SECRET@h/a", "read")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    rc = cli.cmd_status(str(config.repo_config_path()))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "a" in out and "SECRET" not in out
+
+
+def test_cmd_status_no_config_returns_1(tmp_path):
+    assert cli.cmd_status(str(tmp_path / "nope.json")) == 1
+
+
+def test_cmd_add_appends(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    monkeypatch.setattr(builtins, "input", _scripted_input(["b", "postgresql://h/b", "r"]))
+    rc = cli.cmd_add(str(config.repo_config_path()))
+    assert rc == 0
+    cfg = config.load(str(config.repo_config_path()))
+    assert [c.name for c in cfg.connections] == ["a", "b"]
+
+
+def test_cmd_add_duplicate_name_returns_1(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "mydb", "postgresql://h/a", "read")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    monkeypatch.setattr(builtins, "input", _scripted_input(["mydb", "postgresql://h/b", "r"]))
+    rc = cli.cmd_add(str(config.repo_config_path()))
     assert rc == 1
     cfg = config.load(str(config.repo_config_path()))
-    assert [c.name for c in cfg.connections] == ["mydb"]  # unchanged
+    assert [c.name for c in cfg.connections] == ["mydb"]
+
+
+def test_cmd_remove(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    cli.register_database("repo", "b", "postgresql://h/b", "read")
+    rc = cli.cmd_remove(str(config.repo_config_path()), "a")
+    assert rc == 0
+    cfg = config.load(str(config.repo_config_path()))
+    assert [c.name for c in cfg.connections] == ["b"]
+
+
+def test_cmd_remove_unknown_returns_1(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    rc = cli.cmd_remove(str(config.repo_config_path()), "ghost")
+    assert rc == 1
+    assert [c.name for c in config.load(str(config.repo_config_path())).connections] == ["a"]
+
+
+def test_cmd_yolo_on_off(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "write")
+    p = str(config.repo_config_path())
+    assert cli.cmd_yolo(p, "a", "on") == 0
+    assert config.get(config.load(p), "a").yolo is True
+    assert cli.cmd_yolo(p, "a", "off") == 0
+    assert config.get(config.load(p), "a").yolo is False
+
+
+def test_cmd_yolo_unknown_returns_1(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "write")
+    assert cli.cmd_yolo(str(config.repo_config_path()), "ghost", "on") == 1
+
+
+def test_cmd_clients_injects_selected(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    client_cfg = tmp_path / "claude.json"
+    client_cfg.write_text("{}", encoding="utf-8")
+    fake = cli.ClientSpec("claude", "Claude Desktop", client_cfg, "mcpServers")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [fake])
+    monkeypatch.setattr(builtins, "input", _scripted_input(["1"]))  # select client #1
+    rc = cli.cmd_clients(str(config.repo_config_path()))
+    assert rc == 0
+    data = json.loads(client_cfg.read_text(encoding="utf-8"))
+    assert "db-conn-mcp" in data["mcpServers"]

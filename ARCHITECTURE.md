@@ -31,7 +31,7 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 
 | Module | Responsibility | Knows about Postgres? |
 |---|---|---|
-| `cli.py` | Parse args (`--config`, `--transport`), launch transport | No |
+| `cli.py` | Parse args (`--config`, `--transport`); run server or a management subcommand (`setup`/`status`/`add`/`clients`/`remove`/`yolo`); detect & inject MCP clients | No |
 | `config.py` | Resolve, load, validate, **and save** `connections.json` | No |
 | `models.py` | Pydantic types: `Connection{name, dsn, mode, yolo}`, `Config` | No |
 | `dialects/base.py` | The `Dialect` ABC — the extensibility contract | No |
