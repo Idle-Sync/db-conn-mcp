@@ -22,8 +22,13 @@ SCHEMES = ("postgresql", "postgres")
 #: Native, session-level read-only enforcement (the Postgres mechanism).
 _READ_ONLY_SQL = "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY"
 
-# Leading keywords whose statements return rows (so execute() shapes {columns, rows}).
-_ROW_RETURNING = ("select", "with", "values", "table", "show", "explain")
+# Leading keywords that begin a read-only, row-returning statement. This single set
+# does double duty: execute() uses it to shape the result ({columns, rows}), and the
+# read tool uses it as an allowlist (validate_read_only). The overlap is the point —
+# because every permitted read leader is row-returning, the statement runs through
+# asyncpg's extended (prepared-statement) protocol via fetch(), which refuses to run
+# more than one command. So banning non-read leaders also bans a trailing "; DELETE".
+_READ_ONLY_LEADERS = frozenset({"select", "with", "values", "table", "show", "explain"})
 
 _LIST_TABLES_SQL = """
     SELECT table_schema AS schema,
@@ -86,6 +91,26 @@ def _split_schema_table(table: str) -> tuple[str, str | None]:
     return table, None
 
 
+def _leading_keyword(sql: str) -> str:
+    """Return the first SQL keyword, lowercased, ignoring leading whitespace/comments.
+
+    Leading ``--`` line comments and ``/* */`` block comments are skipped so a query
+    like ``-- note\\nSELECT 1`` still reports ``select``. Returns ``""`` for blank or
+    comment-only input. Used both to shape results and to gate the read tool.
+    """
+    s = sql.lstrip()
+    while s:
+        if s.startswith("--"):
+            newline = s.find("\n")
+            s = "" if newline == -1 else s[newline + 1 :].lstrip()
+        elif s.startswith("/*"):
+            end = s.find("*/")
+            s = "" if end == -1 else s[end + 2 :].lstrip()
+        else:
+            break
+    return s.split(None, 1)[0].lower() if s else ""
+
+
 class PostgresDialect(Dialect):
     """``asyncpg``-backed PostgreSQL dialect."""
 
@@ -134,10 +159,30 @@ class PostgresDialect(Dialect):
         status = await conn.execute(sql)
         return {"rows_affected": _parse_affected(status)}
 
+    def validate_read_only(self, sql: str) -> None:
+        """Reject anything the read tool must not run (see :meth:`Dialect.validate_read_only`).
+
+        The bar is a single read-only, row-returning statement. Requiring a leader in
+        :data:`_READ_ONLY_LEADERS` bans ``SET`` (so the session can't be flipped out of
+        ``READ ONLY``) and every DML/DDL command; and since those leaders all route to
+        ``fetch()`` — asyncpg's extended protocol, which runs exactly one command — a
+        piggy-backed ``; DELETE ...`` is refused too. No SQL parsing, by design.
+        """
+        leader = _leading_keyword(sql)
+        if not leader:
+            raise ValueError("Empty SQL: provide a single read-only query.")
+        if leader not in _READ_ONLY_LEADERS:
+            allowed = ", ".join(sorted(_READ_ONLY_LEADERS)).upper()
+            raise ValueError(
+                f"Read query must be a single read-only statement starting with one of: "
+                f"{allowed}. Got {leader.upper()!r}. Use a write-mode database and "
+                "execute_write_query for INSERT/UPDATE/DELETE/DDL or SET."
+            )
+
     @staticmethod
     def _is_row_returning(sql: str) -> bool:
         """Heuristic: does this statement return a result set?"""
-        return sql.lstrip().split(None, 1)[0].lower() in _ROW_RETURNING if sql.strip() else False
+        return _leading_keyword(sql) in _READ_ONLY_LEADERS
 
 
 def _parse_affected(status: str) -> int:

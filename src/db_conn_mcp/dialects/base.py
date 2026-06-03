@@ -37,3 +37,14 @@ class Dialect(ABC):
     @abstractmethod
     async def execute(self, conn: Any, sql: str) -> dict:
         """Run raw SQL; return ``{columns, rows}`` or ``{rows_affected}``."""
+
+    @abstractmethod
+    def validate_read_only(self, sql: str) -> None:
+        """Raise ``ValueError`` if ``sql`` is not a single read-only statement.
+
+        Defense-in-depth for the read tool: the native read-only transaction is a
+        *session* setting an attacker-influenced query could flip (Postgres: ``SET
+        SESSION CHARACTERISTICS ... READ WRITE``) or smuggle a second statement past.
+        This pure check rejects anything that isn't one read-only, row-returning
+        statement, *before* a connection is opened.
+        """

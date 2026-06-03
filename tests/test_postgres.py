@@ -10,7 +10,11 @@ in postgres.py).
 import asyncpg
 import pytest
 
-from db_conn_mcp.dialects.postgres import PostgresDialect, _quote_identifier
+from db_conn_mcp.dialects.postgres import (
+    PostgresDialect,
+    _leading_keyword,
+    _quote_identifier,
+)
 
 
 class FakeConn:
@@ -141,3 +145,66 @@ async def test_execute_write_returns_rows_affected():
     conn = FakeConn()
     result = await PostgresDialect().execute(conn, "UPDATE users SET x = 1")
     assert result == {"rows_affected": 3}
+
+
+# ---- leading-keyword extraction (the gate's basis) ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("SELECT 1", "select"),
+        ("  \n  select 1", "select"),
+        ("WITH t AS (SELECT 1) SELECT * FROM t", "with"),
+        ("-- a comment\nSELECT 1", "select"),
+        ("/* block */ SELECT 1", "select"),
+        ("/* a */ -- b\n  values (1)", "values"),
+        ("", ""),
+        ("   ", ""),
+        ("-- only a comment", ""),
+    ],
+)
+def test_leading_keyword(sql, expected):
+    assert _leading_keyword(sql) == expected
+
+
+# ---- validate_read_only: the read-tool gate ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM users",
+        "  select 1",
+        "WITH t AS (SELECT 1) SELECT * FROM t",
+        "VALUES (1), (2)",
+        "TABLE users",
+        "SHOW search_path",
+        "EXPLAIN SELECT 1",
+        "-- comment\nSELECT 1",
+    ],
+)
+def test_validate_read_only_accepts_read_statements(sql):
+    assert PostgresDialect().validate_read_only(sql) is None
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "",
+        "   ",
+        "-- just a comment",
+        "INSERT INTO users VALUES (1)",
+        "UPDATE users SET x = 1",
+        "DELETE FROM users",
+        "DROP TABLE users",
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+        # The exact bypass from issue #1: a SET leader (flip the session) is rejected
+        # outright by the allowlist — the trailing write never gets a chance to run.
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE; DELETE FROM users",
+        "set session characteristics as transaction read write; drop table t",
+    ],
+)
+def test_validate_read_only_rejects_non_read_statements(sql):
+    with pytest.raises(ValueError):
+        PostgresDialect().validate_read_only(sql)

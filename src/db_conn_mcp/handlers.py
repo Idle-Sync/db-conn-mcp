@@ -83,8 +83,14 @@ class Handlers:
     # ---- Execution tools -----------------------------------------------------
 
     async def execute_read_query(self, database: str, sql: str) -> dict:
-        """Run a SELECT inside a native read-only transaction."""
+        """Run a single read-only statement inside a native read-only transaction.
+
+        The SQL is validated before any connection opens, so a write-ish or
+        session-flipping query (``SET ... READ WRITE``, a piggy-backed ``; DELETE``)
+        is rejected without touching the database.
+        """
         conn = config.get(self._load(), database)
+        dialect_for(conn.dsn).validate_read_only(sql)  # raises ValueError if not read-only
         dialect, db = await self._connect(conn, read_only=True)
         try:
             return await dialect.execute(db, sql)
