@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "db-conn-mcp"
 version = "0.1.0"
 description = "A dead-simple, self-hosted MCP server for securely querying databases via AI agents."
-readme = "PRD.md"
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "db-conn-mcp contributors" }]
