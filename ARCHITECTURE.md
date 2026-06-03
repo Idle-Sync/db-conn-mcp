@@ -118,7 +118,7 @@ sequenceDiagram
     Server->>Reg: dialect_for("postgresql://…")
     Reg-->>Server: PostgresDialect
     Server->>PG: connect(dsn, read_only=true)
-    PG->>DB: SET TRANSACTION READ ONLY
+    PG->>DB: SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY
     PG->>DB: query information_schema
     DB-->>Agent: [users, orders, …]
 
@@ -283,7 +283,7 @@ class Dialect(ABC):
 
 | DB | Read-only mechanism (inside `connect`) | Introspection source |
 |---|---|---|
-| PostgreSQL (v1) | `SET TRANSACTION READ ONLY` | `information_schema` |
+| PostgreSQL (v1) | `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` | `information_schema` |
 | MySQL (future) | `START TRANSACTION READ ONLY` | `information_schema` |
 | SQLite (future) | open file with `?mode=ro` | `sqlite_master` / `PRAGMA` |
 

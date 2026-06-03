@@ -98,7 +98,7 @@ class Dialect(ABC):
     @abstractmethod
     async def connect(self, dsn: str, *, read_only: bool) -> Any:
         """Open a connection. When read_only=True, enforce it natively
-        (Postgres: SET TRANSACTION READ ONLY) before returning."""
+        (Postgres: SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY) before returning."""
 
     @abstractmethod
     async def list_tables(self, conn: Any) -> list[dict]:
@@ -119,7 +119,7 @@ class Dialect(ABC):
 
 ### 5.2 PostgresDialect (`postgres.py`)
 - Driver: `asyncpg`.
-- `connect(read_only=True)`: open connection, run `SET TRANSACTION READ ONLY` (start a read-only transaction for the session) before handing it back.
+- `connect(read_only=True)`: open connection, run `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` (session-level read-only) before handing it back.
 - Introspection via `information_schema` (`tables`, `columns`, `table_constraints`/`key_column_usage` for PK/FK).
 - `sample_rows`: quote the identifier safely (validate against catalog or use `format('%I')`-style quoting via `quote_ident`); never f-string the table name raw.
 - Connection lifecycle: open-per-operation in v1 (simple, correct). A pool is an optional later optimization, not required for v1 correctness.

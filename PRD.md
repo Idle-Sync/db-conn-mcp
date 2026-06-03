@@ -19,7 +19,7 @@ Developers and power users looking for a fully open-source, easily self-hostable
   2. Repo-scoped: `./connections.json` in the current working directory.
   3. Globally scoped: `~/.db-conn-mcp/connections.json` (in the user's home directory).
 - **Explicit Access Controls (Allowlist):** Each database in the JSON config is explicitly marked as `read` or `write`. 
-- **Native Security Enforcement:** "Read-only" enforcement is done at the database transaction level (for Postgres: `SET TRANSACTION READ ONLY;`), implemented inside each dialect.
+- **Native Security Enforcement:** "Read-only" enforcement is done at the database transaction level (for Postgres: `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;`), implemented inside each dialect.
 - **Tiered Write Safety (`yolo`):** Writes to a `write`-mode DB still require **explicit per-operation user consent** by default. An optional per-database `yolo: true` flag (persisted in `connections.json`) lets a trusted DB skip that prompt. The full gate is `mode` → `yolo` → `user_consent`; `yolo`/consent can never make a `read` DB writable.
 - **Self-Diagnosing Connections (the doctor):** When a DB is unreachable, the server returns a **sanitized** diagnostic (classified cause + how to fix) instead of a raw error — and never leaks the DSN/host/credentials. Validation is lazy (the server boots even if a DB is down); a `check_database` tool probes proactively and a `troubleshoot_connection` prompt offers the full gotchas checklist.
 - **Multi-Transport Support:** `stdio` (local IDEs) and `http` (remote agents).

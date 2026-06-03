@@ -8,7 +8,7 @@ When assisting the user with the `db-conn-mcp` project, please strictly adhere t
 ## 1. Simplicity First (No Over-engineering)
 - **DO NOT** introduce complex architectures, custom OAuth servers, or JWT minting.
 - **DO NOT** use complex AST parsers to validate read vs. write queries. 
-- **DO** rely on native database features. Read-only enforcement lives inside each dialect (for Postgres v1: start the transaction with `SET TRANSACTION READ ONLY;`).
+- **DO** rely on native database features. Read-only enforcement lives inside each dialect (for Postgres v1: set the session read-only with `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;`).
 
 ## 2. Code Quality & Standards (Production Grade)
 - **Ruff:** Use `ruff` as the strict standard for all linting and formatting. Ensure all code passes `ruff check` and `ruff format`.

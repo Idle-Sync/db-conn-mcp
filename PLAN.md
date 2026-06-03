@@ -25,7 +25,7 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 - [ ] **Dialect ABC:** `dialects/base.py` — the contract: `connect(dsn, *, read_only)`, `list_tables`, `get_schema`, `sample_rows`, `execute`.
 - [ ] **Registry:** `dialects/registry.py` — map DSN scheme → `Dialect`; clear error for an unknown scheme.
 - [ ] **Postgres Dialect:** `dialects/postgres.py` — `asyncpg` connection/pool, introspection via `information_schema`.
-- [ ] **Read-Only Guard:** Inside `PostgresDialect.connect(read_only=True)`, force `SET TRANSACTION READ ONLY;`. Read-only enforcement is the dialect's own responsibility — it must never leak upward.
+- [ ] **Read-Only Guard:** Inside `PostgresDialect.connect(read_only=True)`, force `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;`. Read-only enforcement is the dialect's own responsibility — it must never leak upward.
 
 ## Phase 4: Safety & Diagnostics
 - [ ] **Write Gate:** `safety.py` — a pure decision function: `mode` (hard reject if not `write`) → `yolo` (proceed) → `user_consent` (proceed if `true`, else reject with the "show SQL, get consent" instruction).
