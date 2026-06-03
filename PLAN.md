@@ -51,9 +51,9 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 - [x] **Transports:** Entry points for both `--transport stdio` and `--transport http` (SSE).
 
 ## Phase 6: The Setup Wizard (CLI)
-- [ ] **Interactive Prompts:** `cli.py` flow asking for scope (Global vs Repo) and the first database DSN + mode.
-- [ ] **OS-Agnostic Auto-Discovery:** Locate config files for Claude Desktop (Windows/macOS) and Cursor (Windows/macOS/Linux).
-- [ ] **Auto-Injection:** Safely parse the discovered JSON configs and inject the `db-conn-mcp` execution command.
+- [x] **Interactive Prompts:** `cli.py` flow asking for scope (Global vs Repo) and the first database DSN + mode.
+- [x] **OS-Agnostic Auto-Discovery:** Locate config files for Claude Desktop (Windows/macOS/Linux) and Cursor (`~/.cursor/mcp.json`).
+- [x] **Auto-Injection:** Safely parse the discovered JSON configs and inject the `db-conn-mcp` execution command (`mcpServers` entry).
 
 ## Phase 7: Future Dialects (Post-v1, Extensibility Payoff)
 > Not part of v1. Listed to prove the seam works — each is a single new file + one registry line, no changes above the dialect layer.
