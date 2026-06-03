@@ -1,1 +1,2 @@
 90219b3  Add planning docs, architecture, project rules, and progress hook
+f8bf319  Add .gitignore and environment/dependency rules
