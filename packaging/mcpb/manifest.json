@@ -1,0 +1,51 @@
+{
+  "manifest_version": "0.4",
+  "name": "db-conn-mcp",
+  "display_name": "Database Connection MCP",
+  "version": "0.1.1",
+  "description": "Safely query your databases (PostgreSQL) with AI agents — native read-only enforcement, sanitized errors, no DSN leaks.",
+  "long_description": "A dead-simple, self-hosted MCP server for securely querying databases via AI agents. A database marked read is enforced read-only by PostgreSQL itself; writes are gated mode -> yolo -> user_consent. DSNs are never logged or returned. Distributed on PyPI and launched here via uvx.",
+  "author": {
+    "name": "Idle-Sync",
+    "url": "https://github.com/Idle-Sync/db-conn-mcp"
+  },
+  "homepage": "https://github.com/Idle-Sync/db-conn-mcp",
+  "documentation": "https://github.com/Idle-Sync/db-conn-mcp#readme",
+  "support": "https://github.com/Idle-Sync/db-conn-mcp/issues",
+  "license": "MIT",
+  "keywords": ["mcp", "database", "postgresql", "sql", "ai-agent", "read-only"],
+  "server": {
+    "type": "python",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "${__dirname}/server/main.py",
+        "--config",
+        "${user_config.connections_path}"
+      ]
+    }
+  },
+  "user_config": {
+    "connections_path": {
+      "type": "file",
+      "title": "connections.json path",
+      "description": "Path to your connections.json. Create it first with `db-conn-mcp setup`. Your DSN stays local and is never sent anywhere.",
+      "required": true
+    }
+  },
+  "tools": [
+    { "name": "list_databases", "description": "List configured databases (name, mode, yolo) — no DSN." },
+    { "name": "list_tables", "description": "List tables and views in a database." },
+    { "name": "get_table_schema", "description": "Columns, types, and primary/foreign keys for a table." },
+    { "name": "sample_table_rows", "description": "First N rows of a table." },
+    { "name": "execute_read_query", "description": "Run a SELECT in a read-only transaction." },
+    { "name": "execute_write_query", "description": "Run a mutation, gated by the safety model." },
+    { "name": "set_yolo_mode", "description": "Enable/disable yolo for one database (persisted)." },
+    { "name": "check_database", "description": "Probe connectivity; sanitized result." }
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"]
+  }
+}

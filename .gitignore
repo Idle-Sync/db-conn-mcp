@@ -25,6 +25,7 @@ dist/
 *.egg-info/
 .eggs/
 wheels/
+*.mcpb
 
 # ---- Tooling caches ----
 .ruff_cache/
