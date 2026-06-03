@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.Idle-Sync/db-conn-mcp -->
+
 # db-conn-mcp
 
 A dead-simple, self-hosted **Model Context Protocol (MCP) server for querying your databases** with AI agents (Claude, Cursor, Windsurf, VS Code, Zed, and more).
