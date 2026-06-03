@@ -61,6 +61,6 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 - [ ] **SQLite:** `dialects/sqlite.py` (`aiosqlite`), open file with `?mode=ro`, introspection via `sqlite_master` / `PRAGMA`.
 
 ## Phase 8: Distribution & Marketplaces
-- [ ] **Package Build:** Standard Python wheel (`.whl`).
-- [ ] **PyPI Publishing:** Upload so users can run `pip install db-conn-mcp`.
-- [ ] **Marketplace Submissions:** Official `modelcontextprotocol/servers` registry, Smithery.ai, Glama.ai, MCP.so.
+- [x] **Package Build:** Standard Python wheel (`.whl`) + sdist build via `python -m build` (hatchling). Verified the wheel ships all modules and the `db-conn-mcp` console-script entry point.
+- [ ] **PyPI Publishing:** Upload so users can run `pip install db-conn-mcp`. *(Deferred — requires a PyPI account/API token; run `python -m build` then `twine upload dist/*`.)*
+- [ ] **Marketplace Submissions:** Official `modelcontextprotocol/servers` registry, Smithery.ai, Glama.ai, MCP.so. *(Deferred — external account/PR steps.)*
