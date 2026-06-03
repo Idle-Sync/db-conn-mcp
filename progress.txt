@@ -1,4 +1,0 @@
-90219b3  Add planning docs, architecture, project rules, and progress hook
-f8bf319  Add .gitignore and environment/dependency rules
-9fb3027  Add consolidated design spec for db-conn-mcp v1
-9ae5442  Add v1 implementation plan; fix read-only enforcement to session-level across docs
