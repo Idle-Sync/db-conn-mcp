@@ -35,16 +35,6 @@
       "required": true
     }
   },
-  "tools": [
-    { "name": "list_databases", "description": "List configured databases (name, mode, yolo) — no DSN." },
-    { "name": "list_tables", "description": "List tables and views in a database." },
-    { "name": "get_table_schema", "description": "Columns, types, and primary/foreign keys for a table." },
-    { "name": "sample_table_rows", "description": "First N rows of a table." },
-    { "name": "execute_read_query", "description": "Run a SELECT in a read-only transaction." },
-    { "name": "execute_write_query", "description": "Run a mutation, gated by the safety model." },
-    { "name": "set_yolo_mode", "description": "Enable/disable yolo for one database (persisted)." },
-    { "name": "check_database", "description": "Probe connectivity; sanitized result." }
-  ],
   "compatibility": {
     "platforms": ["darwin", "win32", "linux"]
   }
