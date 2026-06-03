@@ -54,4 +54,9 @@ When assisting the user with the `db-conn-mcp` project, please strictly adhere t
 - **Input sanitation:** validate and safely quote any identifier (database/table/column names) before placing it into catalog/introspection queries — never naive string concatenation. Route user-supplied *values* through driver parameterization. (Raw SQL in `execute_read_query`/`execute_write_query` is intentional and governed by the `mode` → `yolo` → `user_consent` gate.)
 - **Secrets sanitation:** never commit `connections.json` or `.env` (both git-ignored); never print or log DSNs, hosts, or credentials; keep all error/diagnostic output sanitized (see Rule 6).
 
+## 10. One Concern per Tool (Separate Tools for Separate Things)
+- **Each MCP tool — and each CLI subcommand — does exactly ONE well-defined job.** Never multiplex unrelated concerns into a single tool via mode flags or overloaded parameters.
+- When a new capability is needed, **add a new tool** rather than bolting another behavior onto an existing one. Small, single-purpose tools stay independently understandable, testable, and safe — and keep the agent-facing surface predictable.
+- Example: "find columns by name" and "find a value in the data" are **two** tools, not one search tool with a switch.
+
 Follow these rules rigidly to ensure `db-conn-mcp` remains the cleanest, most straightforward open-source database MCP server available.
