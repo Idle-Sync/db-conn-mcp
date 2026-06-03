@@ -110,3 +110,25 @@ def test_cursor_path_present(monkeypatch):
     monkeypatch.setattr(cli.sys, "platform", "linux")
     paths = cli.agent_config_paths()
     assert paths["cursor"].name == "mcp.json"
+
+
+def test_agy_path_present(monkeypatch):
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    paths = cli.agent_config_paths()
+    assert "agy" in paths
+    assert paths["agy"].name == "mcp_config.json"
+    assert ".gemini" in str(paths["agy"])
+
+
+def test_detected_agent_configs_only_returns_existing(tmp_path, monkeypatch):
+    claude = tmp_path / "claude_desktop_config.json"
+    claude.write_text("{}", encoding="utf-8")
+    cursor = tmp_path / "mcp.json"  # intentionally NOT created
+    monkeypatch.setattr(cli, "agent_config_paths", lambda: {"claude": claude, "cursor": cursor})
+    detected = cli.detected_agent_configs()
+    assert detected == {"claude": claude}
+
+
+def test_detected_agent_configs_empty_when_none_exist(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "agent_config_paths", lambda: {"claude": tmp_path / "nope.json"})
+    assert cli.detected_agent_configs() == {}

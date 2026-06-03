@@ -91,7 +91,17 @@ def agent_config_paths() -> dict[str, Path]:
         claude = home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
     else:
         claude = home / ".config" / "Claude" / "claude_desktop_config.json"
-    return {"claude": claude, "cursor": home / ".cursor" / "mcp.json"}
+    return {
+        "claude": claude,
+        "cursor": home / ".cursor" / "mcp.json",
+        # Agy (Google Antigravity) — unified MCP config shared by its CLI and IDE.
+        "agy": home / ".gemini" / "config" / "mcp_config.json",
+    }
+
+
+def detected_agent_configs() -> dict[str, Path]:
+    """Like :func:`agent_config_paths`, but only clients whose config file exists."""
+    return {client: path for client, path in agent_config_paths().items() if path.is_file()}
 
 
 # ---- Interactive wizard (thin shell over the helpers) ------------------------
@@ -116,18 +126,26 @@ def run_setup_wizard() -> int:
     # Echo only the name — never the DSN (Rule 6).
     print(f"Registered {name!r} ({mode_name}) -> {path}")
 
-    if input("Inject into a detected MCP client config? (y/N): ").strip().lower().startswith("y"):
-        _inject_into_agents(path)
+    _offer_injection(path)
     return 0
 
 
-def _inject_into_agents(config_path: Path) -> None:
-    """Offer to add the server to each discoverable client config."""
+def _offer_injection(config_path: Path) -> None:
+    """Show which MCP client configs were detected, then offer to inject per client."""
+    detected = detected_agent_configs()
+    if not detected:
+        print("No MCP client configs detected (looked for Claude Desktop, Cursor). Skipping.")
+        return
+
+    print("\nDetected MCP client config(s):")
+    for client, path in detected.items():
+        print(f"  - {client}: {path}")
+    if not input("Inject db-conn-mcp into them? (y/N): ").strip().lower().startswith("y"):
+        return
+
     entry = mcp_server_entry(config_path)
-    for client, path in agent_config_paths().items():
-        if not path.is_file():
-            continue
-        if not input(f"Add to {client} config at {path}? (y/N): ").strip().lower().startswith("y"):
+    for client, path in detected.items():
+        if not input(f"  Add to {client}? (y/N): ").strip().lower().startswith("y"):
             continue
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
@@ -137,7 +155,7 @@ def _inject_into_agents(config_path: Path) -> None:
             json.dumps(inject_server(existing, "db-conn-mcp", entry), indent=2) + "\n",
             encoding="utf-8",
         )
-        print(f"Updated {client} config.")
+        print(f"  Updated {client} config.")
 
 
 def main(argv: list[str] | None = None) -> int:
