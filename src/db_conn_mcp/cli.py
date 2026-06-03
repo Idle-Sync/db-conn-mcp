@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from . import config, server
+from . import __version__, config, server
 from .dialects.registry import dialect_for
 from .handlers import Handlers
 from .models import Config, Connection
@@ -74,6 +74,13 @@ def build_parser() -> argparse.ArgumentParser:
         prog="db-conn-mcp",
         parents=[common],
         description="A dead-simple, self-hosted MCP server for querying databases.",
+    )
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=f"db-conn-mcp {__version__}",
+        help="Show the installed version and exit.",
     )
     parser.add_argument(
         "--transport",

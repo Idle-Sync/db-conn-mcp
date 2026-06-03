@@ -48,6 +48,16 @@ def test_parser_defaults_to_stdio():
     assert args.command is None
 
 
+def test_version_flag_prints_version(capsys):
+    from db_conn_mcp import __version__
+
+    for flag in ("-v", "--version"):
+        with pytest.raises(SystemExit) as exc:
+            cli.build_parser().parse_args([flag])
+        assert exc.value.code == 0
+    assert __version__ in capsys.readouterr().out
+
+
 def test_main_launches_server(monkeypatch):
     calls = {}
     monkeypatch.setattr(cli.server, "run", lambda **kw: calls.update(kw))
