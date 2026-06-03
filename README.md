@@ -12,7 +12,7 @@ It does one thing well: let an agent **safely explore and query** a database you
 
 ## Why
 
-- **Safe by construction.** A database marked `read` is enforced read-only **by PostgreSQL itself** (`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`). Even if an agent insists, a write physically cannot happen.
+- **Read stays read.** A `read` database runs every query in a native read-only transaction, *and* the read tool only accepts a single read-only statement (`SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`) — so an agent can't slip in a write or a `SET … READ WRITE` to flip the session. For a hard, privilege-level guarantee that holds no matter what, point the DSN at a **read-only database role** (see [Use a read-only role](#use-a-read-only-role-strongest-guarantee)).
 - **No secret leaks.** DSNs/passwords are never logged or returned by any tool. Connection failures come back as **sanitized diagnostics** (a category + fix), never a raw traceback with your host and credentials in it.
 - **Tiered write safety.** Writes are gated server-side: `mode` (hard, native) → `yolo` (per-database trust) → `user_consent` (explicit per-operation approval).
 - **Zero-friction setup.** An interactive wizard registers your database and injects the server into your AI client's config for you — across 8 popular clients, each in its own format.
@@ -91,7 +91,21 @@ Writes pass through three gates, **in order**:
 2. **`yolo` (persisted trust).** On a `write` database with `yolo: true`, writes proceed without prompting.
 3. **`user_consent` (per-operation).** Otherwise the agent must first read the schema, show you the exact SQL, get your "yes", and re-call with `user_consent=true`.
 
-Reads always run inside a native read-only transaction.
+Reads always run inside a native read-only transaction, **and** `execute_read_query` accepts only a single read-only statement (`SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`). That allowlist is what stops an agent from sending `SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE` to flip the session, or piggy-backing a `; DELETE …` onto a read — there's no SQL parsing involved, just a leading-keyword check plus the driver's single-command protocol.
+
+### Use a read-only role (strongest guarantee)
+
+The application-level checks above are defense-in-depth. The **hardest** boundary is a privilege one: connect with a PostgreSQL role that simply *cannot* write, so a write fails even if every layer above were bypassed. Create one per database and use its DSN for `read` connections:
+
+```sql
+CREATE ROLE agent_ro LOGIN PASSWORD '…';
+GRANT CONNECT ON DATABASE mydb TO agent_ro;
+GRANT USAGE ON SCHEMA public TO agent_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO agent_ro;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO agent_ro;
+```
+
+This is the recommended setup for any database that holds data you care about.
 
 ---
 
@@ -105,7 +119,7 @@ The server exposes **8 tools** and **1 prompt**:
 | `list_tables` | explore | Tables and views in a database. |
 | `get_table_schema` | explore | Columns, types, primary/foreign keys for a table. |
 | `sample_table_rows` | explore | First N rows of a table (default 10). |
-| `execute_read_query` | execute | Run a `SELECT` inside a read-only transaction. |
+| `execute_read_query` | execute | Run a single read-only statement (`SELECT`/`WITH`/…) inside a read-only transaction. |
 | `execute_write_query` | execute | Run a mutation — gated by the safety model above. |
 | `set_yolo_mode` | config | Enable/disable `yolo` for one database (persisted). |
 | `check_database` | doctor | Test one database (or all) → `OK` or a sanitized diagnostic. |

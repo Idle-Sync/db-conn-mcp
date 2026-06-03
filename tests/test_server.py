@@ -67,6 +67,10 @@ class FakeDialect:
     async def execute(self, conn, sql):
         return self.exec_result
 
+    def validate_read_only(self, sql):
+        # Permissive stub; the real read-only gate is covered in test_postgres.py.
+        return None
+
 
 def _patch_dialect(monkeypatch, dialect):
     # Handlers resolves the dialect via its own imported name — patch there.
