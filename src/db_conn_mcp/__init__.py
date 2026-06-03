@@ -4,4 +4,4 @@ v1 ships PostgreSQL only, built behind a ``Dialect`` seam (``dialects/``) so add
 MySQL/SQLite later is a single new file. See ``ARCHITECTURE.md`` for the full design.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
