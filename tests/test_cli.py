@@ -459,3 +459,99 @@ def test_cmd_clients_injects_selected(tmp_path, monkeypatch):
     assert rc == 0
     data = json.loads(client_cfg.read_text(encoding="utf-8"))
     assert "db-conn-mcp" in data["mcpServers"]
+
+
+# ---- uninject (clients --remove) ---------------------------------------------
+
+
+def test_remove_entry_pure():
+    out = cli.remove_entry(
+        {"mcpServers": {"db-conn-mcp": {}, "other": {}}}, "mcpServers", "db-conn-mcp"
+    )
+    assert "db-conn-mcp" not in out["mcpServers"]
+    assert "other" in out["mcpServers"]  # other entries preserved
+    # missing entry is a no-op, not an error
+    assert cli.remove_entry({}, "mcpServers", "db-conn-mcp") == {}
+
+
+def test_cmd_clients_remove_uninjects(tmp_path, monkeypatch):
+    client_cfg = tmp_path / "claude.json"
+    client_cfg.write_text(
+        json.dumps({"mcpServers": {"db-conn-mcp": {"command": "x"}, "keep": {}}}), encoding="utf-8"
+    )
+    fake = cli.ClientSpec("claude", "Claude Desktop", client_cfg, "mcpServers")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [fake])
+    monkeypatch.setattr(builtins, "input", _scripted_input(["1"]))
+    rc = cli.cmd_clients(remove=True)  # no config needed to uninject
+    assert rc == 0
+    data = json.loads(client_cfg.read_text(encoding="utf-8"))
+    assert "db-conn-mcp" not in data["mcpServers"]
+    assert "keep" in data["mcpServers"]
+
+
+def test_cmd_clients_remove_when_none_injected(tmp_path, monkeypatch):
+    client_cfg = tmp_path / "claude.json"
+    client_cfg.write_text("{}", encoding="utf-8")
+    fake = cli.ClientSpec("claude", "Claude Desktop", client_cfg, "mcpServers")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [fake])
+    rc = cli.cmd_clients(remove=True)
+    assert rc == 0  # clean no-op
+
+
+# ---- check (doctor) ----------------------------------------------------------
+
+
+def test_cmd_check_all_ok(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+
+    class FakeHandlers:
+        def __init__(self, path):
+            pass
+
+        async def check_database(self, name=None):
+            return [{"database": "a", "status": "OK"}]
+
+    monkeypatch.setattr(cli, "Handlers", FakeHandlers)
+    rc = cli.cmd_check(str(config.repo_config_path()), None)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "a" in out and "OK" in out
+
+
+def test_cmd_check_unreachable_returns_nonzero(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+
+    class FakeHandlers:
+        def __init__(self, path):
+            pass
+
+        async def check_database(self, name=None):
+            return [{"database": "a", "status": "UNREACHABLE", "detail": "[AUTH_FAILED] ..."}]
+
+    monkeypatch.setattr(cli, "Handlers", FakeHandlers)
+    rc = cli.cmd_check(str(config.repo_config_path()), None)
+    assert rc == 2
+
+
+def test_cmd_check_no_config_returns_1(tmp_path):
+    assert cli.cmd_check(str(tmp_path / "nope.json"), None) == 1
+
+
+def test_main_dispatches_clients_remove_and_check(monkeypatch):
+    seen = {}
+
+    def fake_clients(config_arg, remove=False):
+        seen["clients"] = remove
+        return 0
+
+    def fake_check(config_arg, name):
+        seen["check"] = name
+        return 0
+
+    monkeypatch.setattr(cli, "cmd_clients", fake_clients)
+    monkeypatch.setattr(cli, "cmd_check", fake_check)
+    assert cli.main(["clients", "--remove"]) == 0
+    assert cli.main(["check", "db1"]) == 0
+    assert seen == {"clients": True, "check": "db1"}

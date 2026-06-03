@@ -14,6 +14,7 @@ Only the connection *name* is ever echoed — never the DSN (Rule 6).
 """
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from typing import Literal
 
 from . import config, server
 from .dialects.registry import dialect_for
+from .handlers import Handlers
 from .models import Config, Connection
 
 Scope = Literal["global", "repo"]
@@ -88,7 +90,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add("setup", "Guided setup; shows status if already configured.")
     _add("status", "Show configured databases and MCP client injection state.")
     _add("add", "Add another database connection.")
-    _add("clients", "Show/inject db-conn-mcp into detected MCP clients.")
+    p_clients = _add("clients", "Inject (or with --remove, uninject) db-conn-mcp into MCP clients.")
+    p_clients.add_argument(
+        "--remove", action="store_true", help="Remove db-conn-mcp from clients instead of adding."
+    )
+    _add("check", "Probe connectivity for one database (or all); sanitized result.").add_argument(
+        "name", nargs="?", default=None, help="Database to check; omit to check all."
+    )
     _add("remove", "Remove a database connection by name.").add_argument(
         "name", help="The connection name to remove."
     )
@@ -174,6 +182,14 @@ def inject_entry(
 ) -> dict:
     """Insert/overwrite the server entry under the format's container key, preserving the rest."""
     existing.setdefault(_CONTAINER_KEY[fmt], {})[name] = _build_entry(fmt, command, args)
+    return existing
+
+
+def remove_entry(existing: dict, fmt: ClientFormat, name: str) -> dict:
+    """Delete the server entry from the format's container key (no-op if absent)."""
+    container = existing.get(_CONTAINER_KEY[fmt])
+    if isinstance(container, dict):
+        container.pop(name, None)
     return existing
 
 
@@ -418,18 +434,74 @@ def cmd_add(config_arg: str | None = None) -> int:
         return 130
 
 
-def cmd_clients(config_arg: str | None = None) -> int:
-    """Show detected MCP clients and inject db-conn-mcp into the chosen ones."""
-    path = _existing_config(config_arg)
-    if path is None:
-        print("No configuration found. Run `db-conn-mcp setup` first.")
-        return 1
+def cmd_clients(config_arg: str | None = None, remove: bool = False) -> int:
+    """Inject db-conn-mcp into chosen MCP clients, or uninject with ``remove=True``."""
     try:
+        if remove:
+            return _uninject_interactive()
+        path = _existing_config(config_arg)
+        if path is None:
+            print("No configuration found. Run `db-conn-mcp setup` first.")
+            return 1
         _inject_clients_interactive(path)
         return 0
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled.")
         return 130
+
+
+def _uninject_interactive() -> int:
+    """List clients that currently have db-conn-mcp and remove it from the chosen ones."""
+    injected = [s for s in detected_clients() if is_injected(s)]
+    if not injected:
+        print("db-conn-mcp is not injected into any detected MCP client.")
+        return 0
+    print("Clients with db-conn-mcp injected:")
+    for i, spec in enumerate(injected, 1):
+        print(f"  {i}. {spec.label} [{spec.fmt}]: {spec.path}")
+    raw = input("Remove db-conn-mcp from which? (e.g. 1,3 or 'all'; Enter to skip): ")
+    chosen = [injected[i] for i in parse_client_selection(raw, len(injected))]
+    if not chosen:
+        print("Nothing removed.")
+        return 0
+    for spec in chosen:
+        _uninject_from_client(spec)
+    return 0
+
+
+def _uninject_from_client(spec: ClientSpec) -> None:
+    """Remove the db-conn-mcp entry from one client's config, preserving the rest."""
+    try:
+        existing = json.loads(spec.path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    remove_entry(existing, spec.fmt, "db-conn-mcp")
+    spec.path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    print(f"  Removed from {spec.label} config.")
+
+
+def cmd_check(config_arg: str | None = None, name: str | None = None) -> int:
+    """Probe connectivity for one database (or all) and print a sanitized result.
+
+    Exit code: 0 if every probed database is reachable, 2 if any is unreachable.
+    """
+    path = _existing_config(config_arg)
+    if path is None:
+        print("No configuration found. Run `db-conn-mcp setup` first.")
+        return 1
+    try:
+        results = asyncio.run(Handlers(path).check_database(name))
+    except config.ConfigError as exc:
+        print(exc)
+        return 1
+    all_ok = True
+    for entry in results:
+        if entry["status"] == "OK":
+            print(f"  {entry['database']}: OK")
+        else:
+            all_ok = False
+            print(f"  {entry['database']}: {entry.get('detail', entry['status'])}")
+    return 0 if all_ok else 2
 
 
 def cmd_remove(config_arg: str | None, name: str) -> int:
@@ -471,7 +543,8 @@ _COMMANDS = {
     "setup": lambda a: run_setup_wizard(a.config),
     "status": lambda a: cmd_status(a.config),
     "add": lambda a: cmd_add(a.config),
-    "clients": lambda a: cmd_clients(a.config),
+    "clients": lambda a: cmd_clients(a.config, remove=a.remove),
+    "check": lambda a: cmd_check(a.config, a.name),
     "remove": lambda a: cmd_remove(a.config, a.name),
     "yolo": lambda a: cmd_yolo(a.config, a.name, a.state),
 }
