@@ -366,7 +366,9 @@ def test_setup_existing_config_shows_status_and_menu(tmp_path, monkeypatch, caps
     monkeypatch.setattr(builtins, "input", _scripted_input(["q"]))
     rc = cli.run_setup_wizard(str(config.repo_config_path()))
     assert rc == 0
-    assert "mydb" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "mydb" in out
+    assert "https://github.com/Idle-Sync/db-conn-mcp" in out
 
 
 # ---- management commands -----------------------------------------------------
