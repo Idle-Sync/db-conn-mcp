@@ -401,7 +401,12 @@ def run_setup_wizard(config_arg: str | None = None) -> int:
         if existing is not None:
             print("db-conn-mcp is already configured.\n")
             _print_status(existing)
-            return _setup_menu(existing)
+            rc = _setup_menu(existing)
+            print(
+                "⭐ Find db-conn-mcp useful? A star helps others find it: "
+                "https://github.com/Idle-Sync/db-conn-mcp"
+            )
+            return rc
         print("db-conn-mcp setup")
         path = scope_to_path(_ask_scope())
         return 0 if _add_connection_interactive(path) else 1
