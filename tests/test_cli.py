@@ -369,6 +369,23 @@ def test_setup_existing_config_shows_status_and_menu(tmp_path, monkeypatch, caps
     assert "mydb" in capsys.readouterr().out
 
 
+def test_wizard_prints_star_cta_on_success(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    monkeypatch.setattr(builtins, "input", _scripted_input(["r", "mydb", "postgresql://h/db", "r"]))
+    rc = cli.run_setup_wizard()
+    assert rc == 0
+    assert cli.REPO_URL in capsys.readouterr().out  # nudge shown the moment it worked
+
+
+def test_wizard_no_star_cta_on_cancel(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(builtins, "input", _scripted_input([KeyboardInterrupt]))
+    rc = cli.run_setup_wizard()
+    assert rc == 130
+    assert cli.REPO_URL not in capsys.readouterr().out  # cancel never asks for a star
+
+
 # ---- management commands -----------------------------------------------------
 
 
