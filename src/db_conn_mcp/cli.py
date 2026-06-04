@@ -424,7 +424,7 @@ def _print_star_cta() -> None:
     The honest version of "grow the repo": ask at the moment the tool just
     worked for someone. Never gates, blocks, or touches their GitHub account.
     """
-    print(f"\n⭐ Find db-conn-mcp useful? A star helps others find it: {REPO_URL}")
+print(f"⭐ Find db-conn-mcp useful? A star helps others find it: {REPO_URL}")
 
 
 def _setup_menu(path: Path) -> int:
