@@ -2,6 +2,8 @@
 
 # db-conn-mcp
 
+[![GitHub stars](https://img.shields.io/github/stars/Idle-Sync/db-conn-mcp?style=social)](https://github.com/Idle-Sync/db-conn-mcp/stargazers)
+
 A dead-simple, self-hosted **Model Context Protocol (MCP) server for querying your databases** with AI agents (Claude, Cursor, Windsurf, VS Code, Zed, and more).
 
 It does one thing well: let an agent **safely explore and query** a database you point it at — with security delegated to the simplest possible primitives (a static JSON file and your database's own read-only transactions), not custom auth servers or fragile SQL parsing.
@@ -197,6 +199,12 @@ pytest -q
 ```
 
 `pyproject.toml` is the single source of dependency truth. The codebase is split into single-purpose layers (`config`, `models`, `dialects/`, `safety`, `diagnostics`, `handlers`, `server`, `cli`); only the dialect layer knows a specific database exists. See [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`PRD.md`](./PRD.md), and [`PLAN.md`](./PLAN.md).
+
+---
+
+## Star this repo
+
+If db-conn-mcp saved you time, a ⭐ helps other people find it — it's the only signal that surfaces a small self-hosted tool. [Star it here.](https://github.com/Idle-Sync/db-conn-mcp/stargazers)
 
 ---
 

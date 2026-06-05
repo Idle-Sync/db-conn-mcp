@@ -38,6 +38,9 @@ ClientFormat = Literal["mcpServers", "vscode", "zed"]
 #: The console-script name declared in pyproject (its absolute path is what we inject).
 SERVER_SCRIPT = "db-conn-mcp"
 
+#: Public repository — surfaced as a one-line star nudge after a successful setup.
+REPO_URL = "https://github.com/Idle-Sync/db-conn-mcp"
+
 
 def server_launch(config_path: Path) -> tuple[str, list[str]]:
     """Return a ``(command, args)`` an MCP client can use to launch this server.
@@ -402,17 +405,26 @@ def run_setup_wizard(config_arg: str | None = None) -> int:
             print("db-conn-mcp is already configured.\n")
             _print_status(existing)
             rc = _setup_menu(existing)
-            print(
-                "⭐ Find db-conn-mcp useful? A star helps others find it: "
-                "https://github.com/Idle-Sync/db-conn-mcp"
-            )
+            _print_star_cta()
             return rc
         print("db-conn-mcp setup")
         path = scope_to_path(_ask_scope())
-        return 0 if _add_connection_interactive(path) else 1
+        if _add_connection_interactive(path):
+            _print_star_cta()
+            return 0
+        return 1
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled. Nothing was saved.")
         return 130
+
+
+def _print_star_cta() -> None:
+    """Print a one-line star nudge after setup finishes successfully.
+
+    The honest version of "grow the repo": ask at the moment the tool just
+    worked for someone. Never gates, blocks, or touches their GitHub account.
+    """
+print(f"⭐ Find db-conn-mcp useful? A star helps others find it: {REPO_URL}")
 
 
 def _setup_menu(path: Path) -> int:
