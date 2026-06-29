@@ -71,6 +71,15 @@ class Handlers:
         finally:
             await db.close()
 
+    async def get_database_schema(self, database: str) -> dict:
+        """Return every table's columns and PK/FK for one database in a single call."""
+        conn = config.get(self._load(), database)
+        dialect, db = await self._connect(conn, read_only=True)
+        try:
+            return await dialect.get_database_schema(db)
+        finally:
+            await db.close()
+
     async def sample_table_rows(self, database: str, table: str, n: int = 10) -> list[dict]:
         """Return the first ``n`` rows of a table."""
         conn = config.get(self._load(), database)

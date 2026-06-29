@@ -37,6 +37,7 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
   - `list_databases`: Return configured databases (name + mode + yolo).
   - `list_tables`: Query the DB catalog for tables/views.
   - `get_table_schema`: Query the DB catalog for column definitions.
+  - `get_database_schema`: Query the catalog for every table's columns + PK/FK in one deterministic pass.
   - `sample_table_rows`: Fetch the first 10 rows (default).
 - [x] **Execution Tools:**
   - `execute_read_query`: Raw SELECT execution inside a read-only transaction.
