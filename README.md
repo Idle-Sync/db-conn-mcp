@@ -118,7 +118,7 @@ The server exposes **11 tools** and **1 prompt**:
 | `list_databases` | explore | Configured databases (name, mode, yolo — **no DSN**). |
 | `list_tables` | explore | Tables and views in a database. |
 | `get_table_schema` | explore | Columns, types, primary/foreign keys for a table. |
-| `get_database_schema` | explore | The whole database's schema in one deterministic call: every table with columns, types, primary/foreign keys. |
+| `get_database_schema` | explore | The whole database's schema in one deterministic call: every table with columns, types, primary/foreign keys. Pass `output_dir` to write it to `{database}_schema_{UTC}.json` instead of returning it inline (recommended for large DBs). |
 | `sample_table_rows` | explore | First N rows of a table (default 10). |
 | `find_columns` | search | Find columns by name across all tables (fuzzy, case-insensitive). |
 | `search_value` | search | Find **where** a value appears across tables (fuzzy); returns table/column hits + samples. Pass `tables=[…]` to scope it. |

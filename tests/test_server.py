@@ -7,6 +7,7 @@ as sanitized diagnostics.
 """
 
 import json
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -130,8 +131,26 @@ async def test_get_database_schema_connects_read_only(cfg_path, monkeypatch):
     h = Handlers(cfg_path)
     result = await h.get_database_schema("prod")
     assert dialect.connected_read_only is True
+    assert result["database"] == "prod"
+    assert result["table_count"] == 1
     assert result["tables"][0]["name"] == "users"
     assert dialect.conn.closed is True
+
+
+async def test_get_database_schema_writes_file_when_output_dir(cfg_path, monkeypatch, tmp_path):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.get_database_schema("prod", output_dir=str(tmp_path))
+    # Summary is returned, not the (potentially huge) inline schema.
+    assert "tables" not in result
+    saved = Path(result["saved_to"])
+    assert saved.exists()
+    assert saved.name.startswith("prod_schema_") and saved.suffix == ".json"
+    written = json.loads(saved.read_text(encoding="utf-8"))
+    assert written["database"] == "prod"
+    assert written["table_count"] == 1
+    assert written["tables"][0]["name"] == "users"
 
 
 async def test_find_columns_connects_read_only(cfg_path, monkeypatch):

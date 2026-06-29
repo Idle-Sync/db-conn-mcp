@@ -59,15 +59,18 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
         return await handlers.get_table_schema(database, table)
 
     @app.tool()
-    async def get_database_schema(database: str) -> dict:
+    async def get_database_schema(database: str, output_dir: str | None = None) -> dict:
         """Get the whole database's schema at once: every table with its columns,
         types, nullability, primary key, and foreign keys.
 
-        Deterministic (tables sorted by schema/name, columns by position) so repeated
-        calls return identical output. Use this to grab the full structure in one shot
-        instead of calling get_table_schema per table.
+        The schema content is deterministic (tables sorted by schema/name, columns by
+        position). By default it is returned inline. Pass output_dir to instead WRITE it
+        to `{database}_schema_{UTC}.json` in that directory — recommended for large
+        databases whose full schema is too big to return inline — and get back the file
+        path plus a summary. Use this to grab the full structure in one shot instead of
+        calling get_table_schema per table.
         """
-        return await handlers.get_database_schema(database)
+        return await handlers.get_database_schema(database, output_dir)
 
     @app.tool()
     async def sample_table_rows(database: str, table: str, n: int = 10) -> list[dict]:
