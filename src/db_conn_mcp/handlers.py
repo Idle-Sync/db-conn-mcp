@@ -8,11 +8,23 @@ Every method that opens a connection routes failures through
 DSN never appears in any result (Rule 6).
 """
 
+import json
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import config, diagnostics, safety
 from .dialects.registry import dialect_for
+
+
+def _safe_filename_stem(name: str) -> str:
+    """Make a connection name safe to embed in a filename (Rule 9 spirit).
+
+    Replaces anything outside ``[A-Za-z0-9._-]`` with ``_`` so a connection name can
+    never escape the intended directory or produce an odd path.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name) or "database"
 
 
 def _format_diagnostic(diag: dict) -> str:
@@ -70,6 +82,45 @@ class Handlers:
             return await dialect.get_schema(db, table)
         finally:
             await db.close()
+
+    async def get_database_schema(self, database: str, output_dir: str | None = None) -> dict:
+        """Return every table's columns and PK/FK for one database in a single call.
+
+        Without ``output_dir`` the schema is returned inline as
+        ``{database, generated_utc, table_count, tables}``. With ``output_dir`` set, the
+        same payload is written to ``{database}_schema_{UTC}.json`` in that directory and
+        a small summary ``{saved_to, database, generated_utc, table_count}`` is returned
+        instead — useful for large databases whose full schema is too big to return
+        inline. The schema content is deterministic; only ``generated_utc`` (and the
+        filename) vary per run.
+        """
+        conn = config.get(self._load(), database)
+        dialect, db = await self._connect(conn, read_only=True)
+        try:
+            schema = await dialect.get_database_schema(db)
+        finally:
+            await db.close()
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        payload = {
+            "database": database,
+            "generated_utc": stamp,
+            "table_count": len(schema["tables"]),
+            "tables": schema["tables"],
+        }
+        if output_dir is None:
+            return payload
+
+        out = Path(output_dir).expanduser()
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"{_safe_filename_stem(database)}_schema_{stamp}.json"
+        path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        return {
+            "saved_to": str(path),
+            "database": database,
+            "generated_utc": stamp,
+            "table_count": payload["table_count"],
+        }
 
     async def sample_table_rows(self, database: str, table: str, n: int = 10) -> list[dict]:
         """Return the first ``n`` rows of a table."""

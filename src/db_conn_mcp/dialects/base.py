@@ -31,6 +31,16 @@ class Dialect(ABC):
         """Return columns, types, nullability, and PK/FK for one table."""
 
     @abstractmethod
+    async def get_database_schema(self, conn: Any) -> dict:
+        """Return the whole database's schema in one deterministic pass.
+
+        Returns ``{"tables": [{schema, name, columns, primary_key, foreign_keys}]}``
+        covering every non-system base table, with columns ordered by position and
+        tables ordered by ``schema, name`` so repeated runs are byte-identical. No
+        user-supplied identifiers are involved, so there is no injection surface.
+        """
+
+    @abstractmethod
     async def sample_rows(self, conn: Any, table: str, n: int = 10) -> list[dict]:
         """Return the first ``n`` rows. The identifier MUST be safely quoted (Rule 9)."""
 

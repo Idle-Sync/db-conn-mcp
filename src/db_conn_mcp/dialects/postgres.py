@@ -68,6 +68,45 @@ _KEYS_SQL = """
 """
 
 
+#: Every column of every non-system base table, ordered for byte-stable output.
+_DB_COLUMNS_SQL = """
+    SELECT c.table_schema AS schema,
+           c.table_name   AS table,
+           c.column_name  AS name,
+           c.data_type    AS type,
+           (c.is_nullable = 'YES') AS nullable,
+           c.column_default AS default
+    FROM information_schema.columns c
+    JOIN information_schema.tables t
+      ON t.table_schema = c.table_schema
+     AND t.table_name = c.table_name
+     AND t.table_type = 'BASE TABLE'
+    WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY c.table_schema, c.table_name, c.ordinal_position
+"""
+
+#: Every PK/FK column of every base table (FK target as "table.column"), stably ordered.
+_DB_KEYS_SQL = """
+    SELECT tc.table_schema AS schema,
+           tc.table_name   AS table,
+           kcu.column_name AS column,
+           tc.constraint_type AS constraint_type,
+           CASE WHEN tc.constraint_type = 'FOREIGN KEY'
+                THEN ccu.table_name || '.' || ccu.column_name
+                ELSE NULL END AS references
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON kcu.constraint_name = tc.constraint_name
+     AND kcu.constraint_schema = tc.constraint_schema
+    LEFT JOIN information_schema.constraint_column_usage ccu
+      ON ccu.constraint_name = tc.constraint_name
+     AND ccu.constraint_schema = tc.constraint_schema
+    WHERE tc.table_schema NOT IN ('pg_catalog', 'information_schema')
+      AND tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY')
+    ORDER BY tc.table_schema, tc.table_name, tc.constraint_type, kcu.ordinal_position
+"""
+
+
 #: Fuzzy column-name search (Tool A). ``$1`` is the parameterized pattern.
 _FIND_COLUMNS_SQL = """
     SELECT table_schema AS schema,
@@ -202,6 +241,51 @@ class PostgresDialect(Dialect):
             "primary_key": primary_key,
             "foreign_keys": foreign_keys,
         }
+
+    async def get_database_schema(self, conn: Any) -> dict:
+        """Assemble the whole-database schema from two ordered catalog scans.
+
+        One pass over columns and one over key constraints, both pre-sorted by the
+        query, are stitched into ``{table -> {columns, primary_key, foreign_keys}}``.
+        Dict insertion order preserves the SQL ``ORDER BY``, so the result is
+        deterministic across runs. Pure assembly — no identifiers are interpolated.
+        """
+        col_rows = await conn.fetch(_DB_COLUMNS_SQL)
+        key_rows = await conn.fetch(_DB_KEYS_SQL)
+
+        tables: dict[tuple[str, str], dict] = {}
+        for r in col_rows:
+            d = dict(r)
+            entry = tables.get((d["schema"], d["table"]))
+            if entry is None:
+                entry = {
+                    "schema": d["schema"],
+                    "name": d["table"],
+                    "columns": [],
+                    "primary_key": [],
+                    "foreign_keys": [],
+                }
+                tables[(d["schema"], d["table"])] = entry
+            entry["columns"].append(
+                {
+                    "name": d["name"],
+                    "type": d["type"],
+                    "nullable": d["nullable"],
+                    "default": d["default"],
+                }
+            )
+
+        for r in key_rows:
+            d = dict(r)
+            entry = tables.get((d["schema"], d["table"]))
+            if entry is None:  # a constraint on something without listed columns — skip
+                continue
+            if d["constraint_type"] == "PRIMARY KEY":
+                entry["primary_key"].append(d["column"])
+            else:
+                entry["foreign_keys"].append({"column": d["column"], "references": d["references"]})
+
+        return {"tables": list(tables.values())}
 
     async def sample_rows(self, conn: Any, table: str, n: int = 10) -> list[dict]:
         limit = max(0, int(n))  # coerce to a safe non-negative int (never interpolate raw)

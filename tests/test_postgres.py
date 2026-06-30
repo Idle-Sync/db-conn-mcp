@@ -135,6 +135,97 @@ async def test_get_schema_shape():
     assert result["foreign_keys"] == [{"column": "org_id", "references": "orgs.id"}]
 
 
+async def test_get_database_schema_groups_columns_and_keys():
+    columns = [
+        {
+            "schema": "public",
+            "table": "orgs",
+            "name": "id",
+            "type": "integer",
+            "nullable": False,
+            "default": None,
+        },
+        {
+            "schema": "public",
+            "table": "users",
+            "name": "id",
+            "type": "integer",
+            "nullable": False,
+            "default": None,
+        },
+        {
+            "schema": "public",
+            "table": "users",
+            "name": "org_id",
+            "type": "integer",
+            "nullable": True,
+            "default": None,
+        },
+    ]
+    keys = [
+        {
+            "schema": "public",
+            "table": "orgs",
+            "column": "id",
+            "constraint_type": "PRIMARY KEY",
+            "references": None,
+        },
+        {
+            "schema": "public",
+            "table": "users",
+            "column": "id",
+            "constraint_type": "PRIMARY KEY",
+            "references": None,
+        },
+        {
+            "schema": "public",
+            "table": "users",
+            "column": "org_id",
+            "constraint_type": "FOREIGN KEY",
+            "references": "orgs.id",
+        },
+    ]
+    conn = FakeConn([columns, keys])
+    result = await PostgresDialect().get_database_schema(conn)
+    assert [t["name"] for t in result["tables"]] == ["orgs", "users"]  # insertion order kept
+    users = next(t for t in result["tables"] if t["name"] == "users")
+    assert users["columns"] == [
+        {"name": "id", "type": "integer", "nullable": False, "default": None},
+        {"name": "org_id", "type": "integer", "nullable": True, "default": None},
+    ]
+    assert users["primary_key"] == ["id"]
+    assert users["foreign_keys"] == [{"column": "org_id", "references": "orgs.id"}]
+    # base-table filter is applied in SQL, not Python
+    assert "BASE TABLE" in conn.fetched[0]
+
+
+async def test_get_database_schema_orders_deterministically():
+    # Columns query is ORDER BY-ed; a key for an unknown table is ignored, not crashed.
+    columns = [
+        {
+            "schema": "public",
+            "table": "a",
+            "name": "id",
+            "type": "integer",
+            "nullable": False,
+            "default": None,
+        },
+    ]
+    keys = [
+        {
+            "schema": "public",
+            "table": "ghost",
+            "column": "x",
+            "constraint_type": "PRIMARY KEY",
+            "references": None,
+        },
+    ]
+    conn = FakeConn([columns, keys])
+    result = await PostgresDialect().get_database_schema(conn)
+    assert [t["name"] for t in result["tables"]] == ["a"]
+    assert result["tables"][0]["primary_key"] == []
+
+
 async def test_sample_rows_quotes_identifier_and_limits():
     conn = FakeConn([[{"id": 1}]])
     await PostgresDialect().sample_rows(conn, "users", n=5)

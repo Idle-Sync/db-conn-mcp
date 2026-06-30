@@ -7,6 +7,7 @@ as sanitized diagnostics.
 """
 
 import json
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -61,6 +62,19 @@ class FakeDialect:
     async def get_schema(self, conn, table):
         return {"table": table, "columns": [], "primary_key": [], "foreign_keys": []}
 
+    async def get_database_schema(self, conn):
+        return {
+            "tables": [
+                {
+                    "schema": "public",
+                    "name": "users",
+                    "columns": [],
+                    "primary_key": [],
+                    "foreign_keys": [],
+                }
+            ]
+        }
+
     async def sample_rows(self, conn, table, n=10):
         return [{"id": 1}]
 
@@ -109,6 +123,34 @@ async def test_list_tables_connects_read_only(cfg_path, monkeypatch):
     assert dialect.connected_read_only is True
     assert result[0]["name"] == "users"
     assert dialect.conn.closed is True
+
+
+async def test_get_database_schema_connects_read_only(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.get_database_schema("prod")
+    assert dialect.connected_read_only is True
+    assert result["database"] == "prod"
+    assert result["table_count"] == 1
+    assert result["tables"][0]["name"] == "users"
+    assert dialect.conn.closed is True
+
+
+async def test_get_database_schema_writes_file_when_output_dir(cfg_path, monkeypatch, tmp_path):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.get_database_schema("prod", output_dir=str(tmp_path))
+    # Summary is returned, not the (potentially huge) inline schema.
+    assert "tables" not in result
+    saved = Path(result["saved_to"])
+    assert saved.exists()
+    assert saved.name.startswith("prod_schema_") and saved.suffix == ".json"
+    written = json.loads(saved.read_text(encoding="utf-8"))
+    assert written["database"] == "prod"
+    assert written["table_count"] == 1
+    assert written["tables"][0]["name"] == "users"
 
 
 async def test_find_columns_connects_read_only(cfg_path, monkeypatch):
@@ -232,6 +274,6 @@ async def test_tool_connect_failure_is_sanitized(cfg_path, monkeypatch):
 
 
 def test_build_server_smoke(cfg_path):
-    # The FastMCP app builds and exposes the 8 tools + 1 prompt without error.
+    # The FastMCP app builds and exposes the 11 tools + 1 prompt without error.
     app = server.build_server(cfg_path)
     assert app is not None

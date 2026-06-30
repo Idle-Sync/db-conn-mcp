@@ -1,4 +1,4 @@
-"""The MCP server: 10 tools + 1 prompt, plus transport wiring (FastMCP).
+"""The MCP server: 11 tools + 1 prompt, plus transport wiring (FastMCP).
 
 Knows nothing about PostgreSQL. It wires the pure/abstract layers together: the
 :class:`~db_conn_mcp.handlers.Handlers` service (which uses ``config``, the dialect
@@ -37,7 +37,7 @@ Database connection troubleshooting checklist:
 
 
 def build_server(config_path: Path | str | None = None) -> FastMCP:
-    """Construct the FastMCP app with all 10 tools and the troubleshoot prompt."""
+    """Construct the FastMCP app with all 11 tools and the troubleshoot prompt."""
     resolved = resolve_path(str(config_path) if config_path else None)
     handlers = Handlers(resolved)
     app = FastMCP("db-conn-mcp")
@@ -57,6 +57,20 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
     async def get_table_schema(database: str, table: str) -> dict:
         """Get columns, types, and primary/foreign keys for a table."""
         return await handlers.get_table_schema(database, table)
+
+    @app.tool()
+    async def get_database_schema(database: str, output_dir: str | None = None) -> dict:
+        """Get the whole database's schema at once: every table with its columns,
+        types, nullability, primary key, and foreign keys.
+
+        The schema content is deterministic (tables sorted by schema/name, columns by
+        position). By default it is returned inline. Pass output_dir to instead WRITE it
+        to `{database}_schema_{UTC}.json` in that directory — recommended for large
+        databases whose full schema is too big to return inline — and get back the file
+        path plus a summary. Use this to grab the full structure in one shot instead of
+        calling get_table_schema per table.
+        """
+        return await handlers.get_database_schema(database, output_dir)
 
     @app.tool()
     async def sample_table_rows(database: str, table: str, n: int = 10) -> list[dict]:
