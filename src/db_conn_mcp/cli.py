@@ -614,7 +614,8 @@ def _explain_stdio_misuse() -> int:
         "  db-conn-mcp status    Show configured databases and client injection state\n"
         "  db-conn-mcp --help    See all commands\n\n"
         "To run the server yourself anyway, pipe MCP JSON-RPC into it, or use "
-        "`--transport http` for an HTTP/SSE server.",
+        "`--transport http` for an HTTP/SSE server.\n\n"
+        f"⭐ Find db-conn-mcp useful? A star helps others find it: {REPO_URL}",
         file=sys.stderr,
     )
     return 1
