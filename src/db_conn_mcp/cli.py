@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from . import __version__, config, server
+from . import __commit__, __version__, config, server
 from .dialects.registry import dialect_for
 from .handlers import Handlers
 from .models import Config, Connection
@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-v",
         "--version",
         action="version",
-        version=f"db-conn-mcp {__version__}",
+        version=f"db-conn-mcp {__version__} ({__commit__})",
         help="Show the installed version and exit.",
     )
     parser.add_argument(

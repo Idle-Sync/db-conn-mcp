@@ -23,6 +23,10 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Stamp the release commit into the package
+        # Record the exact commit this wheel is built from so `db-conn-mcp -v`
+        # reports it on any device. GITHUB_SHA is the tagged release commit.
+        run: sed -i "s/^__commit__ = .*/__commit__ = \"${GITHUB_SHA}\"/" src/db_conn_mcp/__init__.py
       - name: Build wheel and sdist
         run: |
           python -m pip install --upgrade build

@@ -49,13 +49,15 @@ def test_parser_defaults_to_stdio():
 
 
 def test_version_flag_prints_version(capsys):
-    from db_conn_mcp import __version__
+    from db_conn_mcp import __commit__, __version__
 
     for flag in ("-v", "--version"):
         with pytest.raises(SystemExit) as exc:
             cli.build_parser().parse_args([flag])
         assert exc.value.code == 0
-    assert __version__ in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert __version__ in out
+    assert __commit__ in out
 
 
 def test_main_launches_server(monkeypatch):

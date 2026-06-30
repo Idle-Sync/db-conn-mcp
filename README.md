@@ -150,7 +150,7 @@ The server exposes **11 tools** and **1 prompt**:
 | `db-conn-mcp remove <name>` | Remove one connection. |
 | `db-conn-mcp reset` | Remove **all** connections (delete `connections.json`) — fresh slate. |
 | `db-conn-mcp yolo <name> on\|off` | Toggle `yolo` for one database. |
-| `db-conn-mcp -v` / `--version` | Print the installed version and exit. |
+| `db-conn-mcp -v` / `--version` | Print the installed version and the exact build commit, then exit. |
 
 `--config <path>` works before or after any subcommand.
 
