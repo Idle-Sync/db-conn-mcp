@@ -424,7 +424,7 @@ def _print_star_cta() -> None:
     The honest version of "grow the repo": ask at the moment the tool just
     worked for someone. Never gates, blocks, or touches their GitHub account.
     """
-print(f"⭐ Find db-conn-mcp useful? A star helps others find it: {REPO_URL}")
+    print(f"⭐ Find db-conn-mcp useful? A star helps others find it: {REPO_URL}")
 
 
 def _setup_menu(path: Path) -> int:
@@ -595,19 +595,50 @@ _COMMANDS = {
 }
 
 
+def _explain_stdio_misuse() -> int:
+    """Explain the bare stdio server to a human who launched it from a terminal.
+
+    The stdio MCP server reads JSON-RPC from stdin and would block forever with no
+    output — indistinguishable from a hang — when there is nothing on the other end.
+    A real MCP client launches it with stdin wired to a pipe (not a TTY), so we only
+    reach here when a person ran ``db-conn-mcp`` by hand. Point them at the commands
+    they almost certainly meant. Guidance goes to stderr so it never pollutes the
+    stdout protocol channel.
+    """
+    print(
+        "db-conn-mcp speaks the MCP protocol over stdio and is meant to be launched by "
+        "an MCP client (Claude Desktop, Cursor, VS Code, ...), not run directly in a "
+        "terminal — doing so just blocks waiting for JSON-RPC on stdin.\n\n"
+        "Did you mean one of these?\n"
+        "  db-conn-mcp setup     Guided setup (register a database, wire up clients)\n"
+        "  db-conn-mcp status    Show configured databases and client injection state\n"
+        "  db-conn-mcp --help    See all commands\n\n"
+        "To run the server yourself anyway, pipe MCP JSON-RPC into it, or use "
+        "`--transport http` for an HTTP/SSE server.\n\n"
+        f"⭐ Find db-conn-mcp useful? A star helps others find it: {REPO_URL}",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point (declared in ``pyproject.toml`` as ``db-conn-mcp``)."""
     args = build_parser().parse_args(argv)
     args.config = getattr(args, "config", None)  # SUPPRESS means it may be absent
     if args.command in _COMMANDS:
         return _COMMANDS[args.command](args)
-    # No subcommand -> run the server.
+    # No subcommand -> run the server. An interactive terminal means a human ran it by
+    # hand; the stdio server would hang silently on stdin, so explain instead (http is a
+    # legitimate long-running foreground server and never reads stdin).
+    if args.transport == "stdio" and sys.stdin.isatty():
+        return _explain_stdio_misuse()
     try:
         server.run(transport=args.transport, config_path=args.config)
     except KeyboardInterrupt:
         return 130
     except config.ConfigError as exc:
-        print(exc)
+        # Server-path diagnostics go to stderr — stdout is the MCP protocol channel.
+        print(exc, file=sys.stderr)
         return 1
     return 0
 
