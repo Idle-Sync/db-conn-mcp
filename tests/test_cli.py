@@ -66,6 +66,45 @@ def test_main_launches_server(monkeypatch):
     assert calls == {"transport": "http", "config_path": "/tmp/c.json"}
 
 
+def test_main_stdio_on_tty_explains_instead_of_hanging(monkeypatch, capsys):
+    """A human running the bare stdio server in a terminal gets guidance, not a hang."""
+    ran = {"server": False}
+    monkeypatch.setattr(cli.server, "run", lambda **kw: ran.update(server=True))
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    rc = cli.main([])
+    assert rc == 1
+    assert ran["server"] is False  # server never started -> cannot block on stdin
+    captured = capsys.readouterr()
+    assert "setup" in captured.err  # guidance points at the real commands
+    assert captured.out == ""  # nothing on the stdout protocol channel
+
+
+def test_main_stdio_with_piped_stdin_launches_server(monkeypatch):
+    """When stdin is a pipe (a real MCP client), the stdio server runs normally."""
+    calls = {}
+    monkeypatch.setattr(cli.server, "run", lambda **kw: calls.update(kw))
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    rc = cli.main([])
+    assert rc == 0
+    assert calls == {"transport": "stdio", "config_path": None}
+
+
+def test_main_http_on_tty_still_runs_server(monkeypatch):
+    """http is a legitimate foreground server; a TTY must not block it."""
+    calls = {}
+    monkeypatch.setattr(cli.server, "run", lambda **kw: calls.update(kw))
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    rc = cli.main(["--transport", "http"])
+    assert rc == 0
+    assert calls == {"transport": "http", "config_path": None}
+
+
+def test_star_cta_prints_only_when_called(capsys):
+    """The star nudge fires from its function — never as a side effect of import."""
+    cli._print_star_cta()
+    assert cli.REPO_URL in capsys.readouterr().out
+
+
 def test_main_setup_dispatches(monkeypatch):
     marker = {}
 

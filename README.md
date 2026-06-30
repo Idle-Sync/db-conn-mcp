@@ -138,7 +138,7 @@ The server exposes **10 tools** and **1 prompt**:
 
 | Command | What it does |
 |---------|--------------|
-| `db-conn-mcp` | Run the server over **stdio** (the default an MCP client uses). |
+| `db-conn-mcp` | Run the server over **stdio** (the default an MCP client uses). Run directly in a terminal it prints guidance and exits — it does not hang. |
 | `db-conn-mcp --transport http` | Run over **HTTP (SSE)** instead. |
 | `db-conn-mcp setup` | Guided setup; shows status + an action menu if already configured. |
 | `db-conn-mcp status` | List configured databases and which clients have the server injected. |
