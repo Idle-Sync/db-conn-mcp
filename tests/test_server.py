@@ -44,9 +44,11 @@ class FakeConn:
 class FakeDialect:
     """Records how it was connected and serves canned results."""
 
-    def __init__(self, *, raise_on_connect=None, exec_result=None):
+    def __init__(self, *, raise_on_connect=None, exec_result=None, dump_result=None):
         self.raise_on_connect = raise_on_connect
         self.exec_result = exec_result or {"columns": [], "rows": []}
+        self.dump_result = dump_result or {"status": "ok", "ddl": "-- pg_dump\nCREATE TABLE x();"}
+        self.dumped_dsn = None
         self.connected_read_only = None
         self.conn = FakeConn()
 
@@ -74,6 +76,13 @@ class FakeDialect:
                 }
             ]
         }
+
+    async def get_database_ddl(self, conn):
+        return "-- self-contained\nCREATE TABLE public.users (\n    id integer NOT NULL\n);"
+
+    async def dump_schema_sql(self, dsn):
+        self.dumped_dsn = dsn
+        return self.dump_result
 
     async def sample_rows(self, conn, table, n=10):
         return [{"id": 1}]
@@ -151,6 +160,65 @@ async def test_get_database_schema_writes_file_when_output_dir(cfg_path, monkeyp
     assert written["database"] == "prod"
     assert written["table_count"] == 1
     assert written["tables"][0]["name"] == "users"
+
+
+async def test_get_database_schema_sql_returns_ddl_inline(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.get_database_schema("prod", format="sql")
+    assert result["format"] == "sql"
+    assert "CREATE TABLE public.users" in result["ddl"]
+    assert "tables" not in result  # SQL form carries ddl, not the JSON table list
+    assert dialect.connected_read_only is True
+    assert dialect.conn.closed is True
+
+
+async def test_get_database_schema_sql_writes_sql_file(cfg_path, monkeypatch, tmp_path):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.get_database_schema("prod", output_dir=str(tmp_path), format="sql")
+    assert "ddl" not in result
+    saved = Path(result["saved_to"])
+    assert saved.exists() and saved.suffix == ".sql"
+    assert saved.name.startswith("prod_schema_")
+    assert "CREATE TABLE public.users" in saved.read_text(encoding="utf-8")
+
+
+async def test_get_database_schema_rejects_unknown_format(cfg_path, monkeypatch):
+    _patch_dialect(monkeypatch, FakeDialect())
+    h = Handlers(cfg_path)
+    with pytest.raises(ValueError, match="json.*sql"):
+        await h.get_database_schema("prod", format="yaml")
+
+
+async def test_dump_schema_faithful_returns_ddl_inline(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.dump_schema_faithful("prod")
+    assert result["status"] == "ok"
+    assert "CREATE TABLE x()" in result["ddl"]
+    # the dialect receives the DSN, but the tool result never echoes it
+    assert dialect.dumped_dsn == "postgresql://u:SECRET@h/prod"
+
+
+async def test_dump_schema_faithful_writes_sql_file(cfg_path, monkeypatch, tmp_path):
+    _patch_dialect(monkeypatch, FakeDialect())
+    h = Handlers(cfg_path)
+    result = await h.dump_schema_faithful("prod", output_dir=str(tmp_path))
+    saved = Path(result["saved_to"])
+    assert saved.exists() and saved.suffix == ".sql"
+    assert "ddl" not in result
+
+
+async def test_dump_schema_faithful_passes_through_not_found(cfg_path, monkeypatch):
+    dialect = FakeDialect(dump_result={"status": "pg_dump_not_found", "message": "install it"})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.dump_schema_faithful("prod")
+    assert result == {"status": "pg_dump_not_found", "message": "install it"}
 
 
 async def test_find_columns_connects_read_only(cfg_path, monkeypatch):

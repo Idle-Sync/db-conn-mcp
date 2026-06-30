@@ -83,25 +83,46 @@ class Handlers:
         finally:
             await db.close()
 
-    async def get_database_schema(self, database: str, output_dir: str | None = None) -> dict:
-        """Return every table's columns and PK/FK for one database in a single call.
+    async def get_database_schema(
+        self, database: str, output_dir: str | None = None, format: str = "json"
+    ) -> dict:
+        """Return the whole database's schema in one call, as JSON or runnable SQL DDL.
 
-        Without ``output_dir`` the schema is returned inline as
-        ``{database, generated_utc, table_count, tables}``. With ``output_dir`` set, the
-        same payload is written to ``{database}_schema_{UTC}.json`` in that directory and
-        a small summary ``{saved_to, database, generated_utc, table_count}`` is returned
-        instead — useful for large databases whose full schema is too big to return
-        inline. The schema content is deterministic; only ``generated_utc`` (and the
-        filename) vary per run.
+        ``format="json"`` (default) returns ``{database, generated_utc, table_count,
+        tables}`` — every table's columns and PK/FK. ``format="sql"`` returns a
+        self-contained DDL script under ``ddl`` that recreates the schema (tables,
+        columns, sequences, PK/FK/UNIQUE/CHECK, indexes, trigger functions, triggers).
+
+        With ``output_dir`` set, the payload is instead written to
+        ``{database}_schema_{UTC}.{json,sql}`` in that directory and a small summary with
+        ``saved_to`` is returned — useful for large schemas too big to return inline. The
+        content is deterministic; only ``generated_utc`` (and the filename) vary per run.
         """
+        if format not in ("json", "sql"):
+            raise ValueError("format must be 'json' or 'sql'.")
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            schema = await dialect.get_database_schema(db)
+            if format == "sql":
+                ddl = await dialect.get_database_ddl(db)
+            else:
+                schema = await dialect.get_database_schema(db)
         finally:
             await db.close()
 
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+        if format == "sql":
+            if output_dir is None:
+                return {"database": database, "generated_utc": stamp, "format": "sql", "ddl": ddl}
+            path = self._write_export(output_dir, database, stamp, "sql", ddl)
+            return {
+                "saved_to": str(path),
+                "database": database,
+                "generated_utc": stamp,
+                "format": "sql",
+            }
+
         payload = {
             "database": database,
             "generated_utc": stamp,
@@ -110,17 +131,45 @@ class Handlers:
         }
         if output_dir is None:
             return payload
-
-        out = Path(output_dir).expanduser()
-        out.mkdir(parents=True, exist_ok=True)
-        path = out / f"{_safe_filename_stem(database)}_schema_{stamp}.json"
-        path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        path = self._write_export(
+            output_dir, database, stamp, "json", json.dumps(payload, indent=2, default=str)
+        )
         return {
             "saved_to": str(path),
             "database": database,
             "generated_utc": stamp,
             "table_count": payload["table_count"],
         }
+
+    async def dump_schema_faithful(self, database: str, output_dir: str | None = None) -> dict:
+        """Faithful schema dump via the database's native tool (Postgres: ``pg_dump``).
+
+        Returns the DDL inline under ``ddl`` (or writes ``{database}_schema_{UTC}.sql`` and
+        returns ``saved_to`` when ``output_dir`` is set). If the native tool isn't
+        installed, returns ``{status: "pg_dump_not_found", message}`` with install
+        guidance so the caller can offer to install it; failures come back sanitized.
+        """
+        conn = config.get(self._load(), database)
+        dialect = dialect_for(conn.dsn)
+        result = await dialect.dump_schema_sql(conn.dsn)
+        if result.get("status") != "ok":
+            return result  # pg_dump_not_found / pg_dump_failed — already sanitized
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        ddl = result["ddl"]
+        if output_dir is None:
+            return {"status": "ok", "database": database, "generated_utc": stamp, "ddl": ddl}
+        path = self._write_export(output_dir, database, stamp, "sql", ddl)
+        return {"status": "ok", "saved_to": str(path), "database": database, "generated_utc": stamp}
+
+    @staticmethod
+    def _write_export(output_dir: str, database: str, stamp: str, ext: str, content: str) -> Path:
+        """Write an export to ``{database}_schema_{stamp}.{ext}`` under ``output_dir``."""
+        out = Path(output_dir).expanduser()
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"{_safe_filename_stem(database)}_schema_{stamp}.{ext}"
+        path.write_text(content, encoding="utf-8")
+        return path
 
     async def sample_table_rows(self, database: str, table: str, n: int = 10) -> list[dict]:
         """Return the first ``n`` rows of a table."""

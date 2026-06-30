@@ -33,28 +33,30 @@ To provide the best Agent Experience (AgentX), the server exposes specific tools
 1. **`list_databases`**: Reads `connections.json` and returns the available database names and their allowed mode (`read` or `write`).
 2. **`list_tables`**: Returns a list of all tables and views in a specified database.
 3. **`get_table_schema`**: Returns the exact schema (columns, data types, primary/foreign keys) for a specific table so the AI can write accurate SQL.
-4. **`get_database_schema`**: Returns the schema of **every** table in one call — each with columns, data types, nullability, primary key, and foreign keys. Deterministic (tables sorted by schema/name, columns by ordinal position) so the schema content is byte-stable across runs and diffable in version control. Pass an `output_dir` to **write** the schema to `{database}_schema_{UTC-timestamp}.json` in that directory (returning the path + a summary) instead of returning it inline — the practical mode for large databases whose full schema is too big to hand back in one message. Per **Rule 10**, this is a separate tool from `get_table_schema` (whole-DB structure vs. one table), not a flag on it.
-5. **`sample_table_rows`**: Fetches the first *N* rows (default 10) of a table. Crucial for the AI to understand formatting (e.g., are dates ISO strings or timestamps? Are enums uppercase or lowercase?).
+4. **`get_database_schema`**: Returns the schema of **every** table in one call. `format="json"` (default) gives each table's columns, data types, nullability, primary key, and foreign keys. `format="sql"` instead returns a **self-contained, runnable DDL script** (schemas, sequences, tables, PK/FK/UNIQUE/CHECK constraints, indexes, trigger functions, triggers) assembled entirely from native Postgres catalog functions (`format_type`, `pg_get_constraintdef`/`indexdef`/`triggerdef`/`functiondef`) — no external tooling, runnable top-to-bottom to recreate the structure (covers the common cases). Both forms are deterministic (tables sorted by schema/name, columns by ordinal position) so the output is byte-stable and diffable. Pass an `output_dir` to **write** to `{database}_schema_{UTC-timestamp}.{json,sql}` (returning the path + a summary) instead of returning it inline — the practical mode for large databases. `format` is content negotiation of one concern (export this DB's schema), not multiplexing; the *faithful* export is a separate tool (#5) per **Rule 10**, and this stays separate from `get_table_schema` (whole-DB vs. one table).
+5. **`dump_schema_faithful`**: Produces a **byte-faithful** schema dump by shelling out to the database's own native tool (Postgres: `pg_dump --schema-only --no-owner --no-privileges`) — the most complete and guaranteed-runnable export (handles sequences, identity, partitioning, etc.). Requires the `pg_dump` binary on the machine running the server; if absent, returns `{status: "pg_dump_not_found", message}` with per-OS install guidance instead of failing. The DSN is handed to `pg_dump` via `PG*` environment variables (never on argv) and any error text is sanitized — the DSN/host/user/password never leak (**Rule 6**). A **separate tool** from `get_database_schema` per **Rule 10**: faithful-but-needs-`pg_dump` is a distinct job from the always-available self-contained export.
+6. **`sample_table_rows`**: Fetches the first *N* rows (default 10) of a table. Crucial for the AI to understand formatting (e.g., are dates ISO strings or timestamps? Are enums uppercase or lowercase?).
 
 ### Discovery / Search Tools (Safe, read-only)
-6. **`find_columns`**: Fuzzy (case-insensitive substring, `ILIKE`) search for columns by **name** across all tables — e.g. `"email"` finds `user_email`, `EMAIL_ADDRESS`. Returns `{schema, table, column, type, nullable}`.
-7. **`search_value`**: Fuzzy search for a **value in the data** across tables — finds *where* a value appears, returning `{schema, table, column, matches, samples}`. Each table is scanned once (single-pass aggregate). The agent narrows first via `list_tables`/`find_columns` and passes a `tables` shortlist; unscoped, it scans all non-system tables, bounded by a `statement_timeout` + per-column limit (partial results flagged `truncated`). Per **Rule 10**, this is a separate tool from `find_columns`.
+7. **`find_columns`**: Fuzzy (case-insensitive substring, `ILIKE`) search for columns by **name** across all tables — e.g. `"email"` finds `user_email`, `EMAIL_ADDRESS`. Returns `{schema, table, column, type, nullable}`.
+8. **`search_value`**: Fuzzy search for a **value in the data** across tables — finds *where* a value appears, returning `{schema, table, column, matches, samples}`. Each table is scanned once (single-pass aggregate). The agent narrows first via `list_tables`/`find_columns` and passes a `tables` shortlist; unscoped, it scans all non-system tables, bounded by a `statement_timeout` + per-column limit (partial results flagged `truncated`). Per **Rule 10**, this is a separate tool from `find_columns`.
 
 ### Execution Tools
-7. **`execute_read_query`**: Runs custom read-only queries (single `SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`). Validated to a single read-only statement *and* run inside a native read-only transaction.
-8. **`execute_write_query`**: Runs `UPDATE`, `INSERT`, `DELETE`, or DDL. Gated server-side, in order:
+9. **`execute_read_query`**: Runs custom read-only queries (single `SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`). Validated to a single read-only statement *and* run inside a native read-only transaction.
+10. **`execute_write_query`**: Runs `UPDATE`, `INSERT`, `DELETE`, or DDL. Gated server-side, in order:
    - **Security 1 (`mode`):** Immediately rejected if the database is not allowlisted as `"mode": "write"` in JSON. This boundary is absolute.
    - **Security 2 (`yolo`):** If the database has `yolo: true`, the write proceeds without a consent prompt.
    - **Security 3 (`user_consent`):** Otherwise the tool requires a `user_consent: true` parameter and is rejected without it. The tool description strictly instructs the AI: *"First read the table and its schema, then print the exact SQL you plan to run to the user and ask for their explicit permission. Only call again with `user_consent=true` if they say yes."*
 
 ### Configuration Tools
-9. **`set_yolo_mode`**: Sets `yolo` (`true`/`false`) for one named database and **persists it to `connections.json`**, so the choice survives restarts. Per-database — enabling `yolo` on one DB never affects another.
+11. **`set_yolo_mode`**: Sets `yolo` (`true`/`false`) for one named database and **persists it to `connections.json`**, so the choice survives restarts. Per-database — enabling `yolo` on one DB never affects another.
 
 ### Diagnostics Tools
-10. **`check_database`**: Tests connectivity for one named database (or all of them) and returns `OK` or a sanitized, classified cause + fix. Never echoes the DSN/credentials.
+12. **`check_database`**: Tests connectivity for one named database (or all of them) and returns `OK` or a sanitized, classified cause + fix. Never echoes the DSN/credentials.
 
 ### MCP Prompts
 - **`troubleshoot_connection`**: A discoverable prompt exposing the full connection-gotchas checklist (host/port, firewall, `sslmode`, Docker `localhost` vs container, db-name case, pool limits, …) the agent can pull at any time.
+- **`faithful_schema_export`**: Explains the two schema-export paths — the self-contained `get_database_schema(format="sql")` vs. the faithful `dump_schema_faithful` (`pg_dump`) — and, when `pg_dump` is missing, the per-OS commands to offer installing it (only with the user's consent) before retrying.
 
 ## 6. Technical Stack
 - **Language:** Python 3.10+

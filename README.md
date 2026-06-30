@@ -113,14 +113,15 @@ This is the recommended setup for any database that holds data you care about.
 
 ## MCP tools
 
-The server exposes **11 tools** and **1 prompt**:
+The server exposes **12 tools** and **2 prompts**:
 
 | Tool | Kind | Description |
 |------|------|-------------|
 | `list_databases` | explore | Configured databases (name, mode, yolo — **no DSN**). |
 | `list_tables` | explore | Tables and views in a database. |
 | `get_table_schema` | explore | Columns, types, primary/foreign keys for a table. |
-| `get_database_schema` | explore | The whole database's schema in one deterministic call: every table with columns, types, primary/foreign keys. Pass `output_dir` to write it to `{database}_schema_{UTC}.json` instead of returning it inline (recommended for large DBs). |
+| `get_database_schema` | explore | The whole database's schema in one deterministic call. `format="json"` (default) returns every table's columns/types/PK/FK; `format="sql"` returns a **self-contained, runnable DDL script** (tables, sequences, PK/FK/UNIQUE/CHECK, indexes, trigger functions, triggers) — no extra tools required. Pass `output_dir` to write `{database}_schema_{UTC}.{json,sql}` instead of returning it inline (recommended for large DBs). |
+| `dump_schema_faithful` | export | **Byte-faithful** schema dump via the database's own `pg_dump --schema-only` — the most complete/runnable export. Requires the `pg_dump` binary on the server host; if missing, returns `pg_dump_not_found` with install guidance (see the `faithful_schema_export` prompt). |
 | `sample_table_rows` | explore | First N rows of a table (default 10). |
 | `find_columns` | search | Find columns by name across all tables (fuzzy, case-insensitive). |
 | `search_value` | search | Find **where** a value appears across tables (fuzzy); returns table/column hits + samples. Pass `tables=[…]` to scope it. |
@@ -129,7 +130,9 @@ The server exposes **11 tools** and **1 prompt**:
 | `set_yolo_mode` | config | Enable/disable `yolo` for one database (persisted). |
 | `check_database` | doctor | Test one database (or all) → `OK` or a sanitized diagnostic. |
 
-**Prompt:** `troubleshoot_connection` — a discoverable, full connection-gotchas checklist (host/port, firewall, `sslmode`, Docker `localhost`, db-name case, pool limits, …).
+**Prompts:**
+- `troubleshoot_connection` — a discoverable, full connection-gotchas checklist (host/port, firewall, `sslmode`, Docker `localhost`, db-name case, pool limits, …).
+- `faithful_schema_export` — how to choose between the self-contained SQL export and the faithful `pg_dump` one, including how to offer installing `pg_dump`.
 
 ---
 

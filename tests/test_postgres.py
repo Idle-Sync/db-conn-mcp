@@ -10,12 +10,16 @@ in postgres.py).
 import asyncpg
 import pytest
 
+from db_conn_mcp.dialects import postgres as pg
 from db_conn_mcp.dialects.postgres import (
     PostgresDialect,
+    _assemble_ddl,
     _build_table_search_sql,
     _is_junk_table,
     _leading_keyword,
+    _pg_env_from_dsn,
     _quote_identifier,
+    _sanitize_pg_error,
 )
 
 
@@ -384,3 +388,106 @@ async def test_search_value_skips_junk_when_unscoped():
     out = await PostgresDialect().search_value(conn, "x", tables=None)
     assert [r["table"] for r in out["results"]] == ["users"]  # migrations skipped
     assert len(conn.fetchrow_calls) == 1  # only the non-junk table was scanned
+
+
+# ---- self-contained DDL assembly (pure) -------------------------------------
+
+
+def test_assemble_ddl_orders_and_wraps_native_fragments():
+    schemas = [{"schema": "app"}]
+    sequences = [{"schema": "app", "name": "users_id_seq"}]
+    columns = [
+        {"schema": "app", "table": "users", "coldef": '"id" integer NOT NULL'},
+        {"schema": "app", "table": "users", "coldef": '"email" text'},
+    ]
+    constraints = [
+        {"schema": "app", "table": "users", "name": '"users_pkey"', "def": "PRIMARY KEY (id)"},
+        {
+            "schema": "app",
+            "table": "orders",
+            "name": '"orders_user_fk"',
+            "def": "FOREIGN KEY (user_id) REFERENCES app.users(id)",
+        },
+    ]
+    indexes = [{"schema": "app", "table": "users", "def": "CREATE INDEX ix ON app.users (email)"}]
+    functions = [{"schema": "app", "name": "touch", "def": "CREATE FUNCTION app.touch()..."}]
+    triggers = [{"schema": "app", "table": "users", "def": "CREATE TRIGGER t ... app.touch()"}]
+
+    ddl = _assemble_ddl(schemas, sequences, columns, constraints, indexes, functions, triggers)
+
+    assert 'CREATE SCHEMA IF NOT EXISTS "app";' in ddl
+    assert 'CREATE SEQUENCE IF NOT EXISTS "app"."users_id_seq";' in ddl
+    assert 'CREATE TABLE "app"."users" (\n    "id" integer NOT NULL,\n    "email" text\n);' in ddl
+    assert 'ALTER TABLE "app"."users" ADD CONSTRAINT "users_pkey" PRIMARY KEY (id);' in ddl
+    assert "CREATE INDEX ix ON app.users (email);" in ddl
+    # ordering invariants that make the script runnable top-to-bottom:
+    assert ddl.index("CREATE TABLE") < ddl.index("FOREIGN KEY")  # tables before FKs
+    assert ddl.index("CREATE FUNCTION") < ddl.index("CREATE TRIGGER")  # functions before triggers
+
+
+def test_assemble_ddl_omits_empty_sections():
+    ddl = _assemble_ddl([], [], [], [], [], [], [])
+    assert "CREATE TABLE" not in ddl
+    assert "-- Triggers" not in ddl
+    assert ddl.endswith("\n")
+
+
+async def test_get_database_ddl_runs_seven_scans_in_order():
+    conn = FakeConn([[{"schema": "app"}], [], [], [], [], [], []])
+    ddl = await PostgresDialect().get_database_ddl(conn)
+    # schemas, sequences, columns, constraints, indexes, functions, triggers
+    assert len(conn.fetched) == 7
+    assert 'CREATE SCHEMA IF NOT EXISTS "app";' in ddl
+
+
+# ---- pg_dump faithful export -------------------------------------------------
+
+
+def test_pg_env_from_dsn_maps_parts_and_keeps_dsn_off_argv():
+    env = _pg_env_from_dsn("postgresql://me:p%40ss@db.example.com:6543/shop?sslmode=require")
+    assert env["PGHOST"] == "db.example.com"
+    assert env["PGPORT"] == "6543"
+    assert env["PGUSER"] == "me"
+    assert env["PGPASSWORD"] == "p@ss"  # URL-decoded
+    assert env["PGDATABASE"] == "shop"
+    assert env["PGSSLMODE"] == "require"
+
+
+def test_sanitize_pg_error_strips_secrets():
+    dsn = "postgresql://me:topsecret@db.example.com:5432/shop"
+    msg = _sanitize_pg_error("could not connect to db.example.com as me: topsecret rejected", dsn)
+    assert "topsecret" not in msg
+    assert "db.example.com" not in msg
+    assert "me" not in msg or "***" in msg
+
+
+async def test_dump_schema_sql_reports_not_found(monkeypatch):
+    monkeypatch.setattr(pg.shutil, "which", lambda name: None)
+    result = await PostgresDialect().dump_schema_sql("postgresql://u:p@h/db")
+    assert result["status"] == "pg_dump_not_found"
+    assert "install" in result["message"].lower()
+
+
+async def test_dump_schema_sql_returns_ddl_on_success(monkeypatch):
+    monkeypatch.setattr(pg.shutil, "which", lambda name: "/usr/bin/pg_dump")
+
+    async def fake_run(pg_dump, args, env):
+        assert "--schema-only" in args
+        assert env["PGPASSWORD"] == "p"  # connection passed via env, never argv
+        return 0, b"CREATE TABLE t ();", b""
+
+    monkeypatch.setattr(pg, "_run_pg_dump", fake_run)
+    result = await PostgresDialect().dump_schema_sql("postgresql://u:p@h/db")
+    assert result == {"status": "ok", "ddl": "CREATE TABLE t ();"}
+
+
+async def test_dump_schema_sql_sanitizes_failure(monkeypatch):
+    monkeypatch.setattr(pg.shutil, "which", lambda name: "/usr/bin/pg_dump")
+
+    async def fake_run(pg_dump, args, env):
+        return 1, b"", b"pg_dump: error: connection to host failed: secretpw"
+
+    monkeypatch.setattr(pg, "_run_pg_dump", fake_run)
+    result = await PostgresDialect().dump_schema_sql("postgresql://u:secretpw@host/db")
+    assert result["status"] == "pg_dump_failed"
+    assert "secretpw" not in result["message"]

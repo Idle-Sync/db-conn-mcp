@@ -1,4 +1,4 @@
-"""The MCP server: 11 tools + 1 prompt, plus transport wiring (FastMCP).
+"""The MCP server: 12 tools + 2 prompts, plus transport wiring (FastMCP).
 
 Knows nothing about PostgreSQL. It wires the pure/abstract layers together: the
 :class:`~db_conn_mcp.handlers.Handlers` service (which uses ``config``, the dialect
@@ -35,12 +35,36 @@ Database connection troubleshooting checklist:
 9. DNS / VPN — can the hostname be resolved? Is a required VPN connected?
 """
 
+#: Guidance exposed by the faithful_schema_export prompt — how to choose an export and
+#: how to offer installing pg_dump for the faithful path.
+FAITHFUL_SCHEMA_GUIDANCE = """\
+Exporting a database schema with db-conn-mcp — two options:
+
+1. get_database_schema(database, format="sql") — SELF-CONTAINED (recommended default).
+   Builds a runnable DDL script (tables, columns, sequences, PK/FK/UNIQUE/CHECK, indexes,
+   trigger functions, triggers) using ONLY the existing connection. Works everywhere, no
+   extra software. Covers the common 95%; very exotic objects may be approximate.
+
+2. dump_schema_faithful(database) — FAITHFUL (pg_dump --schema-only).
+   Byte-faithful and complete (sequences, identity, partitioning, etc.), produced by
+   Postgres' own pg_dump. Requires the pg_dump binary on the machine running this server.
+
+If the user wants the faithful export and dump_schema_faithful returns
+status="pg_dump_not_found": OFFER to install pg_dump for them, and only with their
+explicit consent run the matching command, then call dump_schema_faithful again:
+  - Windows:        winget install PostgreSQL.PostgreSQL
+  - macOS:          brew install libpq   (then add its bin to PATH)
+  - Debian/Ubuntu:  sudo apt-get install -y postgresql-client
+  - RHEL/Fedora:    sudo dnf install -y postgresql
+If they don't want to install anything, fall back to get_database_schema(format="sql").
+"""
+
 
 def build_server(config_path: Path | str | None = None) -> FastMCP:
-    """Construct the FastMCP app with all 11 tools and the troubleshoot prompt."""
+    """Construct the FastMCP app with all 12 tools and 2 prompts."""
     resolved = resolve_path(str(config_path) if config_path else None)
     handlers = Handlers(resolved)
-    app = FastMCP("db-conn-mcp")
+    app = FastMCP("db-conn-mcp")  # 12 tools + 2 prompts registered below
 
     # ---- Exploration tools ---------------------------------------------------
     @app.tool()
@@ -59,18 +83,35 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
         return await handlers.get_table_schema(database, table)
 
     @app.tool()
-    async def get_database_schema(database: str, output_dir: str | None = None) -> dict:
-        """Get the whole database's schema at once: every table with its columns,
-        types, nullability, primary key, and foreign keys.
+    async def get_database_schema(
+        database: str, output_dir: str | None = None, format: Literal["json", "sql"] = "json"
+    ) -> dict:
+        """Get the whole database's schema at once, as JSON or as a runnable SQL script.
 
-        The schema content is deterministic (tables sorted by schema/name, columns by
-        position). By default it is returned inline. Pass output_dir to instead WRITE it
-        to `{database}_schema_{UTC}.json` in that directory — recommended for large
-        databases whose full schema is too big to return inline — and get back the file
-        path plus a summary. Use this to grab the full structure in one shot instead of
-        calling get_table_schema per table.
+        format="json" (default): every table with columns, types, nullability, primary key,
+        and foreign keys. format="sql": a SELF-CONTAINED DDL script that recreates the
+        schema — tables, columns, sequences, PK/FK/UNIQUE/CHECK, indexes, trigger functions,
+        and triggers — so running it rebuilds the structure. No extra tools needed; covers
+        the common cases (for a byte-faithful dump use dump_schema_faithful).
+
+        Output is deterministic. Returned inline by default; pass output_dir to instead WRITE
+        it to `{database}_schema_{UTC}.{json|sql}` and get back the path plus a summary —
+        recommended for large schemas too big to return inline.
         """
-        return await handlers.get_database_schema(database, output_dir)
+        return await handlers.get_database_schema(database, output_dir, format)
+
+    @app.tool()
+    async def dump_schema_faithful(database: str, output_dir: str | None = None) -> dict:
+        """Produce a byte-faithful schema dump using the database's own tool (pg_dump -s).
+
+        The most complete/runnable schema export (handles sequences, identity, partitioning,
+        etc.) but REQUIRES the pg_dump binary on the machine running this server. Returns the
+        DDL inline (or writes `{database}_schema_{UTC}.sql` when output_dir is set). If
+        pg_dump isn't installed it returns {status: "pg_dump_not_found", message}: offer to
+        install pg_dump for the user (see the faithful_schema_export prompt), then retry —
+        or use get_database_schema(format="sql") which needs no extra tools.
+        """
+        return await handlers.dump_schema_faithful(database, output_dir)
 
     @app.tool()
     async def sample_table_rows(database: str, table: str, n: int = 10) -> list[dict]:
@@ -132,11 +173,16 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
         """Test connectivity for one database (or all) — returns OK or a sanitized cause."""
         return await handlers.check_database(database)
 
-    # ---- Prompt --------------------------------------------------------------
+    # ---- Prompts -------------------------------------------------------------
     @app.prompt()
     def troubleshoot_connection() -> str:
         """The full database-connection gotchas checklist."""
         return TROUBLESHOOT_CHECKLIST
+
+    @app.prompt()
+    def faithful_schema_export() -> str:
+        """How to export a schema: self-contained SQL vs. faithful pg_dump (+ installing it)."""
+        return FAITHFUL_SCHEMA_GUIDANCE
 
     return app
 

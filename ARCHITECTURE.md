@@ -11,7 +11,7 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 ```
                             ┌──────────────────────────────────────────┐
    ┌──────────────┐         │              db-conn-mcp                  │
-   │  AI Agent    │  MCP    │  server.py  ── 10 tools + 1 prompt        │
+   │  AI Agent    │  MCP    │  server.py  ── 12 tools + 2 prompts       │
    │ (Claude,     │◄───────►│      │                                   │
    │  Cursor, …)  │ stdio/  │      ├─► safety.py      ── write-gate     │
    └──────────────┘  http   │      │                                   │
@@ -39,8 +39,8 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 | `dialects/registry.py` | Map DSN scheme → `Dialect`; clear error on unknown scheme | No |
 | `safety.py` | Pure write-gate decision (`mode` + `yolo` + `consent`) | No |
 | `diagnostics.py` | Classify driver errors → **sanitized** cause + fix; the doctor | No |
-| `handlers.py` | The 10 tool handlers as plain async methods (transport-free, unit-testable) | No |
-| `server.py` | `FastMCP` app: registers the 10 tools + the prompt onto `handlers`, transport wiring | No |
+| `handlers.py` | The 12 tool handlers as plain async methods (transport-free, unit-testable) | No |
+| `server.py` | `FastMCP` app: registers the 12 tools + 2 prompts onto `handlers`, transport wiring | No |
 
 The **dialect layer is the only place that knows a database is PostgreSQL.** Everything above it speaks the abstract `Dialect` contract.
 
@@ -53,16 +53,17 @@ The **dialect layer is the only place that knows a database is PostgreSQL.** Eve
 | 1 | `list_databases` | Explore | safe — names + mode + yolo |
 | 2 | `list_tables` | Explore | safe |
 | 3 | `get_table_schema` | Explore | safe |
-| 4 | `get_database_schema` | Explore | safe — whole-DB schema, deterministic |
-| 5 | `sample_table_rows` | Explore | safe (first N rows) |
-| 6 | `find_columns` | Search | safe — fuzzy column-name search across tables |
-| 7 | `search_value` | Search | safe (read-only) — fuzzy value search across tables; scoped/bounded |
-| 8 | `execute_read_query` | Execute | runs inside a **read-only transaction** |
-| 9 | `execute_write_query` | Execute | **gated** (mode → yolo → consent) |
-| 10 | `set_yolo_mode` | Config | persists `yolo` flag for one named DB |
-| 11 | `check_database` | Doctor | tests one DB (or all) → `OK` or sanitized cause + fix |
+| 4 | `get_database_schema` | Explore | safe — whole-DB schema, deterministic; `format` json or self-contained SQL DDL |
+| 5 | `dump_schema_faithful` | Export | safe (read-only) — faithful `pg_dump -s`; DSN never leaks; `pg_dump_not_found` if the binary is absent |
+| 6 | `sample_table_rows` | Explore | safe (first N rows) |
+| 7 | `find_columns` | Search | safe — fuzzy column-name search across tables |
+| 8 | `search_value` | Search | safe (read-only) — fuzzy value search across tables; scoped/bounded |
+| 9 | `execute_read_query` | Execute | runs inside a **read-only transaction** |
+| 10 | `execute_write_query` | Execute | **gated** (mode → yolo → consent) |
+| 11 | `set_yolo_mode` | Config | persists `yolo` flag for one named DB |
+| 12 | `check_database` | Doctor | tests one DB (or all) → `OK` or sanitized cause + fix |
 
-Plus **one MCP prompt** — `troubleshoot_connection` — a discoverable, full connection-gotchas checklist the agent can pull when a DB won't connect (see [§7](#7-flow-e--self-diagnosing-connections-the-doctor)).
+Plus **two MCP prompts** — `troubleshoot_connection` (a discoverable, full connection-gotchas checklist for when a DB won't connect, see [§7](#7-flow-e--self-diagnosing-connections-the-doctor)) and `faithful_schema_export` (how to choose the self-contained vs. `pg_dump` schema export, and how to offer installing `pg_dump`).
 
 ---
 

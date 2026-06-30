@@ -41,6 +41,30 @@ class Dialect(ABC):
         """
 
     @abstractmethod
+    async def get_database_ddl(self, conn: Any) -> str:
+        """Return a runnable, self-contained DDL script recreating the whole schema.
+
+        Assembled entirely from native catalog functions (Postgres: ``pg_get_*def``),
+        ordered so the script runs top-to-bottom: schemas → sequences → tables →
+        constraints (PK/UNIQUE/CHECK/FK, FKs last so references resolve) → indexes →
+        trigger functions → triggers. No external tooling; covers the common cases.
+        Identifiers are quoted by the database, so there is no injection surface.
+        """
+
+    @abstractmethod
+    async def dump_schema_sql(self, dsn: str) -> dict:
+        """Faithful schema dump via the database's own native dump tool (Postgres: ``pg_dump``).
+
+        Takes the ``dsn`` rather than a live connection because the native tool manages
+        its own connection. Returns one of:
+        ``{"status": "ok", "ddl": str}`` on success,
+        ``{"status": "pg_dump_not_found", "message": str}`` if the tool isn't installed,
+        ``{"status": "pg_dump_failed", "message": str}`` on a (sanitized) failure.
+        The message is always agent-safe — it never echoes the DSN, host, user, or
+        password (Rule 6).
+        """
+
+    @abstractmethod
     async def sample_rows(self, conn: Any, table: str, n: int = 10) -> list[dict]:
         """Return the first ``n`` rows. The identifier MUST be safely quoted (Rule 9)."""
 

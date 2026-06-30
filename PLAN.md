@@ -37,7 +37,8 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
   - `list_databases`: Return configured databases (name + mode + yolo).
   - `list_tables`: Query the DB catalog for tables/views.
   - `get_table_schema`: Query the DB catalog for column definitions.
-  - `get_database_schema`: Query the catalog for every table's columns + PK/FK in one deterministic pass.
+  - `get_database_schema`: Query the catalog for every table's columns + PK/FK in one deterministic pass. `format="sql"` instead emits a self-contained, runnable DDL script (sequences, tables, constraints, indexes, trigger functions, triggers) from native `pg_get_*def` functions.
+  - `dump_schema_faithful`: Byte-faithful schema via the DB's own `pg_dump --schema-only`; DSN passed through `PG*` env (never argv), errors sanitized; `pg_dump_not_found` with install guidance when the binary is absent.
   - `sample_table_rows`: Fetch the first 10 rows (default).
 - [x] **Execution Tools:**
   - `execute_read_query`: Raw SELECT execution inside a read-only transaction.
@@ -46,8 +47,9 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
   - `set_yolo_mode(database, enabled)`: Persist the `yolo` flag for one DB via `config.py`.
 - [x] **Diagnostics Tool:**
   - `check_database(database?)`: Test one DB or all; return `OK` or sanitized diagnostic.
-- [x] **Prompt:**
+- [x] **Prompts:**
   - `troubleshoot_connection`: Expose the full connection-gotchas checklist as an MCP prompt.
+  - `faithful_schema_export`: Guide choosing the self-contained vs. `pg_dump` schema export, including offering to install `pg_dump`.
 - [x] **Error Wrapping:** Every tool that connects routes failures through `diagnostics.explain()` so agents never see raw/leaky errors.
 - [x] **Transports:** Entry points for both `--transport stdio` and `--transport http` (SSE).
 
