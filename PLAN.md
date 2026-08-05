@@ -61,6 +61,17 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 - [x] **Resolvable launch command:** injected entries use `server_launch()` — the **absolute path** of the installed console script (`shutil.which`), or a fallback of the current interpreter + `python -m db_conn_mcp` (via `__main__.py`). This works whether installed in a project `.venv` or globally/pipx, so the client never needs `db-conn-mcp` on its own PATH (a bare command caused `-32000` failures).
 - [x] **Management subcommands:** beyond first-run `setup` (which now shows status + an action menu when a config already exists), the CLI exposes `status` (list DBs + per-client injection state, no DSN), `add` (append another connection), `clients` (inject) / `clients --remove` (uninject), `check [name]` (connectivity doctor from the CLI — sanitized, exit 0 all-OK / 2 if any unreachable), `remove <name>`, and `yolo <name> on|off`. `--config` works before or after the subcommand. All interactive flows are Ctrl+C-safe.
 
+## Phase 6.5: Issue #8 — Core Primitives & Operational Tools (v0.5.0)
+> From months of field use (GitHub issue #8): safety primitives first, then streaming/insight tools. All behind the existing `Dialect` seam; the cursor registry is the only stateful addition, deliberately bounded (max 5, 15-min idle reap).
+- [x] **Bind parameters:** optional `params` on `execute_read_query`/`execute_write_query`, bound via asyncpg `$1`/`$2` — values never string-interpolated (closes the Rule 9 gap for the raw query tools).
+- [x] **Per-call timeouts:** optional `timeout_ms` on both query tools; overruns are cancelled and surface as a sanitized error.
+- [x] **Dry-run writes:** `execute_write_query(dry_run=true)` executes inside a transaction and always rolls back, returning would-be `rows_affected`. Gate: `mode` only (`safety.authorize_dry_run`) — nothing commits, so no yolo/consent; lets the agent show real impact before asking consent.
+- [x] **Server-side cursors:** `open_query_cursor` / `fetch_rows` / `close_cursor` (three tools, Rule 10) over native asyncpg cursors for large result sets; auto-close on drain, idle reaping, hard cap.
+- [x] **`get_object_definition`:** faithful `pg_get_*def`-based definitions for views/functions/triggers/sequences/indexes (schema-qualified names, overloads returned).
+- [x] **`cancel_query`:** native `pg_cancel_backend(pid)` — stateless cancel of a stuck statement; pair with `show_activity`.
+- [x] **Insight tools:** `diff_schemas` (structural diff of two configured DBs), `check_sequences` (stale-sequence detector), `table_stats` (rows + sizes, no scans), `show_activity` (sanitized `pg_stat_activity`), `explain_query` (EXPLAIN/ANALYZE of validated read-only SQL).
+- [x] **Compat fix:** pin `mcp>=1.0.0,<2.0.0` — SDK 2.0 removed `mcp.server.fastmcp` and broke fresh installs. SDK 2.x migration tracked separately.
+
 ## Phase 7: Future Dialects (Post-v1, Extensibility Payoff)
 > Not part of v1. Listed to prove the seam works — each is a single new file + one registry line, no changes above the dialect layer.
 - [ ] **MySQL:** `dialects/mysql.py` (`aiomysql`/`asyncmy`), `START TRANSACTION READ ONLY`, `information_schema`.

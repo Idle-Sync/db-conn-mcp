@@ -69,8 +69,104 @@ class Dialect(ABC):
         """Return the first ``n`` rows. The identifier MUST be safely quoted (Rule 9)."""
 
     @abstractmethod
-    async def execute(self, conn: Any, sql: str) -> dict:
-        """Run raw SQL; return ``{columns, rows}`` or ``{rows_affected}``."""
+    async def execute(
+        self,
+        conn: Any,
+        sql: str,
+        params: list[Any] | None = None,
+        timeout_ms: int | None = None,
+    ) -> dict:
+        """Run raw SQL; return ``{columns, rows}`` or ``{rows_affected}``.
+
+        ``params`` are bound via the driver's native parameterization (Postgres:
+        ``$1``/``$2`` placeholders) — never interpolated into the SQL text. A
+        ``timeout_ms`` cancels the statement and raises a sanitized ``ValueError``
+        when exceeded.
+        """
+
+    @abstractmethod
+    async def execute_dry_run(
+        self,
+        conn: Any,
+        sql: str,
+        params: list[Any] | None = None,
+        timeout_ms: int | None = None,
+    ) -> dict:
+        """Run ``sql`` inside a transaction, report the outcome, then ROLL BACK.
+
+        Returns the same shape as :meth:`execute` plus ``{"dry_run": True,
+        "rolled_back": True}``. Nothing commits, but the statement really executes
+        first (native transaction semantics): it briefly takes locks, may advance
+        sequences, and fires triggers before the rollback discards their effects.
+        """
+
+    @abstractmethod
+    async def open_cursor(self, conn: Any, sql: str, params: list[Any] | None = None) -> Any:
+        """Open a native server-side cursor for a read-only query.
+
+        Returns a cursor handle owning ``conn`` and its transaction, exposing
+        ``await fetch(n) -> list[dict]`` and ``await close()`` (which must also
+        close the underlying connection). The caller keeps the handle alive
+        across tool calls; the dialect never stores it.
+        """
+
+    @abstractmethod
+    async def get_object_definition(self, conn: Any, object_type: str, name: str) -> list[dict]:
+        """Return faithful definitions for non-table objects by name.
+
+        ``object_type`` is one of ``view``/``function``/``trigger``/``sequence``/
+        ``index``; ``name`` may be schema-qualified. Returns every match (same
+        name in several schemas, overloaded functions) as
+        ``[{schema, name, kind, definition}]`` — definitions produced by the
+        database's own ``pg_get_*def``-style functions, never hand-assembled.
+        Raises ``ValueError`` for an unknown ``object_type``.
+        """
+
+    @abstractmethod
+    async def cancel_backend(self, conn: Any, pid: int) -> dict:
+        """Ask the server to cancel the query running in backend ``pid`` (native).
+
+        Returns ``{"pid": pid, "cancelled": bool}`` — ``False`` means no such
+        backend or no permission (only same-user backends can be cancelled
+        without superuser). Cancels the *statement*; the session survives.
+        """
+
+    @abstractmethod
+    async def explain(self, conn: Any, sql: str, analyze: bool = False) -> dict:
+        """Return the query plan as ``{"plan": [str, ...]}``.
+
+        With ``analyze=True`` the statement is actually executed to collect real
+        timings — callers must only pass validated read-only SQL, and the
+        read-only session blocks any write natively as defense-in-depth.
+        """
+
+    @abstractmethod
+    async def check_sequences(self, conn: Any) -> list[dict]:
+        """Report every column-owned sequence vs. the max value in its column.
+
+        Returns ``[{sequence_schema, sequence, table_schema, table, column,
+        last_value, is_called, max_id, behind}]`` where ``behind=True`` means the
+        next sequence value would collide with existing data (the classic
+        post-migration stale-sequence problem).
+        """
+
+    @abstractmethod
+    async def table_stats(self, conn: Any) -> list[dict]:
+        """Approximate row counts and on-disk sizes per user table.
+
+        Returns ``[{schema, table, approx_rows, table_bytes, index_bytes,
+        total_bytes}]`` ordered largest-first. Row counts come from the
+        database's own statistics (fast, approximate) — no table scans.
+        """
+
+    @abstractmethod
+    async def show_activity(self, conn: Any, include_query: bool = False) -> list[dict]:
+        """Sanitized view of current server activity (who holds connections).
+
+        Never includes user names or client addresses; query text only when
+        ``include_query=True`` (truncated). Returns ``[{pid, state, wait_event_type,
+        wait_event, backend_type, application_name, query_age, transaction_age[, query]}]``.
+        """
 
     @abstractmethod
     def validate_read_only(self, sql: str) -> None:

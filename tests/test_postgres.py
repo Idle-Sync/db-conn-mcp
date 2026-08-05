@@ -7,6 +7,8 @@ read-only-blocks-writes check belongs in a Docker integration test (see module n
 in postgres.py).
 """
 
+import asyncio
+
 import asyncpg
 import pytest
 
@@ -20,28 +22,61 @@ from db_conn_mcp.dialects.postgres import (
     _pg_env_from_dsn,
     _quote_identifier,
     _sanitize_pg_error,
+    _timeout_seconds,
 )
+
+
+class FakeTx:
+    """Records the transaction lifecycle (start / rollback)."""
+
+    def __init__(self):
+        self.started = False
+        self.rolled_back = False
+
+    async def start(self):
+        self.started = True
+
+    async def rollback(self):
+        self.rolled_back = True
+
+
+class FakeAsyncpgCursor:
+    """Serves queued row batches like an asyncpg server-side cursor."""
+
+    def __init__(self, batches):
+        self._batches = list(batches)
+
+    async def fetch(self, n):
+        return self._batches.pop(0) if self._batches else []
 
 
 class FakeConn:
     """Records executed/fetched SQL (and args) and serves queued results in order."""
 
-    def __init__(self, fetch_results=None, fetchrow_results=None):
+    def __init__(self, fetch_results=None, fetchrow_results=None, cursor_batches=None):
         self.executed: list[str] = []
         self._fetch_queue = list(fetch_results or [])
         self._fetchrow_queue = list(fetchrow_results or [])
         self.fetched: list[str] = []
         self.fetch_args: list[tuple] = []
+        self.fetch_timeouts: list = []
+        self.execute_timeouts: list = []
         self.fetchrow_calls: list[str] = []
         self.fetchrow_args: list[tuple] = []
+        self.transactions: list[FakeTx] = []
+        self.cursor_batches = list(cursor_batches or [])
+        self.cursor_calls: list[tuple] = []
+        self.closed = False
 
-    async def execute(self, sql, *args):
+    async def execute(self, sql, *args, timeout=None):
         self.executed.append(sql)
+        self.execute_timeouts.append(timeout)
         return "UPDATE 3"
 
-    async def fetch(self, sql, *args):
+    async def fetch(self, sql, *args, timeout=None):
         self.fetched.append(sql)
         self.fetch_args.append(args)
+        self.fetch_timeouts.append(timeout)
         return self._fetch_queue.pop(0) if self._fetch_queue else []
 
     async def fetchrow(self, sql, *args):
@@ -49,8 +84,17 @@ class FakeConn:
         self.fetchrow_args.append(args)
         return self._fetchrow_queue.pop(0) if self._fetchrow_queue else None
 
+    def transaction(self):
+        tx = FakeTx()
+        self.transactions.append(tx)
+        return tx
+
+    async def cursor(self, sql, *args):
+        self.cursor_calls.append((sql, args))
+        return FakeAsyncpgCursor(self.cursor_batches)
+
     async def close(self):
-        pass
+        self.closed = True
 
 
 # ---- identifier quoting (pure, the Rule 9 guard) -----------------------------
@@ -252,6 +296,245 @@ async def test_execute_write_returns_rows_affected():
     conn = FakeConn()
     result = await PostgresDialect().execute(conn, "UPDATE users SET x = 1")
     assert result == {"rows_affected": 3}
+
+
+# ---- params, timeouts, dry-run (issue #8 primitives) --------------------------
+
+
+async def test_execute_binds_params_via_driver():
+    conn = FakeConn([[{"id": 1}]])
+    await PostgresDialect().execute(conn, "SELECT * FROM users WHERE name = $1", ["O'Hara"])
+    assert conn.fetch_args[0] == ("O'Hara",)  # bound, never interpolated
+
+
+async def test_execute_passes_timeout_in_seconds():
+    conn = FakeConn([[{"id": 1}]])
+    await PostgresDialect().execute(conn, "SELECT 1", timeout_ms=1500)
+    assert conn.fetch_timeouts[0] == 1.5
+
+
+async def test_execute_timeout_raises_sanitized_valueerror():
+    class TimingOutConn(FakeConn):
+        async def fetch(self, sql, *args, timeout=None):
+            raise asyncio.TimeoutError
+
+    with pytest.raises(ValueError, match="timeout_ms=100"):
+        await PostgresDialect().execute(TimingOutConn(), "SELECT 1", timeout_ms=100)
+
+
+def test_timeout_seconds_conversion():
+    assert _timeout_seconds(None) is None
+    assert _timeout_seconds(1500) == 1.5
+    with pytest.raises(ValueError):
+        _timeout_seconds(0)
+    with pytest.raises(ValueError):
+        _timeout_seconds(-5)
+
+
+async def test_execute_dry_run_rolls_back_and_reports():
+    conn = FakeConn()
+    result = await PostgresDialect().execute_dry_run(conn, "UPDATE users SET x = 1")
+    assert result == {"rows_affected": 3, "dry_run": True, "rolled_back": True}
+    tx = conn.transactions[0]
+    assert tx.started and tx.rolled_back
+
+
+async def test_execute_dry_run_rolls_back_even_on_error():
+    class FailingConn(FakeConn):
+        async def execute(self, sql, *args, timeout=None):
+            raise asyncpg.PostgresSyntaxError("bad sql")
+
+    conn = FailingConn()
+    with pytest.raises(asyncpg.PostgresSyntaxError):
+        await PostgresDialect().execute_dry_run(conn, "UPDATE nope")
+    assert conn.transactions[0].rolled_back
+
+
+# ---- server-side cursors -------------------------------------------------------
+
+
+async def test_open_cursor_starts_tx_and_fetch_maps_dicts():
+    conn = FakeConn(cursor_batches=[[{"id": 1}, {"id": 2}], [{"id": 3}]])
+    cursor = await PostgresDialect().open_cursor(conn, "SELECT * FROM big", ["arg"])
+    assert conn.transactions[0].started
+    assert conn.cursor_calls[0] == ("SELECT * FROM big", ("arg",))
+    assert await cursor.fetch(2) == [{"id": 1}, {"id": 2}]
+    assert await cursor.fetch(2) == [{"id": 3}]
+    assert await cursor.fetch(2) == []
+
+
+async def test_cursor_close_rolls_back_and_closes_connection():
+    conn = FakeConn(cursor_batches=[])
+    cursor = await PostgresDialect().open_cursor(conn, "SELECT 1")
+    await cursor.close()
+    assert conn.transactions[0].rolled_back
+    assert conn.closed
+
+
+async def test_open_cursor_failure_rolls_back():
+    class NoCursorConn(FakeConn):
+        async def cursor(self, sql, *args):
+            raise asyncpg.PostgresSyntaxError("bad")
+
+    conn = NoCursorConn()
+    with pytest.raises(asyncpg.PostgresSyntaxError):
+        await PostgresDialect().open_cursor(conn, "SELECT nope")
+    assert conn.transactions[0].rolled_back
+
+
+# ---- get_object_definition ------------------------------------------------------
+
+
+async def test_get_object_definition_parameterizes_name_and_schema():
+    rows = [{"schema": "public", "name": "v", "kind": "view", "definition": "CREATE VIEW ..."}]
+    conn = FakeConn([rows])
+    result = await PostgresDialect().get_object_definition(conn, "view", "public.v")
+    assert result == rows
+    assert conn.fetch_args[0] == ("v", "public")  # split + bound, not interpolated
+
+
+async def test_get_object_definition_unqualified_searches_all_schemas():
+    conn = FakeConn([[]])
+    await PostgresDialect().get_object_definition(conn, "function", "touch")
+    assert conn.fetch_args[0] == ("touch", None)
+
+
+async def test_get_object_definition_rejects_unknown_type():
+    with pytest.raises(ValueError, match="Unknown object_type"):
+        await PostgresDialect().get_object_definition(FakeConn(), "table", "users")
+
+
+@pytest.mark.parametrize("object_type", ["view", "function", "trigger", "sequence", "index"])
+async def test_get_object_definition_uses_native_def_functions(object_type):
+    conn = FakeConn([[]])
+    await PostgresDialect().get_object_definition(conn, object_type, "x")
+    sql = conn.fetched[0]
+    assert "$1" in sql and "$2" in sql  # always parameterized
+
+
+# ---- cancel_backend --------------------------------------------------------------
+
+
+async def test_cancel_backend_maps_result():
+    conn = FakeConn(fetchrow_results=[{"cancelled": True}])
+    result = await PostgresDialect().cancel_backend(conn, 4242)
+    assert result == {"pid": 4242, "cancelled": True}
+    assert "pg_cancel_backend" in conn.fetchrow_calls[0]
+    assert conn.fetchrow_args[0] == (4242,)  # pid is bound, not interpolated
+
+
+# ---- explain ---------------------------------------------------------------------
+
+
+async def test_explain_prefixes_and_flattens_plan():
+    conn = FakeConn([[{"QUERY PLAN": "Seq Scan on users"}, {"QUERY PLAN": "  Filter: x"}]])
+    result = await PostgresDialect().explain(conn, "SELECT * FROM users")
+    assert conn.fetched[0].startswith("EXPLAIN SELECT")
+    assert result == {"plan": ["Seq Scan on users", "  Filter: x"]}
+
+
+async def test_explain_analyze_adds_options():
+    conn = FakeConn([[]])
+    await PostgresDialect().explain(conn, "SELECT 1", analyze=True)
+    assert conn.fetched[0].startswith("EXPLAIN (ANALYZE, BUFFERS) SELECT")
+
+
+# ---- check_sequences ---------------------------------------------------------------
+
+
+async def test_check_sequences_flags_behind():
+    owned = [
+        {
+            "sequence_schema": "public",
+            "sequence": "users_id_seq",
+            "table_schema": "public",
+            "table": "users",
+            "column": "id",
+        }
+    ]
+    conn = FakeConn(
+        fetch_results=[owned],
+        fetchrow_results=[{"last_value": 10, "is_called": True}, {"max_id": 25}],
+    )
+    report = await PostgresDialect().check_sequences(conn)
+    assert report[0]["behind"] is True
+    assert report[0]["last_value"] == 10 and report[0]["max_id"] == 25
+    # identifiers are quoted in the per-sequence probes
+    assert '"public"."users_id_seq"' in conn.fetchrow_calls[0]
+    assert '"public"."users"' in conn.fetchrow_calls[1]
+
+
+async def test_check_sequences_uncalled_sequence_collides_at_equal_value():
+    owned = [
+        {
+            "sequence_schema": "public",
+            "sequence": "s",
+            "table_schema": "public",
+            "table": "t",
+            "column": "id",
+        }
+    ]
+    # not yet called: nextval() would return last_value itself -> equal max is a collision
+    conn = FakeConn(
+        fetch_results=[owned],
+        fetchrow_results=[{"last_value": 5, "is_called": False}, {"max_id": 5}],
+    )
+    report = await PostgresDialect().check_sequences(conn)
+    assert report[0]["behind"] is True
+
+
+async def test_check_sequences_healthy_and_empty_table():
+    owned = [
+        {
+            "sequence_schema": "public",
+            "sequence": "s",
+            "table_schema": "public",
+            "table": "t",
+            "column": "id",
+        }
+    ]
+    conn = FakeConn(
+        fetch_results=[owned],
+        fetchrow_results=[{"last_value": 100, "is_called": True}, {"max_id": None}],
+    )
+    report = await PostgresDialect().check_sequences(conn)
+    assert report[0]["behind"] is False  # empty table can't be ahead of the sequence
+
+
+# ---- table_stats / show_activity ---------------------------------------------------
+
+
+async def test_table_stats_maps_rows():
+    rows = [
+        {
+            "schema": "public",
+            "table": "users",
+            "approx_rows": 100,
+            "table_bytes": 8192,
+            "index_bytes": 4096,
+            "total_bytes": 12288,
+        }
+    ]
+    conn = FakeConn([rows])
+    assert await PostgresDialect().table_stats(conn) == rows
+
+
+async def test_show_activity_strips_query_by_default():
+    rows = [{"pid": 1, "state": "active", "query": None}]
+    conn = FakeConn([rows])
+    result = await PostgresDialect().show_activity(conn)
+    assert conn.fetch_args[0] == (False,)  # opt-in flag is bound
+    assert "query" not in result[0]
+
+
+async def test_show_activity_keeps_query_when_opted_in():
+    rows = [{"pid": 1, "state": "active", "query": "SELECT 1"}]
+    conn = FakeConn([rows])
+    result = await PostgresDialect().show_activity(conn, include_query=True)
+    assert conn.fetch_args[0] == (True,)
+    assert result[0]["query"] == "SELECT 1"
+    sql = conn.fetched[0]
+    assert "usename" not in sql and "client_addr" not in sql  # sanitized by construction
 
 
 # ---- leading-keyword extraction (the gate's basis) ---------------------------

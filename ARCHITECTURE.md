@@ -11,7 +11,7 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 ```
                             ┌──────────────────────────────────────────┐
    ┌──────────────┐         │              db-conn-mcp                  │
-   │  AI Agent    │  MCP    │  server.py  ── 12 tools + 2 prompts       │
+   │  AI Agent    │  MCP    │  server.py  ── 22 tools + 2 prompts       │
    │ (Claude,     │◄───────►│      │                                   │
    │  Cursor, …)  │ stdio/  │      ├─► safety.py      ── write-gate     │
    └──────────────┘  http   │      │                                   │
@@ -37,10 +37,10 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 | `dialects/base.py` | The `Dialect` ABC — the extensibility contract | No |
 | `dialects/postgres.py` | `asyncpg` impl + native read-only enforcement | **Yes (only here)** |
 | `dialects/registry.py` | Map DSN scheme → `Dialect`; clear error on unknown scheme | No |
-| `safety.py` | Pure write-gate decision (`mode` + `yolo` + `consent`) | No |
+| `safety.py` | Pure write-gate decision (`mode` + `yolo` + `consent`; `dry-run` = mode gate only) | No |
 | `diagnostics.py` | Classify driver errors → **sanitized** cause + fix; the doctor | No |
-| `handlers.py` | The 12 tool handlers as plain async methods (transport-free, unit-testable) | No |
-| `server.py` | `FastMCP` app: registers the 12 tools + 2 prompts onto `handlers`, transport wiring | No |
+| `handlers.py` | The 22 tool handlers as plain async methods (transport-free, unit-testable) + the open-cursor registry | No |
+| `server.py` | `FastMCP` app: registers the 22 tools + 2 prompts onto `handlers`, transport wiring | No |
 
 The **dialect layer is the only place that knows a database is PostgreSQL.** Everything above it speaks the abstract `Dialect` contract.
 
@@ -58,10 +58,22 @@ The **dialect layer is the only place that knows a database is PostgreSQL.** Eve
 | 6 | `sample_table_rows` | Explore | safe (first N rows) |
 | 7 | `find_columns` | Search | safe — fuzzy column-name search across tables |
 | 8 | `search_value` | Search | safe (read-only) — fuzzy value search across tables; scoped/bounded |
-| 9 | `execute_read_query` | Execute | runs inside a **read-only transaction** |
-| 10 | `execute_write_query` | Execute | **gated** (mode → yolo → consent) |
-| 11 | `set_yolo_mode` | Config | persists `yolo` flag for one named DB |
-| 12 | `check_database` | Doctor | tests one DB (or all) → `OK` or sanitized cause + fix |
+| 9 | `execute_read_query` | Execute | runs inside a **read-only transaction**; optional `params` (driver bind) + `timeout_ms` |
+| 10 | `execute_write_query` | Execute | **gated** (mode → yolo → consent); `dry_run=true` executes-then-ROLLS-BACK (mode gate only — nothing commits); optional `params` + `timeout_ms` |
+| 11 | `explain_query` | Execute | safe — EXPLAIN (optionally ANALYZE) of a validated read-only query |
+| 12 | `cancel_query` | Execute | safe — native `pg_cancel_backend(pid)`; cancels the statement, session survives |
+| 13 | `open_query_cursor` | Cursor | safe (read-only) — server-side cursor for large results; pins one connection |
+| 14 | `fetch_rows` | Cursor | safe — next N rows from an open cursor; auto-closes when drained |
+| 15 | `close_cursor` | Cursor | safe — release the cursor + its connection; idempotent |
+| 16 | `get_object_definition` | Explore | safe — faithful `pg_get_*def` definition of a view/function/trigger/sequence/index |
+| 17 | `diff_schemas` | Insight | safe — structural schema diff between two configured DBs |
+| 18 | `check_sequences` | Insight | safe — sequences whose next value would collide with existing rows |
+| 19 | `table_stats` | Insight | safe — approximate rows + disk/index sizes per table (statistics, no scans) |
+| 20 | `show_activity` | Insight | safe — **sanitized** `pg_stat_activity` (no user names/addresses; query text opt-in, truncated) |
+| 21 | `set_yolo_mode` | Config | persists `yolo` flag for one named DB |
+| 22 | `check_database` | Doctor | tests one DB (or all) → `OK` or sanitized cause + fix |
+
+**Cursor lifecycle** (the one stateful corner, deliberately bounded): `open_query_cursor` validates the SQL read-only, opens a dedicated read-only connection, and registers the native cursor under a `cursor_id` in `handlers.py`. At most **5** cursors may be open; a cursor idle for **15 minutes** is reaped on the next cursor call; a fully drained cursor closes itself. Everything else in the server remains one-connection-per-call.
 
 Plus **two MCP prompts** — `troubleshoot_connection` (a discoverable, full connection-gotchas checklist for when a DB won't connect, see [§7](#7-flow-e--self-diagnosing-connections-the-doctor)) and `faithful_schema_export` (how to choose the self-contained vs. `pg_dump` schema export, and how to offer installing `pg_dump`).
 
@@ -188,6 +200,8 @@ sequenceDiagram
 
 `mode` is the **hard boundary** (native, unbypassable). `yolo` and `user_consent` only relax the *prompt* on a DB that is *already* `write` — they can never make a `read` DB writable.
 
+**Dry-run writes** (`dry_run=true`): the statement executes inside a transaction that is **always rolled back**, returning the `rows_affected` it *would* have had. Because nothing commits, only the `mode` gate applies — no yolo or consent needed — which is exactly what lets the agent show the user the real impact *before* asking for consent to the real write. Caveat (documented on the tool): a dry-run still executes server-side until the rollback, so it briefly takes locks, advances sequences, and fires triggers.
+
 ---
 
 ## 6. Flow D — Enabling YOLO mode (persisted)
@@ -278,13 +292,24 @@ The contract a new dialect must satisfy:
 
 ```python
 class Dialect(ABC):
-    scheme: str                                       # e.g. "mysql"
-    async def connect(self, dsn, *, read_only): ...   # native read-only enforcement lives here
+    scheme: str  # e.g. "mysql"
+
+    async def connect(self, dsn, *, read_only): ...  # native read-only enforcement lives here
     async def list_tables(self, conn): ...
     async def get_schema(self, conn, table): ...
     async def sample_rows(self, conn, table, n=10): ...
-    async def execute(self, conn, sql): ...
+    async def execute(self, conn, sql, params=None, timeout_ms=None): ...  # driver bind params
+    async def execute_dry_run(self, conn, sql, params=None, timeout_ms=None): ...  # tx + ROLLBACK
+    async def open_cursor(self, conn, sql, params=None): ...  # native server-side cursor
+    async def get_object_definition(self, conn, object_type, name): ...
+    async def cancel_backend(self, conn, pid): ...
+    async def explain(self, conn, sql, analyze=False): ...
+    async def check_sequences(self, conn): ...
+    async def table_stats(self, conn): ...
+    async def show_activity(self, conn, include_query=False): ...
 ```
+
+(plus the schema-export and search methods — see `dialects/base.py` for the full, documented contract.)
 
 | DB | Read-only mechanism (inside `connect`) | Introspection source |
 |---|---|---|
