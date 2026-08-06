@@ -1,17 +1,20 @@
 """The doctor engine: findings shape, crash-guarding, and each check."""
 
+import io
 import json
 import os
 import subprocess
+import urllib.request
 
 import pytest
 
+from db_conn_mcp import __version__, doctor
 from db_conn_mcp import clients as clients_mod
-from db_conn_mcp import doctor
 from db_conn_mcp.doctor import (
     CheckContext,
     check_client_paths,
     check_config_schema,
+    check_pypi_latest,
     check_secrets_exposure,
     finding,
     run_checks,
@@ -230,3 +233,47 @@ def test_client_paths_ok_when_nothing_injected(monkeypatch):
     monkeypatch.setattr(clients_mod, "detected_clients", lambda: [])
     (f,) = check_client_paths(CheckContext(config_path=None, offline=True))
     assert f["status"] == "ok"
+
+
+def _fake_urlopen(payload):
+    def opener(req, timeout=None):
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        return _Resp(json.dumps(payload).encode("utf-8"))
+
+    return opener
+
+
+def test_pypi_offline_skips():
+    (f,) = check_pypi_latest(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "skipped"
+
+
+def test_pypi_newer_version_warns_with_upgrade_command(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen({"info": {"version": "99.0.0"}}))
+    (f,) = check_pypi_latest(CheckContext(config_path=None, offline=False))
+    assert f["status"] == "warn"
+    assert "--no-cache-dir" in f["detail"]
+    assert f["suggested_action"] == "upgrade_package"
+
+
+def test_pypi_same_version_ok(monkeypatch):
+    monkeypatch.setattr(
+        urllib.request, "urlopen", _fake_urlopen({"info": {"version": __version__}})
+    )
+    (f,) = check_pypi_latest(CheckContext(config_path=None, offline=False))
+    assert f["status"] == "ok"
+
+
+def test_pypi_network_error_skips(monkeypatch):
+    def _boom(req, timeout=None):
+        raise OSError("no network")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    (f,) = check_pypi_latest(CheckContext(config_path=None, offline=False))
+    assert f["status"] == "skipped"

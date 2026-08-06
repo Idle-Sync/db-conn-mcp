@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import subprocess
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +23,7 @@ from typing import Literal, TypedDict
 
 from pydantic import ValidationError
 
-from . import clients
+from . import __version__, clients
 from .models import Config, Connection
 
 Status = Literal["ok", "warn", "fail", "skipped"]
@@ -53,6 +54,45 @@ class CheckContext:
 
     config_path: Path | None
     offline: bool
+
+
+#: Cache-bypassed version lookup (use case 2: pip's cached index hid a fresh release).
+PYPI_JSON_URL = "https://pypi.org/pypi/db-conn-mcp/json"
+
+
+def _version_tuple(version: str) -> tuple[int, ...] | None:
+    """Parse '0.5.2' -> (0, 5, 2); None for anything non-numeric (pre-releases)."""
+    parts = version.split(".")
+    if parts and all(p.isdigit() for p in parts):
+        return tuple(int(p) for p in parts)
+    return None
+
+
+def check_pypi_latest(ctx: CheckContext) -> list[Finding]:
+    """Use case 2: is a newer release published that a cached index would hide?"""
+    name = "pypi_latest"
+    if ctx.offline:
+        return [finding(name, "skipped", "offline mode — PyPI version lookup skipped")]
+    request = urllib.request.Request(
+        PYPI_JSON_URL, headers={"Cache-Control": "no-cache", "Pragma": "no-cache"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            latest = str(json.load(response)["info"]["version"])
+    except Exception:  # noqa: BLE001 — no internet is not a broken setup
+        return [finding(name, "skipped", "PyPI could not be reached — freshness not checked")]
+    installed, remote = _version_tuple(__version__), _version_tuple(latest)
+    if installed is not None and remote is not None and remote > installed:
+        return [
+            finding(
+                name,
+                "warn",
+                f"v{latest} is on PyPI (installed: v{__version__}) — run: "
+                "pipx upgrade db-conn-mcp --pip-args='--no-cache-dir'",
+                "upgrade_package",
+            )
+        ]
+    return [finding(name, "ok", f"v{__version__} is the latest published version")]
 
 
 _TOP_LEVEL_KEYS = set(Config.model_fields)
@@ -254,6 +294,7 @@ def check_client_paths(ctx: CheckContext) -> list[Finding]:
 #: The registry: (check_name, callable(ctx) -> list[Finding] | awaitable of it).
 #: Order is presentation order in the CLI.
 _CHECKS: list[tuple[str, Callable]] = [
+    ("pypi_latest", check_pypi_latest),
     ("config_schema", check_config_schema),
     ("secrets_exposure", check_secrets_exposure),
     ("client_paths", check_client_paths),
