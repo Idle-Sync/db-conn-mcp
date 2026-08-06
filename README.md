@@ -35,6 +35,32 @@ pip install db-conn-mcp
 
 This installs the `db-conn-mcp` command.
 
+### Upgrade
+
+**Not sure how you installed it?** Each manager keeps its own registry — ask them:
+
+```bash
+pipx list                 # db-conn-mcp listed here → pipx
+uv tool list              # listed here → uv tool
+pip show db-conn-mcp      # found in the current Python env → pip
+```
+
+If none of those know it, your MCP client config is likely launching it via **`uvx`** (check the `command` in the client's config entry — that entry is the source of truth for what actually runs, and `which db-conn-mcp` / `Get-Command db-conn-mcp` shows the binary on your PATH).
+
+Then use the matching upgrade command:
+
+```bash
+pipx upgrade db-conn-mcp          # pipx
+pip install --upgrade db-conn-mcp # pip
+uv tool upgrade db-conn-mcp       # uv tool
+```
+
+Running via **`uvx`** (e.g. in an MCP client config)? There's nothing installed to upgrade, but uvx caches resolved versions — use `db-conn-mcp@latest` as the command to always resolve the newest release, or run `uv cache clean db-conn-mcp` to force a re-resolve.
+
+After upgrading, **restart/reconnect your AI client** so it picks up the new version (and any new tools). Verify with `db-conn-mcp -v`.
+
+> PyPI's index can lag a release by a minute or two. If your upgrade reports "already at latest" right after a release, retry with `pipx upgrade db-conn-mcp --pip-args="--no-cache-dir"` (or `pip install --upgrade --no-cache-dir db-conn-mcp`).
+
 ---
 
 ## Quick start
