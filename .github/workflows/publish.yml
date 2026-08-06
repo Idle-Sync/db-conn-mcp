@@ -1,10 +1,12 @@
 name: Publish to PyPI
 
 # Publishes to PyPI via Trusted Publishing (OIDC) — no API token stored.
-# Triggers when a GitHub Release is published (create one from a vX.Y.Z tag).
+# Fully automated release: push a vX.Y.Z tag and this builds, publishes to PyPI
+# and the MCP Registry, then creates the GitHub Release (auto-generated notes —
+# edit them afterwards if you want hand-written ones).
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch: {}
 
 permissions:
@@ -77,3 +79,18 @@ jobs:
         run: ./mcp-publisher login github-oidc
       - name: Publish to MCP Registry
         run: ./mcp-publisher publish
+
+  release:
+    name: Create GitHub Release
+    needs: publish # only release what actually made it to PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release/tag
+    steps:
+      - uses: actions/checkout@v6
+      - name: Create the GitHub Release for this tag (skipped if it already exists)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
