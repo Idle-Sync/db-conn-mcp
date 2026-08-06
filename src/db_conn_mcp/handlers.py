@@ -8,6 +8,7 @@ Every method that opens a connection routes failures through
 DSN never appears in any result (Rule 6).
 """
 
+import asyncio
 import contextlib
 import json
 import re
@@ -26,6 +27,13 @@ MAX_OPEN_CURSORS = 5
 
 #: Idle cursors are reaped after this many seconds (checked on every cursor call).
 CURSOR_IDLE_TTL_SECONDS = 900.0
+
+#: Deadline for a single fallback-port PROBE attempt (issue #10).
+#: Applies only to fallback candidates — the primary DSN keeps the driver's own
+#: connect behavior. A refused port fails instantly, but a dropped/firewalled one
+#: hangs for the driver's default (~60s); without this cap, probing several ports
+#: would stack those hangs into minutes.
+FALLBACK_CONNECT_TIMEOUT_SECONDS = 5.0
 
 
 def _safe_filename_stem(name: str) -> str:
@@ -159,8 +167,10 @@ class Handlers:
 
         With ``fallback_ports`` configured, a refused/timed-out primary is retried
         on each fallback port in order (auth/TLS/etc. errors fail immediately —
-        never masked by probing). The winning fallback port is remembered for this
-        process; a primary success forgets it.
+        never masked by probing). Each fallback probe is capped at
+        ``FALLBACK_CONNECT_TIMEOUT_SECONDS`` so a black-holed port cannot stall the
+        whole chain. The winning fallback port is remembered for this process; a
+        primary success forgets it.
         """
         dialect = dialect_for(conn.dsn)
         candidates = self._dsn_candidates(conn)
@@ -168,7 +178,24 @@ class Handlers:
         last_diag: dict | None = None
         for port, dsn in candidates:
             try:
-                db = await dialect.connect(dsn, read_only=read_only)
+                if port is None:
+                    db = await dialect.connect(dsn, read_only=read_only)
+                else:
+                    db = await asyncio.wait_for(
+                        dialect.connect(dsn, read_only=read_only),
+                        timeout=FALLBACK_CONNECT_TIMEOUT_SECONDS,
+                    )
+            except (TimeoutError, asyncio.TimeoutError):
+                # A probe that runs out its deadline means "nothing answered here" —
+                # keep probing. Classified locally rather than via ``diagnostics``
+                # because on Python 3.10 ``asyncio.TimeoutError`` is NOT the builtin
+                # and would classify as UNKNOWN, wrongly aborting the probe chain.
+                # ``explain`` of a builtin ``TimeoutError`` yields the canned,
+                # sanitized HOST_UNREACHABLE advice (no DSN, host, or user).
+                last_diag = diagnostics.explain(TimeoutError())
+                if port is not None:
+                    tried_fallbacks.append(port)
+                continue
             except Exception as exc:  # noqa: BLE001 — intentional: classify & sanitize all
                 diag = diagnostics.explain(exc)
                 if diag["category"] != "HOST_UNREACHABLE":

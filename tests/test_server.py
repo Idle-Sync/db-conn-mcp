@@ -6,7 +6,9 @@ reads connect read-only, the write gate is enforced, and connection failures sur
 as sanitized diagnostics.
 """
 
+import asyncio
 import json
+import time
 from pathlib import Path
 
 import asyncpg
@@ -658,11 +660,15 @@ TUNNEL_CONFIG = {
     "connections": [
         {
             "name": "tunnel",
-            "dsn": "postgresql://u:SECRET@localhost:5432/db",
+            "dsn": "postgresql://u:SECRET@tunnelhost.invalid:5432/db",
             "mode": "read",
             "fallback_ports": [5433, 15432],
         },
-        {"name": "plain", "dsn": "postgresql://u:SECRET@localhost:5432/db", "mode": "read"},
+        {
+            "name": "plain",
+            "dsn": "postgresql://u:SECRET@tunnelhost.invalid:5432/db",
+            "mode": "read",
+        },
     ]
 }
 
@@ -679,12 +685,13 @@ class InvalidPasswordError(Exception):
 
 
 class PortFakeDialect(FakeDialect):
-    """Refuses or auth-rejects specific ports; records every port dialed."""
+    """Refuses, auth-rejects, or black-holes specific ports; records every port dialed."""
 
-    def __init__(self, refuse_ports=(), auth_fail_ports=(), **kw):
+    def __init__(self, refuse_ports=(), auth_fail_ports=(), hang_ports=(), **kw):
         super().__init__(**kw)
         self.refuse_ports = set(refuse_ports)
         self.auth_fail_ports = set(auth_fail_ports)
+        self.hang_ports = set(hang_ports)
         self.dialed: list[int] = []
 
     async def connect(self, dsn, *, read_only):
@@ -694,6 +701,8 @@ class PortFakeDialect(FakeDialect):
             raise ConnectionRefusedError("connection refused")
         if port in self.auth_fail_ports:
             raise InvalidPasswordError("bad password")
+        if port in self.hang_ports:
+            await asyncio.sleep(30)  # a firewalled port: never answers, never refuses
         return await super().connect(dsn, read_only=read_only)
 
 
@@ -745,11 +754,40 @@ async def test_all_ports_refused_reports_tried_ports_sanitized(tunnel_cfg_path, 
     msg = str(exc.value)
     cause = exc.value.diag["cause"]
     assert "5433" in cause and "15432" in cause
+    # Nothing DSN-derived reaches the agent — not the password, not the host (Rule 6).
+    # (`localhost` is deliberately NOT asserted absent: the canned HOST_UNREACHABLE
+    # advice mentions it as generic Docker guidance, fixed text never built from a DSN.)
     assert "SECRET" not in msg
-    # The probe suffix is appended to `cause`, so that is what this test sanitizes.
-    # The full message's canned HOST_UNREACHABLE advice mentions `localhost` as
-    # generic Docker guidance — fixed text, never derived from the DSN (Rule 6).
-    assert "SECRET" not in cause and "localhost" not in cause
+    assert "tunnelhost.invalid" not in msg
+    assert "SECRET" not in cause and "tunnelhost.invalid" not in cause
+
+
+async def test_hanging_fallback_times_out_and_probing_continues(tunnel_cfg_path, monkeypatch):
+    """A black-holed fallback must not stall the chain — the deadline moves it along."""
+    dialect = PortFakeDialect(refuse_ports={5432}, hang_ports={5433})
+    _patch_dialect(monkeypatch, dialect)
+    monkeypatch.setattr(handlers_mod, "FALLBACK_CONNECT_TIMEOUT_SECONDS", 0.05)
+    h = Handlers(tunnel_cfg_path)
+    started = time.monotonic()
+    await h.list_tables("tunnel")
+    elapsed = time.monotonic() - started
+    assert dialect.dialed == [5432, 5433, 15432]
+    assert h._active_ports == {"tunnel": 15432}
+    assert elapsed < 5  # the 30s hang was cut short, not waited out
+
+
+async def test_all_fallbacks_hang_reports_tried_ports_sanitized(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(refuse_ports={5432}, hang_ports={5433, 15432})
+    _patch_dialect(monkeypatch, dialect)
+    monkeypatch.setattr(handlers_mod, "FALLBACK_CONNECT_TIMEOUT_SECONDS", 0.05)
+    h = Handlers(tunnel_cfg_path)
+    with pytest.raises(handlers_mod.ConnectionFailedError) as exc:
+        await h.list_tables("tunnel")
+    assert dialect.dialed == [5432, 5433, 15432]
+    cause = exc.value.diag["cause"]
+    assert exc.value.diag["category"] == "HOST_UNREACHABLE"  # not UNKNOWN (py3.10 gotcha)
+    assert "5433" in cause and "15432" in cause
+    assert "SECRET" not in str(exc.value) and "tunnelhost.invalid" not in str(exc.value)
 
 
 async def test_no_fallback_key_never_probes(tunnel_cfg_path, monkeypatch):
