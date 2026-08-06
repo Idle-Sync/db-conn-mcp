@@ -16,7 +16,7 @@ It does one thing well: let an agent **safely explore and query** a database you
 
 - **Read stays read.** A `read` database runs every query in a native read-only transaction, *and* the read tool only accepts a single read-only statement (`SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`) — so an agent can't slip in a write or a `SET … READ WRITE` to flip the session. For a hard, privilege-level guarantee that holds no matter what, point the DSN at a **read-only database role** (see [Use a read-only role](#use-a-read-only-role-strongest-guarantee)).
 - **No secret leaks.** DSNs/passwords are never logged or returned by any tool. Connection failures come back as **sanitized diagnostics** (a category + fix), never a raw traceback with your host and credentials in it.
-- **Tiered write safety.** Writes are gated server-side: `mode` (hard, native) → `yolo` (per-database trust) → `user_consent` (explicit per-operation approval).
+- **Tiered write safety.** Writes are gated server-side: `mode` (hard, native) → **dry-run first** (a commit is refused unless that exact statement was previewed) → `yolo` (per-database trust) → `user_consent` (explicit per-operation approval).
 - **Zero-friction setup.** An interactive wizard registers your database and injects the server into your AI client's config for you — across 8 popular clients, each in its own format.
 
 ---
@@ -106,7 +106,7 @@ The single source of truth is **`connections.json`**, resolved in this order (fi
 | `name` | yes | Unique identifier the agent uses to pick a database. |
 | `dsn`  | yes | Connection string. **Secret** — never shown by any tool. |
 | `mode` | yes | `read` or `write`. An absolute, native security boundary. |
-| `yolo` | no (default `false`) | If `true`, skip the per-write consent prompt for this database. |
+| `yolo` | no (default `false`) | If `true`, skip the per-write consent prompt for this database. The dry-run preview still applies. |
 | `fallback_ports` | no | Extra ports to probe, in order, when the primary port refuses or times out. See below. |
 
 - **`fallback_ports`** *(optional)* — extra ports probed **in order** when the
@@ -128,13 +128,14 @@ the server never adds the key to a file that doesn't have it.
 
 ## The security model
 
-Writes pass through three gates, **in order**:
+Writes pass through four gates, **in order**:
 
-1. **`mode` (hard, native).** If the database isn't `"mode": "write"`, the write is rejected — and the connection is opened read-only at the PostgreSQL session level regardless, so it's blocked twice over. `yolo` and `user_consent` can **never** make a `read` database writable.
-2. **`yolo` (persisted trust).** On a `write` database with `yolo: true`, writes proceed without prompting.
-3. **`user_consent` (per-operation).** Otherwise the agent must first read the schema, show you the exact SQL, get your "yes", and re-call with `user_consent=true`.
+1. **`mode` (hard, native).** If the database isn't `"mode": "write"`, the write is rejected — and the connection is opened read-only at the PostgreSQL session level regardless, so it's blocked twice over. Nothing — not `yolo`, not `user_consent`, not `skip_dry_run` — can **ever** make a `read` database writable.
+2. **Dry-run first (server-enforced).** `execute_write_query` defaults to `dry_run=true`. A commit is **rejected** unless the identical statement was dry-run first — or the user explicitly asked to skip the preview and the agent passes `skip_dry_run=true`. `yolo` does **not** waive this stage.
+3. **`yolo` (persisted trust).** On a `write` database with `yolo: true`, the previewed write commits without prompting.
+4. **`user_consent` (per-operation).** Otherwise the agent must first read the schema, show you the exact SQL, get your "yes", and re-call with `user_consent=true`.
 
-**Dry-run first:** `execute_write_query(dry_run=true)` executes the statement in a transaction and **always rolls back**, returning the rows it *would* have affected. Nothing commits, so only the `mode` gate applies — the intended flow is dry-run → show the user the SQL **and its real impact** → then ask consent for the real write. (A dry-run does still execute server-side until rollback: brief locks, sequence advancement, trigger side effects.)
+**What the dry-run does:** it executes the statement in a transaction and **always rolls back**, returning the rows it *would* have affected — so only the `mode` gate applies, nothing commits, and you see the real impact before saying yes. The resulting permission to commit is scoped to that exact statement (same database, SQL, and params), **expires after 10 minutes**, and is **consumed** by the commit it authorizes — running the same statement twice means previewing it twice. (A dry-run does still execute server-side until rollback: brief locks, sequence advancement, trigger side effects.)
 
 Reads always run inside a native read-only transaction, **and** `execute_read_query` accepts only a single read-only statement (`SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`). That allowlist is what stops an agent from sending `SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE` to flip the session, or piggy-backing a `; DELETE …` onto a read — there's no SQL parsing involved, just a leading-keyword check plus the driver's single-command protocol.
 
@@ -170,7 +171,7 @@ The server exposes **22 tools** and **2 prompts**:
 | `search_value` | search | Find **where** a value appears across tables (fuzzy); returns table/column hits + samples. Pass `tables=[…]` to scope it. |
 | `get_object_definition` | explore | Faithful SQL definition of a **view / function / trigger / sequence / index** by name (native `pg_get_*def`; overloads and all schemas returned). |
 | `execute_read_query` | execute | Run a single read-only statement (`SELECT`/`WITH`/…) inside a read-only transaction. Optional `params` (**real bind parameters** via `$1`/`$2` — no quoting pitfalls) and `timeout_ms`. |
-| `execute_write_query` | execute | Run a mutation — gated by the safety model above. Also takes `params`/`timeout_ms`, and **`dry_run=true`**: execute in a transaction, report would-be `rows_affected`, always ROLL BACK — show the user real impact *before* consenting to the real write. |
+| `execute_write_query` | execute | Run a mutation — gated by the safety model above. **Defaults to `dry_run=true`**: execute in a transaction, report would-be `rows_affected`, always ROLL BACK — show the user real impact *before* consenting to the real write. Committing (`dry_run=false`) requires a prior preview of the identical statement, which expires after 10 minutes and is consumed by its commit; pass `skip_dry_run=true` only when the user explicitly asks to skip the preview. Also takes `params`/`timeout_ms`. |
 | `explain_query` | execute | `EXPLAIN` (optionally `ANALYZE`) a validated read-only query — confirm index usage without any write access. |
 | `cancel_query` | execute | Cancel the statement in a given backend `pid` (native `pg_cancel_backend`); the session survives. Find pids via `show_activity`. |
 | `open_query_cursor` | cursor | Open a server-side cursor over a read-only query for **large result sets**; returns a `cursor_id`. Max 5 open; 15-min idle auto-reap. |

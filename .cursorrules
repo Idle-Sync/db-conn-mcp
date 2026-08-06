@@ -35,7 +35,7 @@ When assisting the user with the `db-conn-mcp` project, please strictly adhere t
 ## 6. Security & Safety
 - **Never log DSNs** or passwords to the console. Connection diagnostics must be **sanitized** — describe the *category* of failure and how to fix it, never echo the DSN, host, user, or password.
 - Treat the `mode` attribute in `connections.json` as an absolute security boundary. If `mode` is `read`, the AI must not be able to bypass it.
-- Writes are gated server-side in this order: `mode` (hard, native) → `yolo` (per-database persisted trust) → `user_consent` (explicit per-operation approval). `yolo` and `user_consent` only relax the *prompt* on a DB that is already `write`; they can NEVER make a `read` DB writable.
+- Writes are gated server-side in this order: `mode` (hard, native) → `dry_run`-first (server-enforced preview: a commit is rejected unless the identical statement was dry-run first, or the user explicitly asked to skip via `skip_dry_run`) → `yolo` (per-database persisted trust) → `user_consent` (explicit per-operation approval). `yolo` and `user_consent` only relax the *prompt* on a DB that is already `write`; neither they nor `skip_dry_run` can EVER make a `read` DB writable, and `yolo` cannot skip the dry-run preview.
 
 ## 7. Living Documentation (Always Keep Docs Updated)
 - **ALWAYS, ALWAYS, ALWAYS** keep the docs in sync with decisions. The moment a design, scope, or architecture decision is made or accepted, update the relevant docs in the SAME change — never defer it:

@@ -37,7 +37,7 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 | `dialects/base.py` | The `Dialect` ABC — the extensibility contract | No |
 | `dialects/postgres.py` | `asyncpg` impl + native read-only enforcement | **Yes (only here)** |
 | `dialects/registry.py` | Map DSN scheme → `Dialect`; clear error on unknown scheme | No |
-| `safety.py` | Pure write-gate decision (`mode` + `yolo` + `consent`; `dry-run` = mode gate only) | No |
+| `safety.py` | Pure write-gate decision (`mode` + dry-run-first + `yolo` + `consent`; a `dry-run` itself = mode gate only) | No |
 | `diagnostics.py` | Classify driver errors → **sanitized** cause + fix; the doctor | No |
 | `handlers.py` | The 22 tool handlers as plain async methods (transport-free, unit-testable) + the open-cursor registry | No |
 | `server.py` | `FastMCP` app: registers the 22 tools + 2 prompts onto `handlers`, transport wiring | No |
@@ -59,7 +59,7 @@ The **dialect layer is the only place that knows a database is PostgreSQL.** Eve
 | 7 | `find_columns` | Search | safe — fuzzy column-name search across tables |
 | 8 | `search_value` | Search | safe (read-only) — fuzzy value search across tables; scoped/bounded |
 | 9 | `execute_read_query` | Execute | runs inside a **read-only transaction**; optional `params` (driver bind) + `timeout_ms` |
-| 10 | `execute_write_query` | Execute | **gated** (mode → yolo → consent); `dry_run=true` executes-then-ROLLS-BACK (mode gate only — nothing commits); optional `params` + `timeout_ms` |
+| 10 | `execute_write_query` | Execute | **gated** (mode → dry-run-first → yolo → consent); defaults to `dry_run=true`, which executes-then-ROLLS-BACK (mode gate only — nothing commits) and grants the matching commit; optional `params` + `timeout_ms` |
 | 11 | `explain_query` | Execute | safe — EXPLAIN (optionally ANALYZE) of a validated read-only query |
 | 12 | `cancel_query` | Execute | safe — native `pg_cancel_backend(pid)`; cancels the statement, session survives |
 | 13 | `open_query_cursor` | Cursor | safe (read-only) — server-side cursor for large results; pins one connection |
@@ -157,16 +157,24 @@ Read-only is enforced **natively by the database** — even a `read`-mode connec
 
 This is the heart of the safety model. The decision lives **in the server**, not in the agent's good intentions.
 
+The decision order is **`mode` → dry-run-first → `yolo` → `user_consent`**, and `execute_write_query` defaults to `dry_run=true` so the preview is what an agent gets unless it deliberately asks to commit:
+
 ```mermaid
 flowchart TD
-    A[execute_write_query db, sql, user_consent] --> B{db.mode == write?}
+    A[execute_write_query db, sql, dry_run=true by default] --> B{db.mode == write?}
     B -- no --> R1[❌ REJECT: db is read-only]
-    B -- yes --> C{db.yolo == true?}
-    C -- yes --> RUN[✅ run write SQL]
+    B -- yes --> P{dry_run == true?}
+    P -- yes --> PRE[✅ execute inside a tx, ALWAYS ROLL BACK<br/>record a grant for this exact statement]
+    P -- no --> G{unexpired grant for this exact<br/>statement, or skip_dry_run == true?}
+    G -- no --> R0[❌ REJECT:<br/>'Preview it first with dry_run=true.<br/>Pass skip_dry_run=true ONLY if the<br/>user explicitly asked to skip it']
+    G -- yes --> C{db.yolo == true?}
+    C -- yes --> RUN[✅ commit write SQL<br/>grant consumed]
     C -- no --> D{user_consent == true?}
     D -- yes --> RUN
     D -- no --> R2[❌ REJECT:<br/>'Read the table & schema, show the<br/>exact SQL to the user, get a yes,<br/>then call again with user_consent=true']
 ```
+
+The dry-run grant is process-local state in `Handlers` (`_dry_run_grants`, TTL 600s, consumed on commit) — precedent: `_active_ports`.
 
 The intended agent choreography for a non-yolo write:
 
@@ -185,22 +193,25 @@ sequenceDiagram
     Agent->>Server: sample_table_rows(db="dev", table="users")
     PG-->>Agent: example rows (learn the data shape)
 
-    Note over Agent,User: 2. First call WITHOUT consent — server forces the ask
-    Agent->>Server: execute_write_query(db="dev", sql="UPDATE users SET …", user_consent=false)
-    Server-->>Agent: ❌ REJECT — show SQL to user, get explicit yes
+    Note over Agent,DB: 2. Dry-run (the default) — executes, ALWAYS rolls back
+    Agent->>Server: execute_write_query(db="dev", sql="UPDATE users SET …")
+    Server->>PG: connect(read_only=false) → execute in tx → ROLLBACK
+    PG-->>Agent: rows_affected it WOULD have had (grant recorded)
 
-    Agent->>User: "I will run:  UPDATE users SET … (affects ~3 rows). Proceed?"
+    Agent->>User: "I will run:  UPDATE users SET … (affects 3 rows). Proceed?"
     User-->>Agent: "yes"
 
-    Note over Agent,DB: 3. Re-call WITH consent
-    Agent->>Server: execute_write_query(db="dev", sql="UPDATE users SET …", user_consent=true)
+    Note over Agent,DB: 3. Re-call to commit — grant + consent
+    Agent->>Server: execute_write_query(db="dev", sql="UPDATE users SET …", dry_run=false, user_consent=true)
     Server->>PG: connect(read_only=false) → execute(sql)
-    DB-->>Agent: rows affected
+    DB-->>Agent: rows affected (grant consumed)
 ```
 
-`mode` is the **hard boundary** (native, unbypassable). `yolo` and `user_consent` only relax the *prompt* on a DB that is *already* `write` — they can never make a `read` DB writable.
+Skipping step 2 is not a matter of etiquette: a commit with no matching unexpired grant is **rejected by the server** unless `skip_dry_run=true` attests the user explicitly asked to skip the preview.
 
-**Dry-run writes** (`dry_run=true`): the statement executes inside a transaction that is **always rolled back**, returning the `rows_affected` it *would* have had. Because nothing commits, only the `mode` gate applies — no yolo or consent needed — which is exactly what lets the agent show the user the real impact *before* asking for consent to the real write. Caveat (documented on the tool): a dry-run still executes server-side until the rollback, so it briefly takes locks, advances sequences, and fires triggers.
+`mode` is the **hard boundary** (native, unbypassable). Everything after it — the dry-run stage, `yolo`, `user_consent` — only decides *how much ceremony* a write needs on a DB that is *already* `write`; none of them, nor `skip_dry_run`, can ever make a `read` DB writable. And the two relaxations are scoped: `yolo` waives only the consent prompt (never the preview), `skip_dry_run` waives only the preview (never consent).
+
+**Dry-run writes** (`dry_run=true`, the default): the statement executes inside a transaction that is **always rolled back**, returning the `rows_affected` it *would* have had, and records a grant keyed on the exact `(database, sql, params)`. Because nothing commits, only the `mode` gate applies — no yolo or consent needed — which is exactly what lets the agent show the user the real impact *before* asking for consent to the real write. The grant expires after 10 minutes and is **consumed** by the commit it authorizes, so running the same statement twice means previewing it twice. Caveat (documented on the tool): a dry-run still executes server-side until the rollback, so it briefly takes locks, advances sequences, and fires triggers.
 
 ---
 
@@ -340,6 +351,6 @@ AI Agent ──MCP (stdio/http)──► server.py ─────┼─► safe
 1. A human registers a DB once via the CLI wizard → `connections.json`.
 2. An agent connects over MCP and **explores** (`list_*`, `get_table_schema`, `sample_table_rows`) — always read-only.
 3. **Reads** run inside a native read-only transaction.
-4. **Writes** pass through the server-side gate: `mode` (hard) → `yolo` (persisted trust) → `user_consent` (per-op ask).
+4. **Writes** pass through the server-side gate: `mode` (hard) → dry-run-first (a commit needs a prior preview of the identical statement, unless the user asked to skip) → `yolo` (persisted trust) → `user_consent` (per-op ask).
 5. `set_yolo_mode` lets a trusted DB skip the per-op ask, persisted to disk.
 6. Any unreachable DB yields a **sanitized diagnostic** (cause + fix), never a raw error or leaked DSN; `check_database` probes proactively and `troubleshoot_connection` is the full gotchas checklist.
