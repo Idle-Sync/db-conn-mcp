@@ -366,7 +366,9 @@ def test_selection_scales_to_n_clients():
 def test_wizard_completes_and_saves(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "detected_clients", lambda: [])  # no injection prompts
-    monkeypatch.setattr(builtins, "input", _scripted_input(["r", "mydb", "postgresql://h/db", "r"]))
+    monkeypatch.setattr(
+        builtins, "input", _scripted_input(["r", "mydb", "postgresql://h/db", "r", ""])
+    )
     rc = cli.run_setup_wizard()
     assert rc == 0
     cfg = config.load(str(config.repo_config_path()))
@@ -391,7 +393,7 @@ def test_wizard_ctrl_c_after_db_prompts_saves_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(
         builtins,
         "input",
-        _scripted_input(["r", "mydb", "postgresql://h/db", "r", KeyboardInterrupt]),
+        _scripted_input(["r", "mydb", "postgresql://h/db", "r", "", KeyboardInterrupt]),
     )
     rc = cli.run_setup_wizard()
     assert rc == 130
@@ -415,7 +417,9 @@ def test_setup_existing_config_shows_status_and_menu(tmp_path, monkeypatch, caps
 def test_wizard_prints_star_cta_on_success(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "detected_clients", lambda: [])
-    monkeypatch.setattr(builtins, "input", _scripted_input(["r", "mydb", "postgresql://h/db", "r"]))
+    monkeypatch.setattr(
+        builtins, "input", _scripted_input(["r", "mydb", "postgresql://h/db", "r", ""])
+    )
     rc = cli.run_setup_wizard()
     assert rc == 0
     assert cli.REPO_URL in capsys.readouterr().out  # nudge shown the moment it worked
@@ -465,7 +469,7 @@ def test_cmd_add_appends(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cli.register_database("repo", "a", "postgresql://h/a", "read")
     monkeypatch.setattr(cli, "detected_clients", lambda: [])
-    monkeypatch.setattr(builtins, "input", _scripted_input(["b", "postgresql://h/b", "r"]))
+    monkeypatch.setattr(builtins, "input", _scripted_input(["b", "postgresql://h/b", "r", ""]))
     rc = cli.cmd_add(str(config.repo_config_path()))
     assert rc == 0
     cfg = config.load(str(config.repo_config_path()))
@@ -476,7 +480,7 @@ def test_cmd_add_duplicate_name_returns_1(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cli.register_database("repo", "mydb", "postgresql://h/a", "read")
     monkeypatch.setattr(cli, "detected_clients", lambda: [])
-    monkeypatch.setattr(builtins, "input", _scripted_input(["mydb", "postgresql://h/b", "r"]))
+    monkeypatch.setattr(builtins, "input", _scripted_input(["mydb", "postgresql://h/b", "r", ""]))
     rc = cli.cmd_add(str(config.repo_config_path()))
     assert rc == 1
     cfg = config.load(str(config.repo_config_path()))
@@ -657,3 +661,57 @@ def test_cmd_reset_cancel_keeps_file(tmp_path, monkeypatch):
 
 def test_cmd_reset_no_config_is_already_fresh(tmp_path):
     assert cli.cmd_reset(str(tmp_path / "nope.json")) == 0
+
+
+# ---- fallback-ports prompt parsing (issue #10) ---------------------------------
+
+
+def test_parse_fallback_ports_empty_means_none():
+    assert cli._parse_fallback_ports("") is None
+
+
+def test_parse_fallback_ports_parses_csv():
+    assert cli._parse_fallback_ports(" 5433, 15432 ") == [5433, 15432]
+
+
+def test_parse_fallback_ports_rejects_junk_and_range():
+    with pytest.raises(ValueError):
+        cli._parse_fallback_ports("abc")
+    with pytest.raises(ValueError):
+        cli._parse_fallback_ports("5433, 70000")
+
+
+def test_wizard_persists_fallback_ports(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    monkeypatch.setattr(
+        builtins, "input", _scripted_input(["b", "postgresql://h/b", "r", "5433, 15432"])
+    )
+    assert cli.cmd_add(str(config.repo_config_path())) == 0
+    cfg = config.load(str(config.repo_config_path()))
+    assert cfg.connections[-1].fallback_ports == [5433, 15432]
+
+
+def test_wizard_rejects_invalid_fallback_ports(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    monkeypatch.setattr(builtins, "input", _scripted_input(["b", "postgresql://h/b", "r", "70000"]))
+    assert cli.cmd_add(str(config.repo_config_path())) == 1
+    cfg = config.load(str(config.repo_config_path()))
+    assert [c.name for c in cfg.connections] == ["a"]  # nothing persisted
+
+
+def test_status_shows_fallback_ports(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://u:SECRET@h/a", "read")
+    p = config.repo_config_path()
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    doc["connections"][0]["fallback_ports"] = [5433]
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    assert cli.cmd_status(str(p)) == 0
+    out = capsys.readouterr().out
+    assert "fallback_ports=[5433]" in out
+    assert "SECRET" not in out
