@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-from . import __commit__, __version__, config, server
+from . import __commit__, __version__, config, doctor, server
 from .clients import (
     ClientSpec,
     agent_config_paths,  # noqa: F401  re-exported for back-compat; unused in this module
@@ -110,6 +110,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add("check", "Probe connectivity for one database (or all); sanitized result.").add_argument(
         "name", nargs="?", default=None, help="Database to check; omit to check all."
+    )
+    p_doctor = _add(
+        "doctor", "Diagnose the whole setup: versions, processes, config, secrets, clients, DBs."
+    )
+    p_doctor.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip the PyPI version lookup; database probes still run.",
     )
     _add("remove", "Remove a database connection by name.").add_argument(
         "name", help="The connection name to remove."
@@ -449,6 +457,44 @@ def cmd_check(config_arg: str | None = None, name: str | None = None) -> int:
     return 0 if all_ok else 2
 
 
+#: CLI icons per finding status (the MCP tool returns the raw status strings).
+_DOCTOR_ICONS = {"ok": "✅", "warn": "⚠️", "fail": "❌", "skipped": "⏭"}
+
+#: ASCII stand-ins for streams that cannot encode the icons (e.g. a redirected
+#: Windows stdout, which falls back to cp1252). A diagnostic command must never be
+#: the thing that crashes.
+_DOCTOR_ASCII = {"ok": "[ok]", "warn": "[warn]", "fail": "[FAIL]", "skipped": "[skip]"}
+
+
+def _status_markers() -> dict[str, str]:
+    """Return the icons, or the ASCII fallbacks when stdout cannot encode them."""
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        "".join(_DOCTOR_ICONS.values()).encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return _DOCTOR_ASCII
+    return _DOCTOR_ICONS
+
+
+def cmd_doctor(config_arg: str | None = None, offline: bool = False) -> int:
+    """Run every diagnostic and print one line per finding.
+
+    Exit code 0 only if no finding is a ``fail`` (warnings and skips don't fail
+    the run — per issue #12).
+    """
+    path = _existing_config(config_arg)
+    findings = asyncio.run(doctor.run_checks(path, offline=offline))
+    markers = _status_markers()
+    for entry in findings:
+        print(f"{markers[entry['status']]}  {entry['check']}: {entry['detail']}")
+    failed = sum(1 for entry in findings if entry["status"] == "fail")
+    if failed:
+        print(f"\n{failed} problem(s) found.")
+        return 2
+    print("\nNo blocking problems found.")
+    return 0
+
+
 def cmd_remove(config_arg: str | None, name: str) -> int:
     """Remove a database connection by name."""
     path = _existing_config(config_arg)
@@ -509,6 +555,7 @@ _COMMANDS = {
     "add": lambda a: cmd_add(a.config),
     "clients": lambda a: cmd_clients(a.config, remove=a.remove),
     "check": lambda a: cmd_check(a.config, a.name),
+    "doctor": lambda a: cmd_doctor(a.config, offline=a.offline),
     "remove": lambda a: cmd_remove(a.config, a.name),
     "reset": lambda a: cmd_reset(a.config),
     "yolo": lambda a: cmd_yolo(a.config, a.name, a.state),

@@ -11,6 +11,7 @@ import json
 import pytest
 
 from db_conn_mcp import cli, clients, config
+from db_conn_mcp import cli as cli_module
 
 
 def _scripted_input(answers):
@@ -786,3 +787,88 @@ def test_injected_command_none_for_non_dict_entry(tmp_path):
     cfg.write_text(json.dumps({"mcpServers": {"db-conn-mcp": "not-a-dict"}}), encoding="utf-8")
     spec = ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
     assert injected_command(spec) is None
+
+
+def test_doctor_exit_zero_when_no_fail(monkeypatch, capsys):
+    async def fake_run_checks(path, *, offline=False):
+        return [
+            {"check": "pypi_latest", "status": "ok", "detail": "fresh", "suggested_action": "none"},
+            {
+                "check": "secrets_exposure",
+                "status": "warn",
+                "detail": "loose",
+                "suggested_action": "fix_permissions",
+            },
+            {
+                "check": "process_staleness",
+                "status": "skipped",
+                "detail": "no psutil",
+                "suggested_action": "none",
+            },
+        ]
+
+    monkeypatch.setattr(cli_module.doctor, "run_checks", fake_run_checks)
+    monkeypatch.setattr(cli_module, "_existing_config", lambda arg: None)
+    assert cli_module.cmd_doctor() == 0
+    out = capsys.readouterr().out
+    assert "pypi_latest" in out and "secrets_exposure" in out
+
+
+def test_doctor_exit_two_on_fail(monkeypatch, capsys):
+    async def fake_run_checks(path, *, offline=False):
+        return [
+            {
+                "check": "connectivity",
+                "status": "fail",
+                "detail": "db: unreachable",
+                "suggested_action": "none",
+            }
+        ]
+
+    monkeypatch.setattr(cli_module.doctor, "run_checks", fake_run_checks)
+    monkeypatch.setattr(cli_module, "_existing_config", lambda arg: None)
+    assert cli_module.cmd_doctor() == 2
+
+
+def test_doctor_offline_flag_parses():
+    args = cli_module.build_parser().parse_args(["doctor", "--offline"])
+    assert args.command == "doctor"
+    assert args.offline is True
+
+
+class _FakeStream:
+    """Minimal stdout stand-in that only carries an encoding."""
+
+    def __init__(self, encoding):
+        self.encoding = encoding
+
+
+def test_doctor_markers_use_icons_on_utf8(monkeypatch):
+    monkeypatch.setattr(cli_module.sys, "stdout", _FakeStream("utf-8"))
+    assert cli_module._status_markers() == cli_module._DOCTOR_ICONS
+
+
+def test_doctor_markers_fall_back_to_ascii_on_cp1252(monkeypatch):
+    """A Windows cp1252 stream must get ASCII markers, not a UnicodeEncodeError."""
+    monkeypatch.setattr(cli_module.sys, "stdout", _FakeStream("cp1252"))
+    assert cli_module._status_markers() == cli_module._DOCTOR_ASCII
+
+
+def test_doctor_prints_without_crashing_on_cp1252(monkeypatch, capsys):
+    async def fake_run_checks(path, *, offline=False):
+        return [
+            {
+                "check": "connectivity",
+                "status": "skipped",
+                "detail": "nothing to probe",
+                "suggested_action": "none",
+            }
+        ]
+
+    monkeypatch.setattr(cli_module.doctor, "run_checks", fake_run_checks)
+    monkeypatch.setattr(cli_module, "_existing_config", lambda arg: None)
+    monkeypatch.setattr(cli_module, "_status_markers", lambda: cli_module._DOCTOR_ASCII)
+    assert cli_module.cmd_doctor() == 0
+    out = capsys.readouterr().out
+    assert "connectivity" in out
+    assert out.isascii()

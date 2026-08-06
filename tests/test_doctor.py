@@ -431,3 +431,14 @@ async def test_connectivity_does_not_probe_identity_when_a_fallback_rejected_aut
     findings = await check_connectivity(CheckContext(config_path=path, offline=True))
     assert [f["check"] for f in findings] == ["connectivity"]
     assert findings[0]["status"] == "fail"
+
+
+def test_registry_order_and_membership():
+    assert [name for name, _ in doctor._CHECKS] == [
+        "process_staleness",
+        "pypi_latest",
+        "config_schema",
+        "secrets_exposure",
+        "client_paths",
+        "connectivity",
+    ]
