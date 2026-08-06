@@ -10,6 +10,7 @@ DSN never appears in any result (Rule 6).
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import re
 import time
@@ -34,6 +35,9 @@ CURSOR_IDLE_TTL_SECONDS = 900.0
 #: hangs for the driver's default (~60s); without this cap, probing several ports
 #: would stack those hangs into minutes.
 FALLBACK_CONNECT_TIMEOUT_SECONDS = 5.0
+
+#: How long a successful dry-run authorizes committing the identical statement.
+DRY_RUN_GRANT_TTL_SECONDS = 600.0
 
 
 def _safe_filename_stem(name: str) -> str:
@@ -143,6 +147,8 @@ class Handlers:
         self._cursors: dict[str, dict] = {}
         #: Fallback-port memory: connection name -> port that answered (issue #10).
         self._active_ports: dict[str, int] = {}
+        #: Dry-run grants: statement fingerprint -> monotonic time it was previewed.
+        self._dry_run_grants: dict[str, float] = {}
 
     def _load(self) -> config.Config:
         return config.load(str(self.config_path))
@@ -413,33 +419,60 @@ class Handlers:
         finally:
             await db.close()
 
+    @staticmethod
+    def _grant_key(database: str, sql: str, params: list[Any] | None) -> str:
+        """Fingerprint one exact statement; any change to sql/params misses the grant."""
+        payload = json.dumps([database, sql, params], default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _sweep_grants(self) -> None:
+        """Drop dry-run grants older than the TTL."""
+        now = time.monotonic()
+        for key in [
+            k for k, t in self._dry_run_grants.items() if now - t > DRY_RUN_GRANT_TTL_SECONDS
+        ]:
+            del self._dry_run_grants[key]
+
     async def execute_write_query(
         self,
         database: str,
         sql: str,
         params: list[Any] | None = None,
         user_consent: bool = False,
-        dry_run: bool = False,
+        dry_run: bool = True,
+        skip_dry_run: bool = False,
         timeout_ms: int | None = None,
     ) -> dict:
-        """Run a mutation, gated by ``safety`` (mode → yolo → consent).
+        """Run a mutation, gated by ``safety`` (mode → dry-run-first → yolo → consent).
 
-        With ``dry_run=True`` the statement executes inside a transaction that is
-        always ROLLED BACK — the result reports what *would* happen (rows affected)
-        without committing. A dry-run needs only the hard ``mode`` gate (nothing
-        commits, so no consent), which is exactly what lets an agent show the user
-        the impact before asking for real consent.
+        ``dry_run=True`` (the default) executes inside a transaction that is always
+        ROLLED BACK and records a grant for this exact statement. A commit
+        (``dry_run=False``) requires an unexpired grant for the identical
+        (database, sql, params) — consumed on success — unless ``skip_dry_run=True``
+        attests the user explicitly asked to skip the preview. Neither yolo nor
+        consent can bypass the preview stage; nothing can bypass ``mode``.
         """
         conn = config.get(self._load(), database)
+        self._sweep_grants()
+        key = self._grant_key(database, sql, params)
         if dry_run:
             safety.authorize_dry_run(conn)  # mode gate only — nothing commits
         else:
-            safety.authorize_write(conn, user_consent)  # raises WriteRejected if blocked
+            safety.authorize_commit(
+                conn,
+                user_consent,
+                has_grant=key in self._dry_run_grants,
+                skip_dry_run=skip_dry_run,
+            )
         dialect, db = await self._connect(conn, read_only=False)
         try:
             if dry_run:
-                return await dialect.execute_dry_run(db, sql, params, timeout_ms)
-            return await dialect.execute(db, sql, params, timeout_ms)
+                result = await dialect.execute_dry_run(db, sql, params, timeout_ms)
+                self._dry_run_grants[key] = time.monotonic()
+                return result
+            result = await dialect.execute(db, sql, params, timeout_ms)
+            self._dry_run_grants.pop(key, None)  # consumed — re-preview to run again
+            return result
         finally:
             await db.close()
 

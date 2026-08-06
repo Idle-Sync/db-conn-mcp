@@ -334,14 +334,18 @@ async def test_write_without_consent_rejected(cfg_path, monkeypatch):
     _patch_dialect(monkeypatch, dialect)
     h = Handlers(cfg_path)
     with pytest.raises(WriteRejected, match="user_consent"):
-        await h.execute_write_query("dev", "DELETE FROM users", user_consent=False)
+        await h.execute_write_query(
+            "dev", "DELETE FROM users", user_consent=False, dry_run=False, skip_dry_run=True
+        )
 
 
 async def test_write_with_consent_runs_writable(cfg_path, monkeypatch):
     dialect = FakeDialect(exec_result={"rows_affected": 2})
     _patch_dialect(monkeypatch, dialect)
     h = Handlers(cfg_path)
-    result = await h.execute_write_query("dev", "DELETE FROM users", user_consent=True)
+    result = await h.execute_write_query(
+        "dev", "DELETE FROM users", user_consent=True, dry_run=False, skip_dry_run=True
+    )
     assert dialect.connected_read_only is False
     assert result == {"rows_affected": 2}
 
@@ -350,7 +354,9 @@ async def test_write_yolo_runs_without_consent(cfg_path, monkeypatch):
     dialect = FakeDialect(exec_result={"rows_affected": 1})
     _patch_dialect(monkeypatch, dialect)
     h = Handlers(cfg_path)
-    result = await h.execute_write_query("trusted", "DELETE FROM x", user_consent=False)
+    result = await h.execute_write_query(
+        "trusted", "DELETE FROM x", user_consent=False, dry_run=False, skip_dry_run=True
+    )
     assert dialect.connected_read_only is False
     assert result == {"rows_affected": 1}
 
@@ -425,7 +431,9 @@ async def test_write_query_passes_params(cfg_path, monkeypatch):
     dialect = FakeDialect(exec_result={"rows_affected": 1})
     _patch_dialect(monkeypatch, dialect)
     h = Handlers(cfg_path)
-    await h.execute_write_query("dev", "UPDATE t SET x = $1", ["v"], user_consent=True)
+    await h.execute_write_query(
+        "dev", "UPDATE t SET x = $1", ["v"], user_consent=True, dry_run=False, skip_dry_run=True
+    )
     assert dialect.exec_calls[0]["params"] == ["v"]
 
 

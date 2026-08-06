@@ -186,7 +186,7 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
         Pass values via `params` ($1/$2/... placeholders), not pasted into the SQL.
         """
         return await handlers.execute_write_query(
-            database, sql, params, user_consent, dry_run, timeout_ms
+            database, sql, params, user_consent, dry_run=dry_run, timeout_ms=timeout_ms
         )
 
     @app.tool()
