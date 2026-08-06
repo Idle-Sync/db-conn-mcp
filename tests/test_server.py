@@ -797,3 +797,24 @@ async def test_no_fallback_key_never_probes(tunnel_cfg_path, monkeypatch):
     with pytest.raises(handlers_mod.ConnectionFailedError):
         await h.list_tables("plain")
     assert dialect.dialed == [5432]
+
+
+async def test_list_databases_shows_fallback_and_active_port(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(refuse_ports={5432, 5433})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    await h.list_tables("tunnel")  # probe lands on 15432
+    rows = {r["name"]: r for r in await h.list_databases()}
+    assert rows["tunnel"]["fallback_ports"] == [5433, 15432]
+    assert rows["tunnel"]["active_port"] == 15432
+    assert "active_port" not in rows["plain"] and "fallback_ports" not in rows["plain"]
+
+
+async def test_check_database_reports_active_port(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(refuse_ports={5432, 5433})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    report = {r["database"]: r for r in await h.check_database()}
+    assert report["tunnel"]["status"] == "OK"
+    assert report["tunnel"]["active_port"] == 15432
+    assert "active_port" not in report["plain"]

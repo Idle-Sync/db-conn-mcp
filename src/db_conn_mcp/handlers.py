@@ -219,8 +219,14 @@ class Handlers:
     # ---- Exploration tools ---------------------------------------------------
 
     async def list_databases(self) -> list[dict]:
-        """Return configured databases as ``{name, mode, yolo}`` — never the DSN."""
-        return [c.public_view() for c in self._load().connections]
+        """Return configured databases as ``{name, mode, yolo, ...}`` — never the DSN."""
+        rows = []
+        for c in self._load().connections:
+            view = c.public_view()
+            if c.name in self._active_ports:
+                view["active_port"] = self._active_ports[c.name]
+            rows.append(view)
+        return rows
 
     async def list_tables(self, database: str) -> list[dict]:
         """Return tables and views for one database."""
@@ -609,7 +615,10 @@ class Handlers:
             try:
                 _, db = await self._connect(conn, read_only=True)
                 await db.close()
-                report.append({"database": conn.name, "status": "OK"})
+                row = {"database": conn.name, "status": "OK"}
+                if conn.name in self._active_ports:
+                    row["active_port"] = self._active_ports[conn.name]
+                report.append(row)
             except ConnectionFailedError as exc:
                 report.append(
                     {
