@@ -109,7 +109,7 @@ The single source of truth is **`connections.json`**, resolved in this order (fi
 | `yolo` | no (default `false`) | If `true`, skip the per-write consent prompt for this database. |
 | `fallback_ports` | no | Extra ports to probe, in order, when the primary port refuses or times out. See below. |
 
-- **`fallback_ports`** *(optional)* — extra local ports probed **in order** when the
+- **`fallback_ports`** *(optional)* — extra ports probed **in order** when the
   primary port refuses or times out (auth/TLS errors fail immediately and are never
   masked). For DSNs behind SSH tunnels that don't always land on the same port.
   The winning port is remembered for the server's lifetime and shown as
@@ -118,7 +118,7 @@ The single source of truth is **`connections.json`**, resolved in this order (fi
   `"fallback_ports": [5433, 15432]`
 
 Probing is strictly opt-in and bounded: only the ports you list are ever tried (no
-scanning), each probe is capped at 5 seconds, and a connection without the key behaves
+scanning), each **fallback** probe is capped at 5 seconds, and a connection without the key behaves
 exactly as it always has. Existing `connections.json` files keep working untouched —
 the server never adds the key to a file that doesn't have it.
 

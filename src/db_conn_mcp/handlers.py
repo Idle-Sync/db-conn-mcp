@@ -60,7 +60,9 @@ def _dsn_with_port(dsn: str, port: int) -> str | None:
     except ValueError:
         return None
     creds, _, hostport = parts.netloc.rpartition("@")
-    host = hostport.rsplit(":", 1)[0] if parts.port is not None else hostport
+    # Strip an existing ":port" — including an empty one ("h:") that ``parts.port``
+    # reports as None. The ``]`` check keeps bare IPv6 literals (``[::1]``) intact.
+    host = hostport.rsplit(":", 1)[0] if hostport.rfind(":") > hostport.rfind("]") else hostport
     netloc = f"{creds}@{host}:{port}" if creds else f"{host}:{port}"
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
@@ -149,12 +151,21 @@ class Handlers:
         """Return ``(port, dsn)`` pairs in probe order; ``None`` port = primary DSN.
 
         Remembered active port (if any) moves to the front; the rest keep the
-        configured order. Without ``fallback_ports`` this is just the primary.
+        configured order. Duplicates are skipped — including a fallback that merely
+        repeats the primary DSN's own port. Without ``fallback_ports`` this is just
+        the primary.
         """
         candidates: list[tuple[int | None, str]] = [(None, conn.dsn)]
+        try:
+            seen: set[int | None] = {urlsplit(conn.dsn).port}
+        except ValueError:
+            seen = set()
         for port in conn.fallback_ports or []:
+            if port in seen:
+                continue
             dsn = _dsn_with_port(conn.dsn, port)
             if dsn is not None:
+                seen.add(port)
                 candidates.append((port, dsn))
         remembered = self._active_ports.get(conn.name)
         if remembered is not None:
@@ -199,6 +210,10 @@ class Handlers:
             except Exception as exc:  # noqa: BLE001 — intentional: classify & sanitize all
                 diag = diagnostics.explain(exc)
                 if diag["category"] != "HOST_UNREACHABLE":
+                    if port is not None:
+                        # Say which probed port produced it — port number only (Rule 6).
+                        diag = dict(diag)
+                        diag["cause"] += f" (on fallback port {port})"
                     raise ConnectionFailedError(diag) from None
                 last_diag = diag
                 if port is not None:
@@ -311,10 +326,17 @@ class Handlers:
         returns ``saved_to`` when ``output_dir`` is set). If the native tool isn't
         installed, returns ``{status: "pg_dump_not_found", message}`` with install
         guidance so the caller can offer to install it; failures come back sanitized.
+
+        Uses the remembered fallback port when one is active, so the native tool dials
+        the same port the driver did. The subprocess never probes — one port, one shot.
         """
         conn = config.get(self._load(), database)
         dialect = dialect_for(conn.dsn)
-        result = await dialect.dump_schema_sql(conn.dsn)
+        active_port = self._active_ports.get(conn.name)
+        dsn = conn.dsn
+        if active_port is not None:
+            dsn = _dsn_with_port(conn.dsn, active_port) or conn.dsn
+        result = await dialect.dump_schema_sql(dsn)
         if result.get("status") != "ok":
             return result  # pg_dump_not_found / pg_dump_failed — already sanitized
 

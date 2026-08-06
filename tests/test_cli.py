@@ -715,3 +715,21 @@ def test_status_shows_fallback_ports(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "fallback_ports=[5433]" in out
     assert "SECRET" not in out
+
+
+def test_cmd_check_prints_active_port(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+
+    class FakeHandlers:
+        def __init__(self, path):
+            pass
+
+        async def check_database(self, name=None):
+            return [{"database": "a", "status": "OK", "active_port": 15432}]
+
+    monkeypatch.setattr(cli, "Handlers", FakeHandlers)
+    rc = cli.cmd_check(str(config.repo_config_path()), None)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "a: OK (active_port=15432)" in out

@@ -544,7 +544,8 @@ def cmd_check(config_arg: str | None = None, name: str | None = None) -> int:
     all_ok = True
     for entry in results:
         if entry["status"] == "OK":
-            print(f"  {entry['database']}: OK")
+            port_note = f" (active_port={entry['active_port']})" if "active_port" in entry else ""
+            print(f"  {entry['database']}: OK{port_note}")
         else:
             all_ok = False
             print(f"  {entry['database']}: {entry.get('detail', entry['status'])}")

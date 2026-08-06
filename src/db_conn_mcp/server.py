@@ -69,7 +69,11 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
     # ---- Exploration tools ---------------------------------------------------
     @app.tool()
     async def list_databases() -> list[dict]:
-        """List configured databases with their allowed mode and yolo flag (no DSN)."""
+        """List configured databases with their allowed mode and yolo flag (no DSN).
+
+        Entries with fallback_ports configured also show them, plus active_port when a
+        fallback port is currently in use.
+        """
         return await handlers.list_databases()
 
     @app.tool()
@@ -291,7 +295,11 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
     # ---- Diagnostics tool ----------------------------------------------------
     @app.tool()
     async def check_database(database: str | None = None) -> list[dict]:
-        """Test connectivity for one database (or all) — returns OK or a sanitized cause."""
+        """Test connectivity for one database (or all) — returns OK or a sanitized cause.
+
+        Reports active_port when the database answered on a fallback port — doubles as a
+        live re-probe for tunneled connections.
+        """
         return await handlers.check_database(database)
 
     # ---- Prompts -------------------------------------------------------------
