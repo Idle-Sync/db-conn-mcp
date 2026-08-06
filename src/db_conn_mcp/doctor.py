@@ -12,6 +12,9 @@ labels — never DSNs, hosts, usernames, or passwords.
 import difflib
 import inspect
 import json
+import os
+import shutil
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -123,10 +126,78 @@ def check_config_schema(ctx: CheckContext) -> list[Finding]:
     return findings
 
 
+def check_secrets_exposure(ctx: CheckContext) -> list[Finding]:
+    """Use case 5: is the plaintext-DSN config file exposed (mode bits, git)?"""
+    name = "secrets_exposure"
+    if ctx.config_path is None:
+        return [finding(name, "skipped", "no configuration found — nothing to check")]
+    path = ctx.config_path
+    findings: list[Finding] = []
+
+    if os.name == "posix":
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            findings.append(
+                finding(
+                    name,
+                    "warn",
+                    f"{path.name} is readable by other users (mode {mode:03o}) — "
+                    f"run: chmod 600 {path}",
+                    "fix_permissions",
+                )
+            )
+        else:
+            findings.append(finding(name, "ok", f"{path.name} permissions are owner-only"))
+    else:
+        findings.append(
+            finding(
+                name,
+                "skipped",
+                "file-permission check is POSIX-only (Windows ACLs not analyzed)",
+            )
+        )
+
+    git = shutil.which("git")
+    if git is None:
+        findings.append(
+            finding(name, "skipped", "git not found — cannot verify the config is git-ignored")
+        )
+        return findings
+    parent = str(path.parent)
+    inside = subprocess.run(
+        [git, "-C", parent, "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        findings.append(finding(name, "ok", f"{path.name} is not inside a git work tree"))
+        return findings
+    ignored = subprocess.run(
+        [git, "-C", parent, "check-ignore", "-q", path.name], capture_output=True, check=False
+    )
+    if ignored.returncode == 0:
+        findings.append(
+            finding(name, "ok", f"{path.name} is inside a git work tree but git-ignored")
+        )
+    else:
+        findings.append(
+            finding(
+                name,
+                "fail",
+                f"{path.name} is inside a git work tree and NOT git-ignored — plaintext DSNs "
+                "are committable; add it to .gitignore",
+                "fix_config",
+            )
+        )
+    return findings
+
+
 #: The registry: (check_name, callable(ctx) -> list[Finding] | awaitable of it).
 #: Order is presentation order in the CLI.
 _CHECKS: list[tuple[str, Callable]] = [
     ("config_schema", check_config_schema),
+    ("secrets_exposure", check_secrets_exposure),
 ]
 
 

@@ -1,9 +1,19 @@
 """The doctor engine: findings shape, crash-guarding, and each check."""
 
 import json
+import os
+import subprocess
+
+import pytest
 
 from db_conn_mcp import doctor
-from db_conn_mcp.doctor import CheckContext, check_config_schema, finding, run_checks
+from db_conn_mcp.doctor import (
+    CheckContext,
+    check_config_schema,
+    check_secrets_exposure,
+    finding,
+    run_checks,
+)
 
 
 def test_finding_builder_defaults_action_to_none():
@@ -109,3 +119,41 @@ def test_config_schema_fails_on_non_utf8_config(tmp_path):
     assert f["status"] == "fail"
     assert f["suggested_action"] == "fix_config"
     assert "\\xc9" not in f["detail"] and "É" not in f["detail"]
+
+
+def test_secrets_git_not_ignored_fails(tmp_path, monkeypatch):
+    path = tmp_path / "connections.json"
+    path.write_text("{}", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    findings = check_secrets_exposure(CheckContext(config_path=path, offline=True))
+    git_finding = next(f for f in findings if "git" in f["detail"].lower())
+    assert git_finding["status"] == "fail"
+    assert git_finding["suggested_action"] == "fix_config"
+
+
+def test_secrets_git_ignored_ok(tmp_path):
+    path = tmp_path / "connections.json"
+    path.write_text("{}", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("connections.json\n", encoding="utf-8")
+    findings = check_secrets_exposure(CheckContext(config_path=path, offline=True))
+    git_finding = next(f for f in findings if "git" in f["detail"].lower())
+    assert git_finding["status"] == "ok"
+
+
+def test_secrets_outside_git_ok(tmp_path):
+    path = tmp_path / "connections.json"
+    path.write_text("{}", encoding="utf-8")
+    findings = check_secrets_exposure(CheckContext(config_path=path, offline=True))
+    assert all(f["status"] in ("ok", "skipped") for f in findings)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes only")
+def test_secrets_world_readable_warns(tmp_path):
+    path = tmp_path / "connections.json"
+    path.write_text("{}", encoding="utf-8")
+    path.chmod(0o644)
+    findings = check_secrets_exposure(CheckContext(config_path=path, offline=True))
+    perm = next(f for f in findings if "chmod" in f["detail"])
+    assert perm["status"] == "warn"
+    assert perm["suggested_action"] == "fix_permissions"
