@@ -51,7 +51,7 @@ When assisting the user with the `db-conn-mcp` project, please strictly adhere t
 ## 9. Environment & Sanitation
 - **Always work inside a project-local virtual environment** (`.venv`): `python -m venv .venv`, activate it, and install there. NEVER install dependencies into the global/system Python. `.venv` is git-ignored.
 - **Install from `pyproject.toml`** (the single source of truth — see Rule 4): `pip install -e .`. Do not hand-maintain a `requirements.txt`.
-- **Input sanitation:** validate and safely quote any identifier (database/table/column names) before placing it into catalog/introspection queries — never naive string concatenation. Route user-supplied *values* through driver parameterization. (Raw SQL in `execute_read_query`/`execute_write_query` is intentional and governed by the `mode` → `yolo` → `user_consent` gate.)
+- **Input sanitation:** validate and safely quote any identifier (database/table/column names) before placing it into catalog/introspection queries — never naive string concatenation. Route user-supplied *values* through driver parameterization. (Raw SQL in `execute_read_query`/`execute_write_query` is intentional and governed by the `mode` → `dry_run`-first → `yolo` → `user_consent` gate.)
 - **Secrets sanitation:** never commit `connections.json` or `.env` (both git-ignored); never print or log DSNs, hosts, or credentials; keep all error/diagnostic output sanitized (see Rule 6).
 
 ## 10. One Concern per Tool (Separate Tools for Separate Things)

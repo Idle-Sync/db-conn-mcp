@@ -131,7 +131,7 @@ the server never adds the key to a file that doesn't have it.
 Writes pass through four gates, **in order**:
 
 1. **`mode` (hard, native).** If the database isn't `"mode": "write"`, the write is rejected — and the connection is opened read-only at the PostgreSQL session level regardless, so it's blocked twice over. Nothing — not `yolo`, not `user_consent`, not `skip_dry_run` — can **ever** make a `read` database writable.
-2. **Dry-run first (server-enforced).** `execute_write_query` defaults to `dry_run=true`. A commit is **rejected** unless the identical statement was dry-run first — or the user explicitly asked to skip the preview and the agent passes `skip_dry_run=true`. `yolo` does **not** waive this stage.
+2. **Dry-run first (server-enforced).** `execute_write_query` defaults to `dry_run=true`. A commit is **rejected** unless the identical statement was dry-run first. The one escape hatch is `skip_dry_run=true`, which the agent passes to *attest* that you explicitly asked to skip the preview — the server can't verify that claim, so it's the same trust model as `user_consent` (and, like it, useless on a `read` database). `yolo` does **not** waive this stage.
 3. **`yolo` (persisted trust).** On a `write` database with `yolo: true`, the previewed write commits without prompting.
 4. **`user_consent` (per-operation).** Otherwise the agent must first read the schema, show you the exact SQL, get your "yes", and re-call with `user_consent=true`.
 

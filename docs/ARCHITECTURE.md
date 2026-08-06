@@ -39,7 +39,7 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 | `dialects/registry.py` | Map DSN scheme → `Dialect`; clear error on unknown scheme | No |
 | `safety.py` | Pure write-gate decision (`mode` + dry-run-first + `yolo` + `consent`; a `dry-run` itself = mode gate only) | No |
 | `diagnostics.py` | Classify driver errors → **sanitized** cause + fix; the doctor | No |
-| `handlers.py` | The 22 tool handlers as plain async methods (transport-free, unit-testable) + the open-cursor registry | No |
+| `handlers.py` | The 22 tool handlers as plain async methods (transport-free, unit-testable) + the open-cursor registry + the dry-run grant registry (`_dry_run_grants`) | No |
 | `server.py` | `FastMCP` app: registers the 22 tools + 2 prompts onto `handlers`, transport wiring | No |
 
 The **dialect layer is the only place that knows a database is PostgreSQL.** Everything above it speaks the abstract `Dialect` contract.
