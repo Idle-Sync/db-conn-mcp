@@ -18,7 +18,7 @@ When assisting the user with the `db-conn-mcp` project, please strictly adhere t
 
 ## 3. Configuration via JSON
 - The single source of truth for database connections is `connections.json`.
-- The schema is a top-level object `{ "connections": [ ... ] }`; each connection has `name`, `dsn`, `mode` (`"read"` or `"write"`), and an optional `yolo` (boolean, default `false`).
+- The schema is a top-level object `{ "connections": [ ... ] }`; each connection has `name`, `dsn`, `mode` (`"read"` or `"write"`), an optional `yolo` (boolean, default `false`), and an optional `fallback_ports` (list of ints, probed in order when the primary port refuses — see README).
 - Feel free to programmatically read, update, or create `connections.json` for the user if they ask you to add a database.
 
 ## 4. Technology Stack
