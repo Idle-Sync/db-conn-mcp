@@ -776,11 +776,17 @@ async def test_dump_schema_sql_sanitizes_failure(monkeypatch):
     assert "secretpw" not in result["message"]
 
 
+#: The only bytes a probe may ever put on the wire: length=8, code=80877103.
+#: Pinned so a future change cannot start leaking credentials into the handshake.
+_EXPECTED_SSL_REQUEST = b"\x00\x00\x00\x08\x04\xd2\x16\x2f"
+
+
 async def test_probe_listener_true_when_postgres_greeting():
     """A listener replying 'N' to SSLRequest is recognized as PostgreSQL."""
+    received: list[bytes] = []
 
     async def handle(reader, writer):
-        await reader.readexactly(8)  # the SSLRequest
+        received.append(await reader.readexactly(8))  # the SSLRequest
         writer.write(b"N")
         await writer.drain()
         writer.close()
@@ -792,6 +798,7 @@ async def test_probe_listener_true_when_postgres_greeting():
     finally:
         server.close()
         await server.wait_closed()
+    assert received == [_EXPECTED_SSL_REQUEST]
 
 
 async def test_probe_listener_false_when_connection_refused():
@@ -804,8 +811,10 @@ async def test_probe_listener_false_when_connection_refused():
 
 
 async def test_probe_listener_false_on_non_postgres_reply():
+    received: list[bytes] = []
+
     async def handle(reader, writer):
-        await reader.readexactly(8)
+        received.append(await reader.readexactly(8))
         writer.write(b"HTTP/1.1 400\r\n")
         await writer.drain()
         writer.close()
@@ -817,3 +826,4 @@ async def test_probe_listener_false_on_non_postgres_reply():
     finally:
         server.close()
         await server.wait_closed()
+    assert received == [_EXPECTED_SSL_REQUEST]

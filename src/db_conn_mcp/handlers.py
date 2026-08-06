@@ -218,8 +218,12 @@ class Handlers:
                 if diag["category"] != "HOST_UNREACHABLE":
                     if port is not None:
                         # Say which probed port produced it — port number only (Rule 6).
+                        # ``failed_port`` is the structured form of the same fact, so
+                        # callers can tell "failed on a fallback" from "failed on the
+                        # primary" without parsing the prose.
                         diag = dict(diag)
                         diag["cause"] += f" (on fallback port {port})"
+                        diag["failed_port"] = port
                     raise ConnectionFailedError(diag) from None
                 last_diag = diag
                 if port is not None:
@@ -675,12 +679,14 @@ class Handlers:
                     row["active_port"] = self._active_ports[conn.name]
                 report.append(row)
             except ConnectionFailedError as exc:
-                report.append(
-                    {
-                        "database": conn.name,
-                        "status": "UNREACHABLE",
-                        "category": exc.diag["category"],
-                        "detail": str(exc),
-                    }
-                )
+                row = {
+                    "database": conn.name,
+                    "status": "UNREACHABLE",
+                    "category": exc.diag["category"],
+                    "detail": str(exc),
+                }
+                # Present only when the failure came from a probed fallback port.
+                if "failed_port" in exc.diag:
+                    row["failed_port"] = exc.diag["failed_port"]
+                report.append(row)
         return report

@@ -365,12 +365,21 @@ def check_client_paths(ctx: CheckContext) -> list[Finding]:
     return findings
 
 
-def _auth_failed_with_fallbacks(entry: dict, conn) -> bool:
-    """The port-identity trigger: auth failed on the primary AND fallbacks exist."""
-    return entry.get("category") == "AUTH_FAILED" and bool(conn.fallback_ports)
+def _auth_failed_with_fallbacks(entry: dict, conn: Connection) -> bool:
+    """The port-identity trigger: auth failed on the primary AND fallbacks exist.
+
+    ``failed_port`` means the rejection came from a probed *fallback* — that port
+    demonstrably speaks the protocol, so "swap the primary port to it" would be both
+    a false statement and a no-op fix. Only a primary auth failure qualifies.
+    """
+    return (
+        entry.get("category") == "AUTH_FAILED"
+        and entry.get("failed_port") is None
+        and bool(conn.fallback_ports)
+    )
 
 
-async def _probe_port_identity(conn) -> list[Finding]:
+async def _probe_port_identity(conn: Connection) -> list[Finding]:
     """Use case 3: is a *different* server answering the primary port?
 
     Credential-free probes only (`Dialect.probe_listener`); findings name port

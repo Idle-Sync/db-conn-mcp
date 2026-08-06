@@ -397,3 +397,37 @@ async def test_connectivity_ok_reports_ok(tmp_path, monkeypatch):
     (f,) = await check_connectivity(CheckContext(config_path=path, offline=True))
     assert f["status"] == "ok"
     assert "db" in f["detail"]
+
+
+async def test_connectivity_does_not_probe_identity_when_a_fallback_rejected_auth(
+    tmp_path, monkeypatch
+):
+    """A fallback that rejected credentials already speaks the protocol.
+
+    Telling the agent to swap the primary port to it would be a false statement and
+    a no-op fix, so the port-identity probe must not run at all.
+    """
+    path = _write_cfg(tmp_path, fallback_ports=[5433])
+
+    async def fake_check_database(self, database=None):
+        return [
+            {
+                "database": "db",
+                "status": "UNREACHABLE",
+                "category": "AUTH_FAILED",
+                "detail": "Authentication failed. (on fallback port 5433)",
+                "failed_port": 5433,
+            }
+        ]
+
+    class _NeverProbe:
+        async def probe_listener(self, host, port):
+            raise AssertionError("must not probe when auth failed on a fallback port")
+
+    from db_conn_mcp.handlers import Handlers
+
+    monkeypatch.setattr(Handlers, "check_database", fake_check_database)
+    monkeypatch.setattr(doctor_mod, "dialect_for", lambda dsn: _NeverProbe())
+    findings = await check_connectivity(CheckContext(config_path=path, offline=True))
+    assert [f["check"] for f in findings] == ["connectivity"]
+    assert findings[0]["status"] == "fail"

@@ -875,7 +875,34 @@ async def test_hard_failure_on_fallback_port_names_the_port(tunnel_cfg_path, mon
         await h.list_tables("tunnel")
     assert exc.value.diag["category"] == "AUTH_FAILED"
     assert "fallback port 5433" in exc.value.diag["cause"]
+    # The same fact structurally, so callers never have to parse the prose.
+    assert exc.value.diag["failed_port"] == 5433
     assert "SECRET" not in str(exc.value) and "tunnelhost.invalid" not in str(exc.value)
+
+
+async def test_check_database_reports_failed_port_for_a_fallback_auth_failure(
+    tunnel_cfg_path, monkeypatch
+):
+    """Auth rejected by a probed fallback: the row says which port rejected us."""
+    dialect = PortFakeDialect(refuse_ports={5432}, auth_fail_ports={5433})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    row = {r["database"]: r for r in await h.check_database()}["tunnel"]
+    assert row["status"] == "UNREACHABLE"
+    assert row["category"] == "AUTH_FAILED"
+    assert row["failed_port"] == 5433
+
+
+async def test_check_database_omits_failed_port_when_the_primary_rejected(
+    tunnel_cfg_path, monkeypatch
+):
+    """Auth rejected by the primary: no failed_port, so the doctor may probe identity."""
+    dialect = PortFakeDialect(auth_fail_ports={5432})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    row = {r["database"]: r for r in await h.check_database()}["tunnel"]
+    assert row["category"] == "AUTH_FAILED"
+    assert "failed_port" not in row
 
 
 async def test_duplicate_fallback_ports_are_dialed_once(tmp_path, monkeypatch):
