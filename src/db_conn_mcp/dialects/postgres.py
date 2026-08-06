@@ -224,6 +224,121 @@ _DDL_TRIGGERS_SQL = r"""
 """
 
 
+# ---- Non-table object definitions (get_object_definition) --------------------
+# One parameterized catalog query per object type. Every definition is produced by
+# Postgres itself (pg_get_*def / quote_ident / format), never hand-assembled, and the
+# object name is always bound as $1/$2 — no identifier interpolation (Rule 9).
+
+_OBJECT_DEFINITION_SQL: dict[str, str] = {
+    "view": """
+        SELECT n.nspname AS schema, c.relname AS name,
+               CASE c.relkind WHEN 'm' THEN 'materialized view' ELSE 'view' END AS kind,
+               CASE c.relkind WHEN 'm' THEN 'CREATE MATERIALIZED VIEW '
+                    ELSE 'CREATE VIEW ' END
+                 || quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+                 || ' AS' || E'\\n' || pg_get_viewdef(c.oid, true) AS definition
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind IN ('v', 'm') AND c.relname = $1
+          AND ($2::text IS NULL OR n.nspname = $2)
+        ORDER BY n.nspname
+    """,
+    "function": """
+        SELECT n.nspname AS schema, p.proname AS name,
+               CASE p.prokind WHEN 'p' THEN 'procedure' ELSE 'function' END AS kind,
+               pg_get_functiondef(p.oid) AS definition
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE p.prokind IN ('f', 'p') AND p.proname = $1
+          AND ($2::text IS NULL OR n.nspname = $2)
+        ORDER BY n.nspname, p.oid
+    """,
+    "trigger": """
+        SELECT n.nspname AS schema, t.tgname AS name, 'trigger' AS kind,
+               pg_get_triggerdef(t.oid) AS definition
+        FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE NOT t.tgisinternal AND t.tgname = $1
+          AND ($2::text IS NULL OR n.nspname = $2)
+        ORDER BY n.nspname, c.relname
+    """,
+    "sequence": """
+        SELECT schemaname AS schema, sequencename AS name, 'sequence' AS kind,
+               format(
+                   'CREATE SEQUENCE %I.%I START WITH %s INCREMENT BY %s '
+                   'MINVALUE %s MAXVALUE %s CACHE %s%s;',
+                   schemaname, sequencename, start_value, increment_by,
+                   min_value, max_value, cache_size,
+                   CASE WHEN cycle THEN ' CYCLE' ELSE '' END
+               ) AS definition
+        FROM pg_sequences
+        WHERE sequencename = $1 AND ($2::text IS NULL OR schemaname = $2)
+        ORDER BY schemaname
+    """,
+    "index": """
+        SELECT n.nspname AS schema, c.relname AS name, 'index' AS kind,
+               pg_get_indexdef(c.oid) AS definition
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = 'i' AND c.relname = $1
+          AND ($2::text IS NULL OR n.nspname = $2)
+        ORDER BY n.nspname
+    """,
+}
+
+#: Native statement cancellation; same-user backends only unless superuser.
+_CANCEL_BACKEND_SQL = "SELECT pg_cancel_backend($1) AS cancelled"
+
+#: Column-owned sequences (serial/identity) with their owning table.column.
+_OWNED_SEQUENCES_SQL = """
+    SELECT sn.nspname AS sequence_schema,
+           s.relname  AS sequence,
+           tn.nspname AS table_schema,
+           t.relname  AS table,
+           a.attname  AS column
+    FROM pg_depend d
+    JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S'
+    JOIN pg_namespace sn ON sn.oid = s.relnamespace
+    JOIN pg_class t ON t.oid = d.refobjid
+    JOIN pg_namespace tn ON tn.oid = t.relnamespace
+    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid
+    WHERE d.classid = 'pg_class'::regclass
+      AND d.refclassid = 'pg_class'::regclass
+      AND d.deptype IN ('a', 'i')
+    ORDER BY sn.nspname, s.relname
+"""
+
+#: Per-table size/row statistics from the statistics collector (no table scans).
+_TABLE_STATS_SQL = """
+    SELECT s.schemaname AS schema,
+           s.relname AS table,
+           s.n_live_tup AS approx_rows,
+           pg_table_size(s.relid) AS table_bytes,
+           pg_indexes_size(s.relid) AS index_bytes,
+           pg_total_relation_size(s.relid) AS total_bytes
+    FROM pg_stat_user_tables s
+    ORDER BY pg_total_relation_size(s.relid) DESC, s.schemaname, s.relname
+"""
+
+#: Sanitized activity view — no user names, no client addresses; query text is
+#: opt-in ($1) and truncated so secrets embedded in SQL can't leak by default.
+_SHOW_ACTIVITY_SQL = """
+    SELECT pid,
+           state,
+           wait_event_type,
+           wait_event,
+           backend_type,
+           application_name,
+           date_trunc('second', now() - query_start)::text AS query_age,
+           date_trunc('second', now() - xact_start)::text  AS transaction_age,
+           CASE WHEN $1 THEN left(query, 300) ELSE NULL END AS query
+    FROM pg_stat_activity
+    WHERE pid <> pg_backend_pid()
+    ORDER BY query_start NULLS LAST
+"""
+
+
 #: Fuzzy column-name search (Tool A). ``$1`` is the parameterized pattern.
 _FIND_COLUMNS_SQL = """
     SELECT table_schema AS schema,
@@ -432,6 +547,42 @@ def _split_schema_table(table: str) -> tuple[str, str | None]:
     return table, None
 
 
+def _timeout_seconds(timeout_ms: int | None) -> float | None:
+    """Convert a per-call ``timeout_ms`` into asyncpg's ``timeout`` (seconds)."""
+    if timeout_ms is None:
+        return None
+    ms = int(timeout_ms)
+    if ms <= 0:
+        raise ValueError("timeout_ms must be a positive number of milliseconds.")
+    return ms / 1000.0
+
+
+class _PostgresCursor:
+    """A server-side cursor that owns its connection and read-only transaction.
+
+    asyncpg cursors only live inside a transaction, so the handle keeps both and
+    releases them together: ``close()`` rolls the transaction back (it never
+    committed anything — it is read-only) and closes the connection.
+    """
+
+    def __init__(self, conn: Any, tx: Any, cursor: Any):
+        self._conn = conn
+        self._tx = tx
+        self._cursor = cursor
+
+    async def fetch(self, n: int) -> list[dict]:
+        """Fetch up to ``n`` more rows; fewer (or none) means the cursor is exhausted."""
+        rows = await self._cursor.fetch(max(1, int(n)))
+        return [dict(r) for r in rows]
+
+    async def close(self) -> None:
+        """Release the cursor, its transaction, and the underlying connection."""
+        try:
+            await self._tx.rollback()
+        finally:
+            await self._conn.close()
+
+
 def _leading_keyword(sql: str) -> str:
     """Return the first SQL keyword, lowercased, ignoring leading whitespace/comments.
 
@@ -579,14 +730,110 @@ class PostgresDialect(Dialect):
         rows = await conn.fetch(sql)
         return [dict(r) for r in rows]
 
-    async def execute(self, conn: Any, sql: str) -> dict:
-        if self._is_row_returning(sql):
-            rows = await conn.fetch(sql)
-            mapped = [dict(r) for r in rows]
-            columns = list(mapped[0].keys()) if mapped else []
-            return {"columns": columns, "rows": mapped}
-        status = await conn.execute(sql)
-        return {"rows_affected": _parse_affected(status)}
+    async def execute(
+        self,
+        conn: Any,
+        sql: str,
+        params: list[Any] | None = None,
+        timeout_ms: int | None = None,
+    ) -> dict:
+        args = list(params or [])
+        timeout = _timeout_seconds(timeout_ms)
+        try:
+            if self._is_row_returning(sql):
+                rows = await conn.fetch(sql, *args, timeout=timeout)
+                mapped = [dict(r) for r in rows]
+                columns = list(mapped[0].keys()) if mapped else []
+                return {"columns": columns, "rows": mapped}
+            status = await conn.execute(sql, *args, timeout=timeout)
+            return {"rows_affected": _parse_affected(status)}
+        except (TimeoutError, asyncio.TimeoutError):
+            # Sanitized: the query was cancelled server-side by the driver.
+            raise ValueError(f"Query exceeded timeout_ms={timeout_ms} and was cancelled.") from None
+
+    async def execute_dry_run(
+        self,
+        conn: Any,
+        sql: str,
+        params: list[Any] | None = None,
+        timeout_ms: int | None = None,
+    ) -> dict:
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            result = await self.execute(conn, sql, params, timeout_ms)
+        finally:
+            await tx.rollback()  # always discard — that is the whole point
+        return {**result, "dry_run": True, "rolled_back": True}
+
+    async def open_cursor(self, conn: Any, sql: str, params: list[Any] | None = None) -> Any:
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            cursor = await conn.cursor(sql, *(params or []))
+        except Exception:
+            await tx.rollback()
+            raise
+        return _PostgresCursor(conn, tx, cursor)
+
+    async def get_object_definition(self, conn: Any, object_type: str, name: str) -> list[dict]:
+        query = _OBJECT_DEFINITION_SQL.get(object_type)
+        if query is None:
+            supported = ", ".join(sorted(_OBJECT_DEFINITION_SQL))
+            raise ValueError(f"Unknown object_type {object_type!r}. Supported: {supported}.")
+        obj, schema = _split_schema_table(name)
+        rows = await conn.fetch(query, obj, schema)
+        return [dict(r) for r in rows]
+
+    async def cancel_backend(self, conn: Any, pid: int) -> dict:
+        row = await conn.fetchrow(_CANCEL_BACKEND_SQL, int(pid))
+        return {"pid": int(pid), "cancelled": bool(row["cancelled"]) if row else False}
+
+    async def explain(self, conn: Any, sql: str, analyze: bool = False) -> dict:
+        prefix = "EXPLAIN (ANALYZE, BUFFERS) " if analyze else "EXPLAIN "
+        rows = await conn.fetch(prefix + sql)
+        # Each row is one plan line under a single "QUERY PLAN" column.
+        return {"plan": [next(iter(dict(r).values())) for r in rows]}
+
+    async def check_sequences(self, conn: Any) -> list[dict]:
+        report: list[dict] = []
+        for r in await conn.fetch(_OWNED_SEQUENCES_SQL):
+            d = dict(r)
+            qseq = f"{_quote_identifier(d['sequence_schema'])}.{_quote_identifier(d['sequence'])}"
+            qtable = f"{_quote_identifier(d['table_schema'])}.{_quote_identifier(d['table'])}"
+            qcol = _quote_identifier(d["column"])
+            try:
+                seq = await conn.fetchrow(f"SELECT last_value, is_called FROM {qseq}")
+                mx = await conn.fetchrow(f"SELECT max({qcol})::bigint AS max_id FROM {qtable}")
+            except asyncpg.PostgresError:  # non-numeric column / no privilege — skip
+                continue
+            last_value = seq["last_value"]
+            is_called = seq["is_called"]
+            max_id = mx["max_id"]
+            # An uncalled sequence hands out last_value itself next, so its safe
+            # ceiling is one lower than a called one.
+            ceiling = last_value if is_called else last_value - 1
+            report.append(
+                {
+                    **d,
+                    "last_value": last_value,
+                    "is_called": is_called,
+                    "max_id": max_id,
+                    "behind": max_id is not None and max_id > ceiling,
+                }
+            )
+        return report
+
+    async def table_stats(self, conn: Any) -> list[dict]:
+        return [dict(r) for r in await conn.fetch(_TABLE_STATS_SQL)]
+
+    async def show_activity(self, conn: Any, include_query: bool = False) -> list[dict]:
+        rows = await conn.fetch(_SHOW_ACTIVITY_SQL, bool(include_query))
+        mapped = [dict(r) for r in rows]
+        if not include_query:
+            for row in mapped:
+                row.pop("query", None)
+        return mapped
 
     def validate_read_only(self, sql: str) -> None:
         """Reject anything the read tool must not run (see :meth:`Dialect.validate_read_only`).

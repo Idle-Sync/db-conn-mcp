@@ -42,17 +42,34 @@ To provide the best Agent Experience (AgentX), the server exposes specific tools
 8. **`search_value`**: Fuzzy search for a **value in the data** across tables — finds *where* a value appears, returning `{schema, table, column, matches, samples}`. Each table is scanned once (single-pass aggregate). The agent narrows first via `list_tables`/`find_columns` and passes a `tables` shortlist; unscoped, it scans all non-system tables, bounded by a `statement_timeout` + per-column limit (partial results flagged `truncated`). Per **Rule 10**, this is a separate tool from `find_columns`.
 
 ### Execution Tools
-9. **`execute_read_query`**: Runs custom read-only queries (single `SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`). Validated to a single read-only statement *and* run inside a native read-only transaction.
-10. **`execute_write_query`**: Runs `UPDATE`, `INSERT`, `DELETE`, or DDL. Gated server-side, in order:
+9. **`execute_read_query`**: Runs custom read-only queries (single `SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`). Validated to a single read-only statement *and* run inside a native read-only transaction. Accepts optional **`params`** (real driver bind parameters via `$1`/`$2` placeholders — values are never string-interpolated, eliminating quoting/injection accidents with agent-generated SQL) and **`timeout_ms`** (cancels an overrunning query with a sanitized error).
+10. **`execute_write_query`**: Runs `UPDATE`, `INSERT`, `DELETE`, or DDL. Also accepts `params` and `timeout_ms` (as above). Gated server-side, in order:
    - **Security 1 (`mode`):** Immediately rejected if the database is not allowlisted as `"mode": "write"` in JSON. This boundary is absolute.
    - **Security 2 (`yolo`):** If the database has `yolo: true`, the write proceeds without a consent prompt.
    - **Security 3 (`user_consent`):** Otherwise the tool requires a `user_consent: true` parameter and is rejected without it. The tool description strictly instructs the AI: *"First read the table and its schema, then print the exact SQL you plan to run to the user and ask for their explicit permission. Only call again with `user_consent=true` if they say yes."*
+   - **Dry-run (`dry_run: true`):** executes the statement inside a transaction and **always rolls back**, returning the `rows_affected` it *would* have had. Only the `mode` gate applies (nothing commits, so no yolo/consent needed) — the intended choreography is: dry-run first, show the user the SQL **plus its real impact**, then re-call for real with consent. Documented caveat: a dry-run still executes server-side until rollback (brief locks, sequence advancement, trigger side effects).
+11. **`explain_query`**: Runs `EXPLAIN` (optionally `EXPLAIN (ANALYZE, BUFFERS)`) on a validated read-only query, returning the plan lines. `analyze=true` really executes the query for timings — safe because the SQL is read-only-validated *and* the session is natively read-only. Per **Rule 10** this is a separate tool (one concern: "show me the plan"), even though plain `EXPLAIN` also works through `execute_read_query`.
+12. **`cancel_query`**: Cancels the statement running in a given server backend `pid` via the database's own `pg_cancel_backend()` — stateless (no server-side tracking of in-flight queries), cancels the statement only (the session survives), and permission-bounded by the database itself (same-user unless superuser). Find pids with `show_activity`. Complements `timeout_ms` for queries already stuck.
+
+### Cursor Tools (large result sets)
+13. **`open_query_cursor`**: Opens a **native server-side cursor** over a validated read-only query and returns a `cursor_id`. The one deliberately stateful corner of the server: each cursor pins a dedicated read-only connection until closed, bounded hard — max **5** open cursors, **15-minute** idle reaping, auto-close on exhaustion.
+14. **`fetch_rows`**: Fetches the next *N* rows (default 100) from an open cursor; reports `exhausted` and closes the cursor automatically when drained.
+15. **`close_cursor`**: Explicitly closes a cursor and releases its connection. Idempotent. Per **Rule 10**, open/fetch/close are three tools — one job each.
+
+### Object-Definition Tool
+16. **`get_object_definition`**: Returns the faithful SQL definition of a **non-table** object by name: `view` (incl. materialized), `function` (incl. procedures; all overloads returned), `trigger`, `sequence`, or `index`. Definitions are produced by the database's own functions (`pg_get_viewdef`/`functiondef`/`triggerdef`/`indexdef`, `pg_sequences`) — never hand-assembled — and names are always bound parameters. `name` may be schema-qualified; all matches across schemas are returned. The per-object sibling of `get_table_schema` for everything that isn't a table.
+
+### Operational Insight Tools (read-only conveniences)
+17. **`diff_schemas`**: Structural diff of two configured databases built on `get_database_schema`: tables only in one side; per-table column presence, column attribute changes (type/nullable/default), primary-key and foreign-key differences; `identical: true` when clean. The core "is my migrated copy in sync with its source of truth" check.
+18. **`check_sequences`**: Reports every column-owned sequence vs. the max value in its column, flagging `behind: true` where the next sequence value would collide with existing data — the classic silent breakage after logical-replication/bulk-copy migrations.
+19. **`table_stats`**: Approximate row counts (`n_live_tup`) and disk/index/total sizes per table, largest first — from the statistics collector, no table scans. For migration copy-order planning and anomaly spotting.
+20. **`show_activity`**: A **sanitized** view of `pg_stat_activity`: pid, state, wait events, backend type, application name, query/transaction age. Never includes user names or client addresses; query text only with `include_query=true` and truncated (Rule 6 — secrets embedded in SQL can't leak by default). Answers "what is holding connections"; pairs with `cancel_query`.
 
 ### Configuration Tools
-11. **`set_yolo_mode`**: Sets `yolo` (`true`/`false`) for one named database and **persists it to `connections.json`**, so the choice survives restarts. Per-database — enabling `yolo` on one DB never affects another.
+21. **`set_yolo_mode`**: Sets `yolo` (`true`/`false`) for one named database and **persists it to `connections.json`**, so the choice survives restarts. Per-database — enabling `yolo` on one DB never affects another.
 
 ### Diagnostics Tools
-12. **`check_database`**: Tests connectivity for one named database (or all of them) and returns `OK` or a sanitized, classified cause + fix. Never echoes the DSN/credentials.
+22. **`check_database`**: Tests connectivity for one named database (or all of them) and returns `OK` or a sanitized, classified cause + fix. Never echoes the DSN/credentials.
 
 ### MCP Prompts
 - **`troubleshoot_connection`**: A discoverable prompt exposing the full connection-gotchas checklist (host/port, firewall, `sslmode`, Docker `localhost` vs container, db-name case, pool limits, …) the agent can pull at any time.

@@ -41,16 +41,45 @@ class FakeConn:
         self.closed = True
 
 
+class FakeCursor:
+    """Serves queued row batches; records whether it was closed."""
+
+    def __init__(self, batches=None):
+        self._batches = list(batches or [])
+        self.closed = False
+
+    async def fetch(self, n):
+        return self._batches.pop(0) if self._batches else []
+
+    async def close(self):
+        self.closed = True
+
+
 class FakeDialect:
     """Records how it was connected and serves canned results."""
 
-    def __init__(self, *, raise_on_connect=None, exec_result=None, dump_result=None):
+    def __init__(
+        self,
+        *,
+        raise_on_connect=None,
+        exec_result=None,
+        dump_result=None,
+        cursor_batches=None,
+        db_schema=None,
+    ):
         self.raise_on_connect = raise_on_connect
         self.exec_result = exec_result or {"columns": [], "rows": []}
         self.dump_result = dump_result or {"status": "ok", "ddl": "-- pg_dump\nCREATE TABLE x();"}
         self.dumped_dsn = None
         self.connected_read_only = None
         self.conn = FakeConn()
+        self.exec_calls: list[dict] = []
+        self.dry_run_calls: list[dict] = []
+        self.cursor = FakeCursor(cursor_batches)
+        self.db_schema = db_schema
+        self.explained: list[tuple] = []
+        self.cancelled_pids: list[int] = []
+        self.activity_include_query = None
 
     async def connect(self, dsn, *, read_only):
         self.connected_read_only = read_only
@@ -65,6 +94,8 @@ class FakeDialect:
         return {"table": table, "columns": [], "primary_key": [], "foreign_keys": []}
 
     async def get_database_schema(self, conn):
+        if self.db_schema is not None:
+            return self.db_schema
         return {
             "tables": [
                 {
@@ -87,8 +118,40 @@ class FakeDialect:
     async def sample_rows(self, conn, table, n=10):
         return [{"id": 1}]
 
-    async def execute(self, conn, sql):
+    async def execute(self, conn, sql, params=None, timeout_ms=None):
+        self.exec_calls.append({"sql": sql, "params": params, "timeout_ms": timeout_ms})
         return self.exec_result
+
+    async def execute_dry_run(self, conn, sql, params=None, timeout_ms=None):
+        self.dry_run_calls.append({"sql": sql, "params": params, "timeout_ms": timeout_ms})
+        return {**self.exec_result, "dry_run": True, "rolled_back": True}
+
+    async def open_cursor(self, conn, sql, params=None):
+        return self.cursor
+
+    async def get_object_definition(self, conn, object_type, name):
+        return [{"schema": "public", "name": name, "kind": object_type, "definition": "..."}]
+
+    async def cancel_backend(self, conn, pid):
+        self.cancelled_pids.append(pid)
+        return {"pid": pid, "cancelled": True}
+
+    async def explain(self, conn, sql, analyze=False):
+        self.explained.append((sql, analyze))
+        return {"plan": ["Seq Scan on users"]}
+
+    async def check_sequences(self, conn):
+        return [
+            {"sequence": "users_id_seq", "table": "users", "column": "id", "behind": True},
+            {"sequence": "orgs_id_seq", "table": "orgs", "column": "id", "behind": False},
+        ]
+
+    async def table_stats(self, conn):
+        return [{"schema": "public", "table": "users", "approx_rows": 5, "total_bytes": 8192}]
+
+    async def show_activity(self, conn, include_query=False):
+        self.activity_include_query = include_query
+        return [{"pid": 1, "state": "active"}]
 
     def validate_read_only(self, sql):
         # Permissive stub; the real read-only gate is covered in test_postgres.py.
@@ -341,7 +404,225 @@ async def test_tool_connect_failure_is_sanitized(cfg_path, monkeypatch):
     assert "SECRET" not in str(exc.value)
 
 
+# ---- params & timeouts pass through (issue #8) --------------------------------
+
+
+async def test_read_query_passes_params_and_timeout(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    await h.execute_read_query("prod", "SELECT * FROM t WHERE x = $1", ["O'Hara"], 2000)
+    assert dialect.exec_calls[0] == {
+        "sql": "SELECT * FROM t WHERE x = $1",
+        "params": ["O'Hara"],
+        "timeout_ms": 2000,
+    }
+
+
+async def test_write_query_passes_params(cfg_path, monkeypatch):
+    dialect = FakeDialect(exec_result={"rows_affected": 1})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    await h.execute_write_query("dev", "UPDATE t SET x = $1", ["v"], user_consent=True)
+    assert dialect.exec_calls[0]["params"] == ["v"]
+
+
+# ---- dry-run writes ------------------------------------------------------------
+
+
+async def test_dry_run_needs_no_consent_on_write_db(cfg_path, monkeypatch):
+    dialect = FakeDialect(exec_result={"rows_affected": 7})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.execute_write_query("dev", "DELETE FROM t", dry_run=True)
+    assert result == {"rows_affected": 7, "dry_run": True, "rolled_back": True}
+    assert dialect.dry_run_calls and not dialect.exec_calls  # rolled-back path only
+
+
+async def test_dry_run_still_blocked_on_read_db(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    with pytest.raises(WriteRejected, match="dry-run|read-only"):
+        await h.execute_write_query("prod", "DELETE FROM t", dry_run=True)
+    assert dialect.connected_read_only is None  # never connected
+
+
+# ---- explain / cancel ------------------------------------------------------------
+
+
+async def test_explain_query_connects_read_only(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.explain_query("prod", "SELECT 1", analyze=True)
+    assert dialect.connected_read_only is True
+    assert dialect.explained == [("SELECT 1", True)]
+    assert result["plan"] == ["Seq Scan on users"]
+
+
+async def test_cancel_query_passes_pid(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.cancel_query("prod", 4242)
+    assert dialect.connected_read_only is True
+    assert result == {"pid": 4242, "cancelled": True}
+
+
+# ---- cursor lifecycle -------------------------------------------------------------
+
+
+async def test_cursor_open_fetch_drain_autocloses(cfg_path, monkeypatch):
+    dialect = FakeDialect(cursor_batches=[[{"id": 1}, {"id": 2}], [{"id": 3}]])
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+
+    opened = await h.open_query_cursor("prod", "SELECT * FROM big")
+    cursor_id = opened["cursor_id"]
+    assert dialect.connected_read_only is True
+    assert len(h._cursors) == 1
+
+    first = await h.fetch_rows(cursor_id, 2)
+    assert first["rows"] == [{"id": 1}, {"id": 2}]
+    assert first["exhausted"] is False
+
+    second = await h.fetch_rows(cursor_id, 2)  # short batch -> exhausted -> auto-close
+    assert second["rows"] == [{"id": 3}]
+    assert second["exhausted"] is True and second["cursor_closed"] is True
+    assert dialect.cursor.closed is True
+    assert h._cursors == {}
+
+
+async def test_fetch_rows_unknown_cursor(cfg_path, monkeypatch):
+    _patch_dialect(monkeypatch, FakeDialect())
+    h = Handlers(cfg_path)
+    with pytest.raises(ValueError, match="Unknown cursor_id"):
+        await h.fetch_rows("nope", 10)
+
+
+async def test_close_cursor_is_idempotent(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    opened = await h.open_query_cursor("prod", "SELECT 1")
+    first = await h.close_cursor(opened["cursor_id"])
+    again = await h.close_cursor(opened["cursor_id"])
+    assert first["was_open"] is True and again["was_open"] is False
+    assert dialect.cursor.closed is True
+
+
+async def test_cursor_limit_enforced(cfg_path, monkeypatch):
+    _patch_dialect(monkeypatch, FakeDialect())
+    h = Handlers(cfg_path)
+    for _ in range(handlers_mod.MAX_OPEN_CURSORS):
+        await h.open_query_cursor("prod", "SELECT 1")
+    with pytest.raises(ValueError, match="Too many open cursors"):
+        await h.open_query_cursor("prod", "SELECT 1")
+
+
+async def test_idle_cursors_are_reaped(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    opened = await h.open_query_cursor("prod", "SELECT 1")
+    # Age the cursor past the TTL, then any cursor call reaps it.
+    h._cursors[opened["cursor_id"]]["last_used"] -= handlers_mod.CURSOR_IDLE_TTL_SECONDS + 1
+    with pytest.raises(ValueError, match="Unknown cursor_id"):
+        await h.fetch_rows(opened["cursor_id"], 10)
+    assert dialect.cursor.closed is True
+
+
+# ---- object definitions -------------------------------------------------------------
+
+
+async def test_get_object_definition_wraps_matches(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.get_object_definition("prod", "view", "active_users")
+    assert dialect.connected_read_only is True
+    assert result["object_type"] == "view"
+    assert result["matches"][0]["name"] == "active_users"
+
+
+# ---- diff_schemas ---------------------------------------------------------------------
+
+
+def _table(name, columns=None, pk=None, fks=None):
+    return {
+        "schema": "public",
+        "name": name,
+        "columns": columns or [],
+        "primary_key": pk or [],
+        "foreign_keys": fks or [],
+    }
+
+
+def test_diff_schemas_pure_identical():
+    a = {"tables": [_table("users")]}
+    diff = handlers_mod._diff_schemas(a, {"tables": [_table("users")]})
+    assert diff["identical"] is True
+    assert diff["only_in_a"] == [] and diff["changed_tables"] == []
+
+
+def test_diff_schemas_pure_detects_differences():
+    col_int = {"name": "id", "type": "integer", "nullable": False, "default": None}
+    col_big = {"name": "id", "type": "bigint", "nullable": False, "default": None}
+    extra = {"name": "note", "type": "text", "nullable": True, "default": None}
+    a = {"tables": [_table("users", [col_int, extra], pk=["id"]), _table("only_a")]}
+    b = {"tables": [_table("users", [col_big], pk=["id", "org"]), _table("only_b")]}
+    diff = handlers_mod._diff_schemas(a, b)
+    assert diff["only_in_a"] == ["public.only_a"]
+    assert diff["only_in_b"] == ["public.only_b"]
+    changed = diff["changed_tables"][0]
+    assert changed["table"] == "public.users"
+    assert changed["columns_only_in_a"] == ["note"]
+    assert changed["changed_columns"][0]["column"] == "id"
+    assert changed["primary_key"] == {"a": ["id"], "b": ["id", "org"]}
+    assert diff["identical"] is False
+
+
+async def test_diff_schemas_handler_reads_both(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.diff_schemas("prod", "dev")
+    assert result["database_a"] == "prod" and result["database_b"] == "dev"
+    assert result["identical"] is True  # same FakeDialect schema both sides
+    assert dialect.connected_read_only is True
+
+
+# ---- sequence / stats / activity handlers ----------------------------------------------
+
+
+async def test_check_sequences_counts_behind(cfg_path, monkeypatch):
+    _patch_dialect(monkeypatch, FakeDialect())
+    h = Handlers(cfg_path)
+    result = await h.check_sequences("prod")
+    assert result["behind_count"] == 1
+    assert len(result["sequences"]) == 2
+
+
+async def test_table_stats_handler(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.table_stats("prod")
+    assert dialect.connected_read_only is True
+    assert result["tables"][0]["table"] == "users"
+
+
+async def test_show_activity_handler_defaults_sanitized(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.show_activity("prod")
+    assert dialect.activity_include_query is False
+    assert result["activity"][0]["pid"] == 1
+
+
 def test_build_server_smoke(cfg_path):
-    # The FastMCP app builds and exposes the 11 tools + 1 prompt without error.
+    # The FastMCP app builds and exposes the 22 tools + 2 prompts without error.
     app = server.build_server(cfg_path)
     assert app is not None

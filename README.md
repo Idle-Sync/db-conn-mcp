@@ -93,6 +93,8 @@ Writes pass through three gates, **in order**:
 2. **`yolo` (persisted trust).** On a `write` database with `yolo: true`, writes proceed without prompting.
 3. **`user_consent` (per-operation).** Otherwise the agent must first read the schema, show you the exact SQL, get your "yes", and re-call with `user_consent=true`.
 
+**Dry-run first:** `execute_write_query(dry_run=true)` executes the statement in a transaction and **always rolls back**, returning the rows it *would* have affected. Nothing commits, so only the `mode` gate applies — the intended flow is dry-run → show the user the SQL **and its real impact** → then ask consent for the real write. (A dry-run does still execute server-side until rollback: brief locks, sequence advancement, trigger side effects.)
+
 Reads always run inside a native read-only transaction, **and** `execute_read_query` accepts only a single read-only statement (`SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`). That allowlist is what stops an agent from sending `SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE` to flip the session, or piggy-backing a `; DELETE …` onto a read — there's no SQL parsing involved, just a leading-keyword check plus the driver's single-command protocol.
 
 ### Use a read-only role (strongest guarantee)
@@ -113,7 +115,7 @@ This is the recommended setup for any database that holds data you care about.
 
 ## MCP tools
 
-The server exposes **12 tools** and **2 prompts**:
+The server exposes **22 tools** and **2 prompts**:
 
 | Tool | Kind | Description |
 |------|------|-------------|
@@ -125,8 +127,18 @@ The server exposes **12 tools** and **2 prompts**:
 | `sample_table_rows` | explore | First N rows of a table (default 10). |
 | `find_columns` | search | Find columns by name across all tables (fuzzy, case-insensitive). |
 | `search_value` | search | Find **where** a value appears across tables (fuzzy); returns table/column hits + samples. Pass `tables=[…]` to scope it. |
-| `execute_read_query` | execute | Run a single read-only statement (`SELECT`/`WITH`/…) inside a read-only transaction. |
-| `execute_write_query` | execute | Run a mutation — gated by the safety model above. |
+| `get_object_definition` | explore | Faithful SQL definition of a **view / function / trigger / sequence / index** by name (native `pg_get_*def`; overloads and all schemas returned). |
+| `execute_read_query` | execute | Run a single read-only statement (`SELECT`/`WITH`/…) inside a read-only transaction. Optional `params` (**real bind parameters** via `$1`/`$2` — no quoting pitfalls) and `timeout_ms`. |
+| `execute_write_query` | execute | Run a mutation — gated by the safety model above. Also takes `params`/`timeout_ms`, and **`dry_run=true`**: execute in a transaction, report would-be `rows_affected`, always ROLL BACK — show the user real impact *before* consenting to the real write. |
+| `explain_query` | execute | `EXPLAIN` (optionally `ANALYZE`) a validated read-only query — confirm index usage without any write access. |
+| `cancel_query` | execute | Cancel the statement in a given backend `pid` (native `pg_cancel_backend`); the session survives. Find pids via `show_activity`. |
+| `open_query_cursor` | cursor | Open a server-side cursor over a read-only query for **large result sets**; returns a `cursor_id`. Max 5 open; 15-min idle auto-reap. |
+| `fetch_rows` | cursor | Fetch the next N rows from an open cursor; auto-closes when drained. |
+| `close_cursor` | cursor | Close a cursor and release its connection (idempotent). |
+| `diff_schemas` | insight | Structural schema diff between two configured databases (tables, columns, types, defaults, PK/FK) — verify a migrated copy matches its source. |
+| `check_sequences` | insight | Find sequences **behind** their column's max value (the silent post-migration breakage); fix with `setval()`. |
+| `table_stats` | insight | Approximate row counts + disk/index sizes per table, largest first (statistics only, no scans). |
+| `show_activity` | insight | Sanitized `pg_stat_activity`: pid, state, wait events, query age — **no user names, client addresses, or query text** (text is opt-in and truncated). |
 | `set_yolo_mode` | config | Enable/disable `yolo` for one database (persisted). |
 | `check_database` | doctor | Test one database (or all) → `OK` or a sanitized diagnostic. |
 

@@ -1,4 +1,4 @@
-"""The MCP server: 12 tools + 2 prompts, plus transport wiring (FastMCP).
+"""The MCP server: 22 tools + 2 prompts, plus transport wiring (FastMCP).
 
 Knows nothing about PostgreSQL. It wires the pure/abstract layers together: the
 :class:`~db_conn_mcp.handlers.Handlers` service (which uses ``config``, the dialect
@@ -10,7 +10,7 @@ remaining the same SDK.
 """
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
@@ -61,10 +61,10 @@ If they don't want to install anything, fall back to get_database_schema(format=
 
 
 def build_server(config_path: Path | str | None = None) -> FastMCP:
-    """Construct the FastMCP app with all 12 tools and 2 prompts."""
+    """Construct the FastMCP app with all 22 tools and 2 prompts."""
     resolved = resolve_path(str(config_path) if config_path else None)
     handlers = Handlers(resolved)
-    app = FastMCP("db-conn-mcp")  # 12 tools + 2 prompts registered below
+    app = FastMCP("db-conn-mcp")  # 22 tools + 2 prompts registered below
 
     # ---- Exploration tools ---------------------------------------------------
     @app.tool()
@@ -146,20 +146,141 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
 
     # ---- Execution tools -----------------------------------------------------
     @app.tool()
-    async def execute_read_query(database: str, sql: str) -> dict:
-        """Run a read-only SELECT query (enforced as a read-only transaction)."""
-        return await handlers.execute_read_query(database, sql)
+    async def execute_read_query(
+        database: str,
+        sql: str,
+        params: list[Any] | None = None,
+        timeout_ms: int | None = None,
+    ) -> dict:
+        """Run a read-only SELECT query (enforced as a read-only transaction).
+
+        ALWAYS pass user-supplied values via `params` with $1/$2/... placeholders in the
+        SQL (real driver bind parameters — no quoting/injection pitfalls), not by pasting
+        them into the SQL string. Optional timeout_ms cancels an overrunning query.
+        """
+        return await handlers.execute_read_query(database, sql, params, timeout_ms)
 
     @app.tool()
-    async def execute_write_query(database: str, sql: str, user_consent: bool = False) -> dict:
+    async def execute_write_query(
+        database: str,
+        sql: str,
+        params: list[Any] | None = None,
+        user_consent: bool = False,
+        dry_run: bool = False,
+        timeout_ms: int | None = None,
+    ) -> dict:
         """Run an INSERT/UPDATE/DELETE/DDL statement on a write-mode database.
 
         SAFETY: Only allowed if the database is mode=write. Unless the database has
         yolo enabled, you MUST first read the target table and its schema, then show
         the user the EXACT SQL you intend to run and ask for explicit permission. Only
         call again with user_consent=true if the user clearly says yes.
+
+        BEST PRACTICE: before asking for consent, call this with dry_run=true — the
+        statement executes inside a transaction and is ALWAYS rolled back, returning
+        the rows_affected it WOULD have had. Show that to the user with the SQL.
+        Pass values via `params` ($1/$2/... placeholders), not pasted into the SQL.
         """
-        return await handlers.execute_write_query(database, sql, user_consent)
+        return await handlers.execute_write_query(
+            database, sql, params, user_consent, dry_run, timeout_ms
+        )
+
+    @app.tool()
+    async def explain_query(database: str, sql: str, analyze: bool = False) -> dict:
+        """Show the execution plan for a read-only query (EXPLAIN; optionally ANALYZE).
+
+        Use to confirm index usage or diagnose a slow query. analyze=true actually runs
+        the (read-only, validated) query to collect real timings and buffer stats.
+        """
+        return await handlers.explain_query(database, sql, analyze)
+
+    @app.tool()
+    async def cancel_query(database: str, pid: int) -> dict:
+        """Cancel the statement running in server backend `pid` (find pids via show_activity).
+
+        Cancels the statement only — the session survives. cancelled=false means the pid
+        doesn't exist or you lack permission (same database user required).
+        """
+        return await handlers.cancel_query(database, pid)
+
+    # ---- Cursor tools (large result sets) -------------------------------------
+    @app.tool()
+    async def open_query_cursor(database: str, sql: str, params: list[Any] | None = None) -> dict:
+        """Open a server-side cursor over a read-only query for batched fetching.
+
+        Use for results too large for one execute_read_query response. Returns a
+        cursor_id for fetch_rows/close_cursor. The cursor pins one read-only
+        connection until closed (auto-reaped after 15 idle minutes; max 5 open).
+        """
+        return await handlers.open_query_cursor(database, sql, params)
+
+    @app.tool()
+    async def fetch_rows(cursor_id: str, n: int = 100) -> dict:
+        """Fetch the next N rows from an open cursor (see open_query_cursor).
+
+        Returns {rows, row_count, exhausted, cursor_closed}; the cursor closes itself
+        once fully drained.
+        """
+        return await handlers.fetch_rows(cursor_id, n)
+
+    @app.tool()
+    async def close_cursor(cursor_id: str) -> dict:
+        """Close an open cursor and release its database connection. Idempotent."""
+        return await handlers.close_cursor(cursor_id)
+
+    # ---- Object-definition tool -----------------------------------------------
+    @app.tool()
+    async def get_object_definition(
+        database: str,
+        object_type: Literal["view", "function", "trigger", "sequence", "index"],
+        name: str,
+    ) -> dict:
+        """Get the faithful SQL definition of a non-table object by name.
+
+        Covers views (and materialized views), functions/procedures, triggers,
+        sequences, and indexes — produced by the database's own pg_get_*def functions.
+        `name` may be schema-qualified ("public.my_view"); all matches are returned
+        (same name in several schemas, overloaded functions).
+        """
+        return await handlers.get_object_definition(database, object_type, name)
+
+    # ---- Operational insight tools ----------------------------------------------
+    @app.tool()
+    async def diff_schemas(database_a: str, database_b: str) -> dict:
+        """Compare the schemas of two configured databases (tables, columns, PK/FK).
+
+        Reports tables only in one side, and per-table column/type/default/key
+        differences. Use to verify a migrated copy matches its source of truth.
+        """
+        return await handlers.diff_schemas(database_a, database_b)
+
+    @app.tool()
+    async def check_sequences(database: str) -> dict:
+        """Find sequences lagging behind their column's max value (stale after migrations).
+
+        A `behind: true` sequence would hand out an id that already exists — fix with
+        setval(). Run this after any bulk copy or logical-replication migration.
+        """
+        return await handlers.check_sequences(database)
+
+    @app.tool()
+    async def table_stats(database: str) -> dict:
+        """Approximate row counts and disk/index sizes per table, largest first.
+
+        Uses the database's own statistics — fast, no table scans. Useful for planning
+        migration copy order and spotting anomalies.
+        """
+        return await handlers.table_stats(database)
+
+    @app.tool()
+    async def show_activity(database: str, include_query: bool = False) -> dict:
+        """Show current server activity: pid, state, wait events, query/transaction age.
+
+        Sanitized by default — no user names, client addresses, or query text (pass
+        include_query=true for truncated query text). Answers "what is holding
+        connections"; pair with cancel_query(pid) to kill a stuck statement.
+        """
+        return await handlers.show_activity(database, include_query)
 
     # ---- Configuration tool --------------------------------------------------
     @app.tool()

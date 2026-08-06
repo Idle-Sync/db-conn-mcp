@@ -38,3 +38,19 @@ def authorize_write(conn: Connection, user_consent: bool) -> None:
     if user_consent:
         return None
     raise WriteRejected(CONSENT_INSTRUCTION)
+
+
+def authorize_dry_run(conn: Connection) -> None:
+    """Allow a dry-run write (execute + ROLLBACK) or raise :class:`WriteRejected`.
+
+    Only the ``mode`` gate applies: a dry-run never commits, so it needs no yolo
+    or per-operation consent — its purpose is to show the user what a write
+    *would* do **before** they consent to the real one. But it does execute
+    server-side (locks, sequence advancement, trigger side effects until
+    rollback), so the hard ``mode`` boundary is never waived.
+    """
+    if conn.mode != "write":
+        raise WriteRejected(
+            f"Database {conn.name!r} is read-only (mode=read). A dry-run still "
+            "executes (then rolls back), so it is only allowed on write-mode databases."
+        )

@@ -8,14 +8,23 @@ Every method that opens a connection routes failures through
 DSN never appears in any result (Rule 6).
 """
 
+import contextlib
 import json
 import re
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import config, diagnostics, safety
 from .dialects.registry import dialect_for
+
+#: Most cursors an agent may hold open at once (each pins a DB connection).
+MAX_OPEN_CURSORS = 5
+
+#: Idle cursors are reaped after this many seconds (checked on every cursor call).
+CURSOR_IDLE_TTL_SECONDS = 900.0
 
 
 def _safe_filename_stem(name: str) -> str:
@@ -33,6 +42,59 @@ def _format_diagnostic(diag: dict) -> str:
     return f"[{diag['category']}] {diag['cause']} Fix: {fixes}"
 
 
+def _fk_view(fks: list[dict]) -> list[tuple]:
+    """Order-insensitive, comparable view of a table's foreign keys."""
+    return sorted((fk["column"], fk.get("references") or "") for fk in fks)
+
+
+def _diff_schemas(schema_a: dict, schema_b: dict) -> dict:
+    """Pure structural diff of two ``get_database_schema`` results.
+
+    Compares table presence, then per common table: column presence, column
+    attributes (type/nullable/default), primary key, and foreign keys. Output is
+    deterministic (sorted) so repeated runs are diffable.
+    """
+
+    def key(t: dict) -> str:
+        return f"{t['schema']}.{t['name']}"
+
+    a = {key(t): t for t in schema_a["tables"]}
+    b = {key(t): t for t in schema_b["tables"]}
+    only_in_a = sorted(set(a) - set(b))
+    only_in_b = sorted(set(b) - set(a))
+
+    changed: list[dict] = []
+    for table in sorted(set(a) & set(b)):
+        ta, tb = a[table], b[table]
+        cols_a = {c["name"]: c for c in ta["columns"]}
+        cols_b = {c["name"]: c for c in tb["columns"]}
+        entry: dict[str, Any] = {}
+        if set(cols_a) - set(cols_b):
+            entry["columns_only_in_a"] = sorted(set(cols_a) - set(cols_b))
+        if set(cols_b) - set(cols_a):
+            entry["columns_only_in_b"] = sorted(set(cols_b) - set(cols_a))
+        changed_cols = [
+            {"column": name, "a": cols_a[name], "b": cols_b[name]}
+            for name in sorted(set(cols_a) & set(cols_b))
+            if cols_a[name] != cols_b[name]
+        ]
+        if changed_cols:
+            entry["changed_columns"] = changed_cols
+        if ta["primary_key"] != tb["primary_key"]:
+            entry["primary_key"] = {"a": ta["primary_key"], "b": tb["primary_key"]}
+        if _fk_view(ta["foreign_keys"]) != _fk_view(tb["foreign_keys"]):
+            entry["foreign_keys"] = {"a": ta["foreign_keys"], "b": tb["foreign_keys"]}
+        if entry:
+            changed.append({"table": table, **entry})
+
+    return {
+        "only_in_a": only_in_a,
+        "only_in_b": only_in_b,
+        "changed_tables": changed,
+        "identical": not (only_in_a or only_in_b or changed),
+    }
+
+
 class ConnectionFailedError(Exception):
     """A sanitized connection failure. Carries the diagnostic; message is agent-safe."""
 
@@ -46,6 +108,8 @@ class Handlers:
 
     def __init__(self, config_path: Path):
         self.config_path = Path(config_path)
+        #: Open server-side cursors: id -> {cursor, database, last_used}.
+        self._cursors: dict[str, dict] = {}
 
     def _load(self) -> config.Config:
         return config.load(str(self.config_path))
@@ -206,32 +270,233 @@ class Handlers:
 
     # ---- Execution tools -----------------------------------------------------
 
-    async def execute_read_query(self, database: str, sql: str) -> dict:
+    async def execute_read_query(
+        self,
+        database: str,
+        sql: str,
+        params: list[Any] | None = None,
+        timeout_ms: int | None = None,
+    ) -> dict:
         """Run a single read-only statement inside a native read-only transaction.
 
         The SQL is validated before any connection opens, so a write-ish or
         session-flipping query (``SET ... READ WRITE``, a piggy-backed ``; DELETE``)
-        is rejected without touching the database.
+        is rejected without touching the database. ``params`` bind via the driver
+        (Postgres ``$1``/``$2``); ``timeout_ms`` cancels an overrunning query.
         """
         conn = config.get(self._load(), database)
         dialect_for(conn.dsn).validate_read_only(sql)  # raises ValueError if not read-only
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            return await dialect.execute(db, sql)
+            return await dialect.execute(db, sql, params, timeout_ms)
         finally:
             await db.close()
 
     async def execute_write_query(
-        self, database: str, sql: str, user_consent: bool = False
+        self,
+        database: str,
+        sql: str,
+        params: list[Any] | None = None,
+        user_consent: bool = False,
+        dry_run: bool = False,
+        timeout_ms: int | None = None,
     ) -> dict:
-        """Run a mutation, gated by ``safety.authorize_write`` (mode → yolo → consent)."""
+        """Run a mutation, gated by ``safety`` (mode → yolo → consent).
+
+        With ``dry_run=True`` the statement executes inside a transaction that is
+        always ROLLED BACK — the result reports what *would* happen (rows affected)
+        without committing. A dry-run needs only the hard ``mode`` gate (nothing
+        commits, so no consent), which is exactly what lets an agent show the user
+        the impact before asking for real consent.
+        """
         conn = config.get(self._load(), database)
-        safety.authorize_write(conn, user_consent)  # raises WriteRejected if blocked
+        if dry_run:
+            safety.authorize_dry_run(conn)  # mode gate only — nothing commits
+        else:
+            safety.authorize_write(conn, user_consent)  # raises WriteRejected if blocked
         dialect, db = await self._connect(conn, read_only=False)
         try:
-            return await dialect.execute(db, sql)
+            if dry_run:
+                return await dialect.execute_dry_run(db, sql, params, timeout_ms)
+            return await dialect.execute(db, sql, params, timeout_ms)
         finally:
             await db.close()
+
+    async def explain_query(self, database: str, sql: str, analyze: bool = False) -> dict:
+        """Return the query plan for a read-only statement (optionally ANALYZE).
+
+        The SQL is validated read-only first; ``analyze=True`` really executes the
+        statement to gather timings, which the read-only session keeps safe.
+        """
+        conn = config.get(self._load(), database)
+        dialect_for(conn.dsn).validate_read_only(sql)
+        dialect, db = await self._connect(conn, read_only=True)
+        try:
+            return await dialect.explain(db, sql, analyze)
+        finally:
+            await db.close()
+
+    async def cancel_query(self, database: str, pid: int) -> dict:
+        """Cancel the statement running in server backend ``pid`` (native cancel).
+
+        Find candidate pids with ``show_activity``. Cancels the statement only —
+        the target session survives. ``cancelled=False`` means no such backend or
+        no permission (non-superusers can only cancel their own user's backends).
+        """
+        conn = config.get(self._load(), database)
+        dialect, db = await self._connect(conn, read_only=True)
+        try:
+            return await dialect.cancel_backend(db, pid)
+        finally:
+            await db.close()
+
+    # ---- Cursor tools (large result sets) --------------------------------------
+
+    def _reap_idle_cursors(self) -> list:
+        """Collect cursors idle past the TTL; returns their states for closing."""
+        now = time.monotonic()
+        expired = [
+            cid
+            for cid, state in self._cursors.items()
+            if now - state["last_used"] > CURSOR_IDLE_TTL_SECONDS
+        ]
+        return [self._cursors.pop(cid) for cid in expired]
+
+    async def _close_cursor_state(self, state: dict) -> None:
+        # Best-effort cleanup — the connection may already be dead.
+        with contextlib.suppress(Exception):
+            await state["cursor"].close()
+
+    async def open_query_cursor(
+        self, database: str, sql: str, params: list[Any] | None = None
+    ) -> dict:
+        """Open a server-side cursor over a read-only query; returns a ``cursor_id``.
+
+        The cursor holds one dedicated read-only connection until closed. Fetch
+        batches with ``fetch_rows``; always ``close_cursor`` when done (idle
+        cursors are auto-reaped after 15 minutes, and a fully drained cursor
+        closes itself).
+        """
+        for state in self._reap_idle_cursors():
+            await self._close_cursor_state(state)
+        if len(self._cursors) >= MAX_OPEN_CURSORS:
+            raise ValueError(
+                f"Too many open cursors (max {MAX_OPEN_CURSORS}). "
+                "Close one with close_cursor before opening another."
+            )
+        conn = config.get(self._load(), database)
+        dialect_for(conn.dsn).validate_read_only(sql)
+        dialect, db = await self._connect(conn, read_only=True)
+        try:
+            cursor = await dialect.open_cursor(db, sql, params)
+        except Exception:
+            await db.close()
+            raise
+        cursor_id = uuid.uuid4().hex[:12]
+        self._cursors[cursor_id] = {
+            "cursor": cursor,
+            "database": database,
+            "last_used": time.monotonic(),
+        }
+        return {"cursor_id": cursor_id, "database": database}
+
+    async def fetch_rows(self, cursor_id: str, n: int = 100) -> dict:
+        """Fetch the next ``n`` rows from an open cursor.
+
+        Returns ``{rows, row_count, exhausted, cursor_closed}``; the cursor is
+        closed automatically once exhausted.
+        """
+        for state in self._reap_idle_cursors():
+            await self._close_cursor_state(state)
+        state = self._cursors.get(cursor_id)
+        if state is None:
+            raise ValueError(
+                f"Unknown cursor_id {cursor_id!r} — it may have expired "
+                "(15 min idle limit) or already been closed."
+            )
+        state["last_used"] = time.monotonic()
+        rows = await state["cursor"].fetch(n)
+        exhausted = len(rows) < max(1, int(n))
+        if exhausted:
+            del self._cursors[cursor_id]
+            await self._close_cursor_state(state)
+        return {
+            "rows": rows,
+            "row_count": len(rows),
+            "exhausted": exhausted,
+            "cursor_closed": exhausted,
+        }
+
+    async def close_cursor(self, cursor_id: str) -> dict:
+        """Close an open cursor and release its connection. Idempotent."""
+        state = self._cursors.pop(cursor_id, None)
+        if state is not None:
+            await self._close_cursor_state(state)
+        return {"cursor_id": cursor_id, "closed": True, "was_open": state is not None}
+
+    # ---- Object-definition tool ------------------------------------------------
+
+    async def get_object_definition(self, database: str, object_type: str, name: str) -> dict:
+        """Faithful definition(s) of a view/function/trigger/sequence/index by name."""
+        conn = config.get(self._load(), database)
+        dialect, db = await self._connect(conn, read_only=True)
+        try:
+            matches = await dialect.get_object_definition(db, object_type, name)
+        finally:
+            await db.close()
+        return {"object_type": object_type, "name": name, "matches": matches}
+
+    # ---- Operational insight tools ----------------------------------------------
+
+    async def diff_schemas(self, database_a: str, database_b: str) -> dict:
+        """Structural schema diff between two configured databases (tables/columns/keys)."""
+        schemas: list[dict] = []
+        for name in (database_a, database_b):
+            conn = config.get(self._load(), name)
+            dialect, db = await self._connect(conn, read_only=True)
+            try:
+                schemas.append(await dialect.get_database_schema(db))
+            finally:
+                await db.close()
+        return {
+            "database_a": database_a,
+            "database_b": database_b,
+            **_diff_schemas(schemas[0], schemas[1]),
+        }
+
+    async def check_sequences(self, database: str) -> dict:
+        """Report sequences whose next value would collide with existing rows."""
+        conn = config.get(self._load(), database)
+        dialect, db = await self._connect(conn, read_only=True)
+        try:
+            sequences = await dialect.check_sequences(db)
+        finally:
+            await db.close()
+        return {
+            "database": database,
+            "sequences": sequences,
+            "behind_count": sum(1 for s in sequences if s["behind"]),
+        }
+
+    async def table_stats(self, database: str) -> dict:
+        """Approximate row counts and disk/index sizes per table, largest first."""
+        conn = config.get(self._load(), database)
+        dialect, db = await self._connect(conn, read_only=True)
+        try:
+            tables = await dialect.table_stats(db)
+        finally:
+            await db.close()
+        return {"database": database, "tables": tables}
+
+    async def show_activity(self, database: str, include_query: bool = False) -> dict:
+        """Sanitized server activity — what is holding connections right now."""
+        conn = config.get(self._load(), database)
+        dialect, db = await self._connect(conn, read_only=True)
+        try:
+            activity = await dialect.show_activity(db, include_query)
+        finally:
+            await db.close()
+        return {"database": database, "activity": activity}
 
     # ---- Configuration tool --------------------------------------------------
 
