@@ -18,6 +18,7 @@ from db_conn_mcp import handlers as handlers_mod
 from db_conn_mcp import server
 from db_conn_mcp.handlers import Handlers
 from db_conn_mcp.safety import WriteRejected
+from db_conn_mcp.server import build_server
 
 CONFIG = {
     "connections": [
@@ -897,3 +898,18 @@ async def test_duplicate_fallback_ports_are_dialed_once(tmp_path, monkeypatch):
     with pytest.raises(handlers_mod.ConnectionFailedError):
         await h.list_tables("dup")
     assert dialect.dialed == [5432, 5433]
+
+
+# ---- the agent-facing write tool contract (dry-run first) ------------------------
+
+
+async def test_execute_write_query_tool_defaults_to_dry_run(tmp_path):
+    cfg = {"connections": [{"name": "db", "dsn": "postgresql://u:p@h:5432/db", "mode": "write"}]}
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    app = build_server(config_path=path)
+    tools = await app.list_tools()
+    tool = next(t for t in tools if t.name == "execute_write_query")
+    props = tool.inputSchema["properties"]
+    assert props["dry_run"]["default"] is True
+    assert props["skip_dry_run"]["default"] is False

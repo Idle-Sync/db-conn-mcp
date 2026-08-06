@@ -170,23 +170,27 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
         sql: str,
         params: list[Any] | None = None,
         user_consent: bool = False,
-        dry_run: bool = False,
+        dry_run: bool = True,
+        skip_dry_run: bool = False,
         timeout_ms: int | None = None,
     ) -> dict:
         """Run an INSERT/UPDATE/DELETE/DDL statement on a write-mode database.
 
-        SAFETY: Only allowed if the database is mode=write. Unless the database has
-        yolo enabled, you MUST first read the target table and its schema, then show
-        the user the EXACT SQL you intend to run and ask for explicit permission. Only
-        call again with user_consent=true if the user clearly says yes.
+        SAFETY — the server enforces this flow; you cannot skip it silently:
+        1. Call with dry_run=true (the default): the statement executes inside a
+           transaction and is ALWAYS rolled back, returning the rows_affected it
+           WOULD have had. This records a preview grant for this exact statement.
+        2. Show the user the exact SQL and the dry-run result; ask for permission
+           (not needed if the database has yolo enabled).
+        3. Call again with dry_run=false (and user_consent=true unless yolo) to
+           commit. Commits without a prior dry-run of the identical statement are
+           REJECTED. Pass skip_dry_run=true ONLY if the user explicitly asked to
+           skip the preview.
 
-        BEST PRACTICE: before asking for consent, call this with dry_run=true — the
-        statement executes inside a transaction and is ALWAYS rolled back, returning
-        the rows_affected it WOULD have had. Show that to the user with the SQL.
         Pass values via `params` ($1/$2/... placeholders), not pasted into the SQL.
         """
         return await handlers.execute_write_query(
-            database, sql, params, user_consent, dry_run=dry_run, timeout_ms=timeout_ms
+            database, sql, params, user_consent, dry_run, skip_dry_run, timeout_ms
         )
 
     @app.tool()
