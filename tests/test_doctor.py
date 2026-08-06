@@ -121,29 +121,46 @@ def test_config_schema_fails_on_non_utf8_config(tmp_path):
     assert "\\xc9" not in f["detail"] and "É" not in f["detail"]
 
 
+def _isolate_git(monkeypatch):
+    """Ignore the developer's global/system git config so these tests are deterministic."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+
+
 def test_secrets_git_not_ignored_fails(tmp_path, monkeypatch):
+    _isolate_git(monkeypatch)
     path = tmp_path / "connections.json"
     path.write_text("{}", encoding="utf-8")
+    # On POSIX the new file is 0o644, which would emit a permission warn whose detail
+    # embeds tmp_path — and pytest names that directory after the test, so it contains
+    # "git". Lock the mode down and select the git finding by a phrase only it can have.
+    path.chmod(0o600)
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     findings = check_secrets_exposure(CheckContext(config_path=path, offline=True))
-    git_finding = next(f for f in findings if "git" in f["detail"].lower())
+    git_finding = next(f for f in findings if "work tree" in f["detail"])
     assert git_finding["status"] == "fail"
     assert git_finding["suggested_action"] == "fix_config"
 
 
-def test_secrets_git_ignored_ok(tmp_path):
+def test_secrets_git_ignored_ok(tmp_path, monkeypatch):
+    _isolate_git(monkeypatch)
     path = tmp_path / "connections.json"
     path.write_text("{}", encoding="utf-8")
+    path.chmod(0o600)
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     (tmp_path / ".gitignore").write_text("connections.json\n", encoding="utf-8")
     findings = check_secrets_exposure(CheckContext(config_path=path, offline=True))
-    git_finding = next(f for f in findings if "git" in f["detail"].lower())
+    git_finding = next(f for f in findings if "work tree" in f["detail"])
     assert git_finding["status"] == "ok"
 
 
-def test_secrets_outside_git_ok(tmp_path):
+def test_secrets_outside_git_ok(tmp_path, monkeypatch):
+    _isolate_git(monkeypatch)
+    # A work tree ANYWHERE above the temp dir would otherwise flip this result.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
     path = tmp_path / "connections.json"
     path.write_text("{}", encoding="utf-8")
+    path.chmod(0o600)
     findings = check_secrets_exposure(CheckContext(config_path=path, offline=True))
     assert all(f["status"] in ("ok", "skipped") for f in findings)
 

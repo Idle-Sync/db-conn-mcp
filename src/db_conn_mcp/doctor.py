@@ -135,19 +135,24 @@ def check_secrets_exposure(ctx: CheckContext) -> list[Finding]:
     findings: list[Finding] = []
 
     if os.name == "posix":
-        mode = path.stat().st_mode & 0o777
-        if mode & 0o077:
-            findings.append(
-                finding(
-                    name,
-                    "warn",
-                    f"{path.name} is readable by other users (mode {mode:03o}) — "
-                    f"run: chmod 600 {path}",
-                    "fix_permissions",
-                )
-            )
+        try:
+            mode = path.stat().st_mode & 0o777
+        except OSError:
+            # Deleted or unreadable between discovery and now — diagnose, don't crash.
+            findings.append(finding(name, "skipped", "config file could not be stat'd"))
         else:
-            findings.append(finding(name, "ok", f"{path.name} permissions are owner-only"))
+            if mode & 0o077:
+                findings.append(
+                    finding(
+                        name,
+                        "warn",
+                        f"{path.name} is readable by other users (mode {mode:03o}) — "
+                        f"run: chmod 600 {path}",
+                        "fix_permissions",
+                    )
+                )
+            else:
+                findings.append(finding(name, "ok", f"{path.name} permissions are owner-only"))
     else:
         findings.append(
             finding(
@@ -164,23 +169,36 @@ def check_secrets_exposure(ctx: CheckContext) -> list[Finding]:
         )
         return findings
     parent = str(path.parent)
-    inside = subprocess.run(
-        [git, "-C", parent, "rev-parse", "--is-inside-work-tree"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    timed_out = finding(name, "skipped", "git did not respond within 5s — git exposure not checked")
+    try:
+        inside = subprocess.run(
+            [git, "-C", parent, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        findings.append(timed_out)
+        return findings
     if inside.returncode != 0 or inside.stdout.strip() != "true":
         findings.append(finding(name, "ok", f"{path.name} is not inside a git work tree"))
         return findings
-    ignored = subprocess.run(
-        [git, "-C", parent, "check-ignore", "-q", path.name], capture_output=True, check=False
-    )
+    try:
+        ignored = subprocess.run(
+            [git, "-C", parent, "check-ignore", "-q", path.name],
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        findings.append(timed_out)
+        return findings
     if ignored.returncode == 0:
         findings.append(
             finding(name, "ok", f"{path.name} is inside a git work tree but git-ignored")
         )
-    else:
+    elif ignored.returncode == 1:
         findings.append(
             finding(
                 name,
@@ -190,6 +208,10 @@ def check_secrets_exposure(ctx: CheckContext) -> list[Finding]:
                 "fix_config",
             )
         )
+    else:
+        # rc 128 = corrupt repo, dubious ownership, etc. An error is NOT evidence of
+        # exposure — never raise a false security alarm on it.
+        findings.append(finding(name, "skipped", "git could not evaluate ignore rules"))
     return findings
 
 
