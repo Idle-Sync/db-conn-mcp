@@ -10,6 +10,7 @@ labels — never DSNs, hosts, usernames, or passwords.
 """
 
 import difflib
+import importlib.metadata
 import inspect
 import json
 import os
@@ -54,6 +55,76 @@ class CheckContext:
 
     config_path: Path | None
     offline: bool
+
+
+def _installed_at() -> float | None:
+    """Best-effort install timestamp: mtime of the dist's RECORD (written at install).
+
+    Wheel members keep archive timestamps, but RECORD is generated during install,
+    so its mtime is the true install/upgrade moment. None for editable/source
+    installs where no dist-info can be located.
+    """
+    try:
+        dist = importlib.metadata.distribution("db-conn-mcp")
+        dist_path = getattr(dist, "_path", None)  # dist-info dir on the std backend
+        if dist_path is None:
+            return None
+        record = Path(dist_path) / "RECORD"
+        target = record if record.is_file() else Path(dist_path)
+        return target.stat().st_mtime
+    except Exception:  # noqa: BLE001 — any metadata oddity just disables the check
+        return None
+
+
+def check_process_staleness(ctx: CheckContext) -> list[Finding]:
+    """Use case 1: a client's long-lived server process still running an old version."""
+    name = "process_staleness"
+    try:
+        import psutil
+    except ImportError:
+        return [
+            finding(
+                name,
+                "skipped",
+                "psutil not installed — cannot inspect running processes "
+                "(fix: pipx inject db-conn-mcp psutil)",
+            )
+        ]
+    installed_at = _installed_at()
+    if installed_at is None:
+        return [
+            finding(
+                name,
+                "skipped",
+                "could not determine when db-conn-mcp was installed (editable/source install?)",
+            )
+        ]
+    findings: list[Finding] = []
+    own_pid = os.getpid()
+    for proc in psutil.process_iter(["pid", "cmdline", "create_time"]):
+        try:
+            info = proc.info
+            cmdline = " ".join(info["cmdline"] or [])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if info["pid"] == own_pid:
+            continue
+        if "db-conn-mcp" not in cmdline and "db_conn_mcp" not in cmdline:
+            continue
+        if info["create_time"] < installed_at:
+            findings.append(
+                finding(
+                    name,
+                    "warn",
+                    f"a db-conn-mcp process (pid {info['pid']}) started before "
+                    f"v{__version__} was installed — restart/reconnect that MCP client "
+                    "to load the new version",
+                    "reconnect_client",
+                )
+            )
+    if not findings:
+        findings.append(finding(name, "ok", "no stale db-conn-mcp processes found"))
+    return findings
 
 
 #: Cache-bypassed version lookup (use case 2: pip's cached index hid a fresh release).
@@ -294,6 +365,7 @@ def check_client_paths(ctx: CheckContext) -> list[Finding]:
 #: The registry: (check_name, callable(ctx) -> list[Finding] | awaitable of it).
 #: Order is presentation order in the CLI.
 _CHECKS: list[tuple[str, Callable]] = [
+    ("process_staleness", check_process_staleness),
     ("pypi_latest", check_pypi_latest),
     ("config_schema", check_config_schema),
     ("secrets_exposure", check_secrets_exposure),

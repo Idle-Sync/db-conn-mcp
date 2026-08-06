@@ -4,16 +4,19 @@ import io
 import json
 import os
 import subprocess
+import sys
 import urllib.request
 
 import pytest
 
 from db_conn_mcp import __version__, doctor
 from db_conn_mcp import clients as clients_mod
+from db_conn_mcp import doctor as doctor_mod
 from db_conn_mcp.doctor import (
     CheckContext,
     check_client_paths,
     check_config_schema,
+    check_process_staleness,
     check_pypi_latest,
     check_secrets_exposure,
     finding,
@@ -276,4 +279,62 @@ def test_pypi_network_error_skips(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     (f,) = check_pypi_latest(CheckContext(config_path=None, offline=False))
+    assert f["status"] == "skipped"
+
+
+class _FakeProc:
+    def __init__(self, pid, cmdline, create_time):
+        self.info = {"pid": pid, "cmdline": cmdline, "create_time": create_time}
+
+
+class _FakePsutil:
+    """Just enough of psutil's surface for the check."""
+
+    # Names mirror psutil's real API exactly — an "Error" suffix would not match
+    # what the check catches, so N818 is suppressed rather than obeyed.
+    class NoSuchProcess(Exception):  # noqa: N818
+        pass
+
+    class AccessDenied(Exception):  # noqa: N818
+        pass
+
+    def __init__(self, procs):
+        self._procs = procs
+
+    def process_iter(self, attrs):
+        return iter(self._procs)
+
+
+def test_staleness_skipped_without_psutil(monkeypatch):
+    monkeypatch.setitem(sys.modules, "psutil", None)  # import psutil -> ImportError
+    (f,) = check_process_staleness(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "skipped"
+    assert "pipx inject" in f["detail"]
+
+
+def test_staleness_flags_process_older_than_install(monkeypatch):
+    stale = _FakeProc(111, ["python", "-m", "db_conn_mcp"], create_time=100.0)
+    fresh = _FakeProc(222, ["db-conn-mcp", "--transport", "stdio"], create_time=9999.0)
+    other = _FakeProc(333, ["notepad.exe"], create_time=50.0)
+    monkeypatch.setitem(sys.modules, "psutil", _FakePsutil([stale, fresh, other]))
+    monkeypatch.setattr(doctor_mod, "_installed_at", lambda: 1000.0)
+    findings = check_process_staleness(CheckContext(config_path=None, offline=True))
+    warns = [f for f in findings if f["status"] == "warn"]
+    assert len(warns) == 1
+    assert "111" in warns[0]["detail"]
+    assert warns[0]["suggested_action"] == "reconnect_client"
+
+
+def test_staleness_ok_when_all_processes_fresh(monkeypatch):
+    fresh = _FakeProc(222, ["db-conn-mcp"], create_time=9999.0)
+    monkeypatch.setitem(sys.modules, "psutil", _FakePsutil([fresh]))
+    monkeypatch.setattr(doctor_mod, "_installed_at", lambda: 1000.0)
+    (f,) = check_process_staleness(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "ok"
+
+
+def test_staleness_skipped_when_install_time_unknown(monkeypatch):
+    monkeypatch.setitem(sys.modules, "psutil", _FakePsutil([]))
+    monkeypatch.setattr(doctor_mod, "_installed_at", lambda: None)
+    (f,) = check_process_staleness(CheckContext(config_path=None, offline=True))
     assert f["status"] == "skipped"
