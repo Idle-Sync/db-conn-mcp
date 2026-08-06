@@ -270,6 +270,10 @@ The **`troubleshoot_connection` MCP prompt** is the standalone, full gotchas che
 
 > **Security:** `diagnostics.explain()` receives only the *driver exception type/message-class* — never the `Connection` object or DSN — so no host, user, or password can leak into a tool response or log.
 
+### Fallback-port probing (optional, `fallback_ports`)
+
+Probing lives in `handlers._connect` — **above** the dialect seam, so no dialect knows about it and `Dialect.connect()` keeps its single job of opening one DSN. `_connect` builds the candidate list (`_dsn_candidates`: primary DSN first, then one rewritten DSN per configured `fallback_ports` entry) and walks it, gated purely on the diagnostic category above: a failure classified `HOST_UNREACHABLE` moves to the next candidate, **anything else** (`AUTH_FAILED`, `SSL_REQUIRED`, `DB_NOT_FOUND`, `DNS_FAILURE`, …) is raised immediately so a real misconfiguration is never masked by a port hunt. Each fallback attempt is wrapped in `asyncio.wait_for(FALLBACK_CONNECT_TIMEOUT_SECONDS)` (5s) so a black-holed port can't stall the chain; the primary attempt keeps the driver's own timeout behavior. The port that answers is cached in `Handlers._active_ports` (process memory only — never written back to `connections.json`) so it's tried first next time, re-probed from the primary if it later fails, and forgotten when the primary succeeds; `list_databases` / `check_database` surface it as `active_port`. If every candidate fails, the last sanitized diagnostic is returned with the tried fallback **port numbers** appended — ports only, still no host, user, or DSN (Rule 6). A connection without the key produces a single-candidate list, i.e. exactly the pre-existing behavior.
+
 ---
 
 ## 8. Extensibility — Adding a Database

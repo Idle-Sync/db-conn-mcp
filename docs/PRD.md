@@ -22,6 +22,7 @@ Developers and power users looking for a fully open-source, easily self-hostable
 - **Native Security Enforcement:** "Read-only" enforcement is done at the database transaction level (for Postgres: `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;`), implemented inside each dialect.
 - **Tiered Write Safety (`yolo`):** Writes to a `write`-mode DB still require **explicit per-operation user consent** by default. An optional per-database `yolo: true` flag (persisted in `connections.json`) lets a trusted DB skip that prompt. The full gate is `mode` → `yolo` → `user_consent`; `yolo`/consent can never make a `read` DB writable.
 - **Self-Diagnosing Connections (the doctor):** When a DB is unreachable, the server returns a **sanitized** diagnostic (classified cause + how to fix) instead of a raw error — and never leaks the DSN/host/credentials. Validation is lazy (the server boots even if a DB is down); a `check_database` tool probes proactively and a `troubleshoot_connection` prompt offers the full gotchas checklist.
+- **Fallback Ports (`fallback_ports`):** An optional per-connection list of extra ports (`"fallback_ports": [5433, 15432]`) probed **in order** when the primary port refuses or times out — the case for DSNs behind SSH tunnels that don't always land on the same local port. Only the `HOST_UNREACHABLE` diagnostic category triggers probing; auth, TLS, DNS, and database-not-found failures are returned immediately and are **never** masked by a fallback. Each probe is capped at a short deadline (5s) so a black-holed port can't stall the chain. The port that answers is remembered for the server process's lifetime (tried first next time, re-probed from the primary if it later fails, forgotten once the primary succeeds) and surfaced as `active_port` in `list_databases` / `check_database`. Strictly opt-in and bounded: no port scanning beyond the listed entries, connections without the key behave exactly as before, and saving the config never injects the key into an existing file. The key is hand-editable (by users and agents) and the setup wizard prompts for it.
 - **Multi-Transport Support:** `stdio` (local IDEs) and `http` (remote agents).
 - **Interactive Setup & Management CLI:** Ships with a `db-conn-mcp setup` wizard that asks the user for their preferred configuration scope (global vs repo), bootstraps the first database, and **auto-detects installed AI agents** (Claude Desktop, Cursor, Windsurf, Agy/Antigravity, Claude Code, Cline, VS Code, Zed) to inject the MCP server directly into their config files (each in its own format) without manual JSON editing. Beyond first run, the CLI manages an existing setup: `status` (list databases + per-client injection state, never showing the DSN), `add`, `clients` (inject) / `clients --remove` (uninject), `check [name]` (connectivity doctor from the terminal), `remove <name>`, and `yolo <name> on|off`. Injected entries use an absolute, PATH-independent launch command so clients can spawn the server regardless of how it was installed (venv or global/pipx). All interactive flows are transactional and Ctrl+C-safe (nothing saved on cancel).
 
@@ -30,7 +31,7 @@ Developers and power users looking for a fully open-source, easily self-hostable
 To provide the best Agent Experience (AgentX), the server exposes specific tools for safe exploration and execution:
 
 ### Exploration Tools (Safe)
-1. **`list_databases`**: Reads `connections.json` and returns the available database names and their allowed mode (`read` or `write`).
+1. **`list_databases`**: Reads `connections.json` and returns the available database names and their allowed mode (`read` or `write`), plus `active_port` for any database currently reached over a fallback port. Never returns the DSN.
 2. **`list_tables`**: Returns a list of all tables and views in a specified database.
 3. **`get_table_schema`**: Returns the exact schema (columns, data types, primary/foreign keys) for a specific table so the AI can write accurate SQL.
 4. **`get_database_schema`**: Returns the schema of **every** table in one call. `format="json"` (default) gives each table's columns, data types, nullability, primary key, and foreign keys. `format="sql"` instead returns a **self-contained, runnable DDL script** (schemas, sequences, tables, PK/FK/UNIQUE/CHECK constraints, indexes, trigger functions, triggers) assembled entirely from native Postgres catalog functions (`format_type`, `pg_get_constraintdef`/`indexdef`/`triggerdef`/`functiondef`) — no external tooling, runnable top-to-bottom to recreate the structure (covers the common cases). Both forms are deterministic (tables sorted by schema/name, columns by ordinal position) so the output is byte-stable and diffable. Pass an `output_dir` to **write** to `{database}_schema_{UTC-timestamp}.{json,sql}` (returning the path + a summary) instead of returning it inline — the practical mode for large databases. `format` is content negotiation of one concern (export this DB's schema), not multiplexing; the *faithful* export is a separate tool (#5) per **Rule 10**, and this stays separate from `get_table_schema` (whole-DB vs. one table).
@@ -69,7 +70,7 @@ To provide the best Agent Experience (AgentX), the server exposes specific tools
 21. **`set_yolo_mode`**: Sets `yolo` (`true`/`false`) for one named database and **persists it to `connections.json`**, so the choice survives restarts. Per-database — enabling `yolo` on one DB never affects another.
 
 ### Diagnostics Tools
-22. **`check_database`**: Tests connectivity for one named database (or all of them) and returns `OK` or a sanitized, classified cause + fix. Never echoes the DSN/credentials.
+22. **`check_database`**: Tests connectivity for one named database (or all of them) and returns `OK` or a sanitized, classified cause + fix. Reports `active_port` when the database answered on a configured fallback port; on total failure the sanitized cause notes which fallback ports were tried (ports only — never the host, user, or DSN). Never echoes the DSN/credentials.
 
 ### MCP Prompts
 - **`troubleshoot_connection`**: A discoverable prompt exposing the full connection-gotchas checklist (host/port, firewall, `sslmode`, Docker `localhost` vs container, db-name case, pool limits, …) the agent can pull at any time.
@@ -86,11 +87,12 @@ To provide the best Agent Experience (AgentX), the server exposes specific tools
 {
   "connections": [
     { "name": "prod", "dsn": "postgresql://…", "mode": "read" },
-    { "name": "dev",  "dsn": "postgresql://…", "mode": "write", "yolo": false }
+    { "name": "dev",  "dsn": "postgresql://…", "mode": "write", "yolo": false },
+    { "name": "tunnel", "dsn": "postgresql://…", "mode": "read", "fallback_ports": [5433, 15432] }
   ]
 }
 ```
-`yolo` is optional and defaults to `false`. Resolution order (first match wins): `--config <path>` → `./connections.json` → `~/.db-conn-mcp/connections.json`.
+`yolo` is optional and defaults to `false`. `fallback_ports` is optional (omitted entirely by default) and validated as integers in `1-65535`. Resolution order (first match wins): `--config <path>` → `./connections.json` → `~/.db-conn-mcp/connections.json`.
 
 ## 7. Distribution & Marketplace Strategy
 To make `db-conn-mcp` globally accessible and trivial to install, it will be packaged and distributed across major MCP marketplaces:
