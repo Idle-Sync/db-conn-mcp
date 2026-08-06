@@ -185,8 +185,10 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
            (not needed if the database has yolo enabled).
         3. Call again with dry_run=false (and user_consent=true unless yolo) to
            commit. Commits without a prior dry-run of the identical statement are
-           REJECTED. Pass skip_dry_run=true ONLY if the user explicitly asked to
-           skip the preview.
+           REJECTED. The preview grant expires 10 minutes after the dry-run and is
+           consumed by the commit it authorizes, so running the same statement twice
+           means previewing it twice. Pass skip_dry_run=true ONLY if the user
+           explicitly asked to skip the preview.
 
         Pass values via `params` ($1/$2/... placeholders), not pasted into the SQL.
         """

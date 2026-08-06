@@ -11,12 +11,12 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 ```
                             ┌──────────────────────────────────────────┐
    ┌──────────────┐         │              db-conn-mcp                  │
-   │  AI Agent    │  MCP    │  server.py  ── 22 tools + 2 prompts       │
+   │  AI Agent    │  MCP    │  server.py  ── 23 tools + 2 prompts       │
    │ (Claude,     │◄───────►│      │                                   │
    │  Cursor, …)  │ stdio/  │      ├─► safety.py      ── write-gate     │
    └──────────────┘  http   │      │                                   │
-                            │      ├─► diagnostics.py ── doctor /       │
-   ┌──────────────┐         │      │     sanitized error → cause + fix  │
+                            │      ├─► diagnostics.py ── error → cause  │
+   ┌──────────────┐         │      ├─► doctor.py      ── setup checks   │
    │  Human user  │  CLI    │      ▼                                   │
    │ (terminal)   │────────►│  dialects/   ── Postgres SQL + RO guard  │
    └──────────────┘ setup   │   (registry) │        config.py ◄─ conns │
@@ -39,9 +39,10 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 | `dialects/postgres.py` | `asyncpg` impl + native read-only enforcement | **Yes (only here)** |
 | `dialects/registry.py` | Map DSN scheme → `Dialect`; clear error on unknown scheme | No |
 | `safety.py` | Pure write-gate decision (`mode` + dry-run-first + `yolo` + `consent`; a `dry-run` itself = mode gate only) | No |
-| `diagnostics.py` | Classify driver errors → **sanitized** cause + fix; the doctor | No |
-| `handlers.py` | The 22 tool handlers as plain async methods (transport-free, unit-testable) + the open-cursor registry + the dry-run grant registry (`_dry_run_grants`) | No |
-| `server.py` | `FastMCP` app: registers the 22 tools + 2 prompts onto `handlers`, transport wiring | No |
+| `diagnostics.py` | Classify **one driver error** → sanitized cause + fix (the per-connection diagnostic) | No |
+| `doctor.py` | The whole-setup diagnostic engine: the check registry, the `Finding` shape, and the crash guard. Composes `clients.py`, `config.py`, `handlers.py`, and the dialect seam | No |
+| `handlers.py` | The 22 database-facing tool handlers as plain async methods (transport-free, unit-testable) + the open-cursor registry + the dry-run grant registry (`_dry_run_grants`) | No |
+| `server.py` | `FastMCP` app: registers the 23 tools + 2 prompts (22 onto `handlers`, `doctor` onto `doctor.py`), transport wiring | No |
 
 The **dialect layer is the only place that knows a database is PostgreSQL.** Everything above it speaks the abstract `Dialect` contract.
 
@@ -72,7 +73,8 @@ The **dialect layer is the only place that knows a database is PostgreSQL.** Eve
 | 19 | `table_stats` | Insight | safe — approximate rows + disk/index sizes per table (statistics, no scans) |
 | 20 | `show_activity` | Insight | safe — **sanitized** `pg_stat_activity` (no user names/addresses; query text opt-in, truncated) |
 | 21 | `set_yolo_mode` | Config | persists `yolo` flag for one named DB |
-| 22 | `check_database` | Doctor | tests one DB (or all) → `OK` or sanitized cause + fix |
+| 22 | `check_database` | Doctor | tests one DB (or all) → `OK` or sanitized cause + fix; reports `active_port`, and `failed_port` when a *fallback* port produced the failure |
+| 23 | `doctor` | Doctor | runs **every** check (processes, release freshness, config schema, secrets, client entries, connectivity) → `{check, status, detail, suggested_action}` findings; `offline=true` skips only the PyPI lookup |
 
 **Cursor lifecycle** (the one stateful corner, deliberately bounded): `open_query_cursor` validates the SQL read-only, opens a dedicated read-only connection, and registers the native cursor under a `cursor_id` in `handlers.py`. At most **5** cursors may be open; a cursor idle for **15 minutes** is reaped on the next cursor call; a fully drained cursor closes itself. Everything else in the server remains one-connection-per-call.
 
@@ -234,7 +236,7 @@ sequenceDiagram
     Cfg->>FS: rewrite connections.json (dev.yolo = true)
     Server-->>Agent: ✅ yolo enabled for "dev" (persisted)
 
-    Note over Agent,FS: Future writes to "dev" skip the consent gate —<br/>across this and all future sessions.
+    Note over Agent,FS: Future writes to "dev" skip the consent gate —<br/>across this and all future sessions.<br/>(the dry-run preview still applies)
 ```
 
 `set_yolo_mode("dev", false)` reverts it. YOLO is **per-database**: enabling it on `dev` never affects `prod`.
@@ -286,6 +288,48 @@ The **`troubleshoot_connection` MCP prompt** is the standalone, full gotchas che
 
 Probing lives in `handlers._connect` — **above** the dialect seam, so no dialect knows about it and `Dialect.connect()` keeps its single job of opening one DSN. `_connect` builds the candidate list (`_dsn_candidates`: primary DSN first, then one rewritten DSN per configured `fallback_ports` entry) and walks it, gated purely on the diagnostic category above: a failure classified `HOST_UNREACHABLE` moves to the next candidate, **anything else** (`AUTH_FAILED`, `SSL_REQUIRED`, `DB_NOT_FOUND`, `DNS_FAILURE`, …) is raised immediately so a real misconfiguration is never masked by a port hunt. Each fallback attempt is wrapped in `asyncio.wait_for(FALLBACK_CONNECT_TIMEOUT_SECONDS)` (5s) so a black-holed port can't stall the chain; the primary attempt keeps the driver's own timeout behavior. The port that answers is cached in `Handlers._active_ports` (process memory only — never written back to `connections.json`) so it's tried first next time, re-probed from the primary if it later fails, and forgotten when the primary succeeds; `list_databases` / `check_database` surface it as `active_port`. If every candidate fails, the last sanitized diagnostic is returned with the tried fallback **port numbers** appended — ports only, still no host, user, or DSN (Rule 6). A connection without the key produces a single-candidate list, i.e. exactly the pre-existing behavior (one alignment: on Python 3.10 a driver-raised connect timeout now classifies as `HOST_UNREACHABLE`, matching 3.11+, instead of `UNKNOWN`).
 
+`check_database` surfaces the outcome structurally: an `OK` row carries `active_port` when a fallback answered, and an `UNREACHABLE` row carries **`failed_port`** when the raised (non-`HOST_UNREACHABLE`) failure came from a probed fallback rather than the primary. Both are port numbers only — never the host (Rule 6) — and `failed_port` exists so a caller can distinguish "the primary rejected us" from "a fallback rejected us" without parsing the prose. The doctor's port-identity check is the first consumer.
+
+### The doctor engine (`doctor.py`) — whole-setup diagnostics
+
+`diagnostics.py` answers *"why did this one connection fail?"*. `doctor.py` answers the broader question behind most support threads — *"why is my installation misbehaving?"* — where the cause is usually **not** the database (issue #12). It is one engine with two front ends: the `db-conn-mcp doctor` CLI subcommand and the `doctor` MCP tool both call `doctor.run_checks(config_path, offline=…)` and differ only in presentation.
+
+```
+db-conn-mcp doctor ──┐                        ┌─► clients.py   (client specs / injected entries)
+                     ├─► doctor.run_checks ───┼─► config.py    (resolve + validate)
+   doctor MCP tool ──┘   (_CHECKS registry)   ├─► handlers.py  (check_database → connectivity)
+                                              └─► dialects/    (probe_listener, credential-free)
+```
+
+**The registry.** `_CHECKS` is a list of `(name, callable)` pairs; each callable takes a frozen `CheckContext{config_path, offline}` and returns `list[Finding]` — sync or async, awaited transparently. Adding a check is one function plus one registry line, and list order is presentation order. Every result is the same flat, agent-parseable row:
+
+```python
+class Finding(TypedDict):
+    check: str                                   # the registry name it came from
+    status: Literal["ok", "warn", "fail", "skipped"]
+    detail: str                                  # human-readable, sanitized
+    suggested_action: str                        # machine-actionable, or "none"
+```
+
+`suggested_action` is a small closed vocabulary — `reconnect_client`, `upgrade_package`, `swap_primary_port`, `fix_permissions`, `fix_config`, `repair_client_config`, `none` — so an agent can act on a finding without natural-language parsing.
+
+| Check | Asks | Typical finding |
+|---|---|---|
+| `process_staleness` | Is a running server process older than the installed build? | `warn` + `reconnect_client` — the user upgraded but never reconnected that client |
+| `pypi_latest` | Is a newer release published? (cache-bypassed lookup) | `warn` + `upgrade_package`, quoting the `--no-cache-dir` command |
+| `config_schema` | Unknown keys / wrong value types in `connections.json`? | `warn` with a did-you-mean hint, or `fail` on an invalid value |
+| `secrets_exposure` | Is the plaintext-DSN config world-readable or un-ignored in git? | `warn` (mode bits) / `fail` (committable) |
+| `client_paths` | Does each injected client entry still point at a real command? | `warn` + `repair_client_config` |
+| `connectivity` | Is each configured database reachable? | `fail` with the sanitized cause, plus `port_identity` findings (see below) |
+
+**Two seams the engine reuses rather than reimplements.** `clients.py` was extracted out of `cli.py` so the `client_paths` check can ask "which clients exist, and what command did we inject?" without importing `cli.py` — which already imports `doctor`, so that would be a circular import. And the port-identity probe is a new `Dialect.probe_listener(host, port)` method, so *how you tell a Postgres from something else on a port* stays inside the dialect: the Postgres implementation opens a TCP connection, writes the 8-byte `SSLRequest`, and reads the single `S`/`N` status byte. **No credentials are ever sent**, and the probe reports only a boolean — the host never reaches a finding.
+
+**When the probe runs.** Only when `check_database` reported `AUTH_FAILED` **with no `failed_port`** (i.e. the *primary* port rejected the credentials) and the connection configures `fallback_ports`. A fallback that rejected auth already demonstrably speaks the protocol, so "swap your primary port to it" would be both a false statement and a no-op fix. When a configured fallback *does* answer the probe, the finding names the port number and suggests `swap_primary_port` — the "my tunnel moved" case.
+
+**Two invariants.** (1) `run_checks` never raises: a crashing check becomes a `fail` finding naming only the exception **type**, because driver messages can embed hosts. (2) A check that cannot run reports `skipped`, never a false alarm — no `psutil`, no PyPI reachability, no config file, a non-POSIX filesystem, or a git that can't evaluate ignore rules all degrade to `skipped`. The CLI exits `2` only when at least one finding is a `fail`; `warn` and `skipped` do not fail the run.
+
+`process_staleness` is the one check with an optional dependency: `psutil` is deliberately **not** a hard requirement of the package, so its absence skips that check and nothing else.
+
 ---
 
 ## 8. Extensibility — Adding a Database
@@ -311,6 +355,7 @@ class Dialect(ABC):
     scheme: str  # e.g. "mysql"
 
     async def connect(self, dsn, *, read_only): ...  # native read-only enforcement lives here
+    async def probe_listener(self, host, port): ...  # credential-free "is this us?" handshake
     async def list_tables(self, conn): ...
     async def get_schema(self, conn, table): ...
     async def sample_rows(self, conn, table, n=10): ...
@@ -342,8 +387,9 @@ Because each dialect owns its own read-only enforcement and catalog queries, tho
 ```
 Human ──setup──► connections.json ──read──► config.py
                                               │
-AI Agent ──MCP (stdio/http)──► server.py ─────┼─► safety.py     (write gate)
-                                  │            ├─► diagnostics.py (doctor, sanitized)
+AI Agent ──MCP (stdio/http)──► server.py ─────┼─► safety.py      (write gate)
+                                  │            ├─► diagnostics.py (sanitized cause)
+                                  │            ├─► doctor.py      (whole-setup checks)
                                   ▼            ▼
                               dialects/registry ──► PostgresDialect ──► PostgreSQL
                                 (scheme → impl)      (RO guard + SQL)
@@ -355,3 +401,4 @@ AI Agent ──MCP (stdio/http)──► server.py ─────┼─► safe
 4. **Writes** pass through the server-side gate: `mode` (hard) → dry-run-first (a commit needs a prior preview of the identical statement, unless the user asked to skip) → `yolo` (persisted trust) → `user_consent` (per-op ask).
 5. `set_yolo_mode` lets a trusted DB skip the per-op ask, persisted to disk.
 6. Any unreachable DB yields a **sanitized diagnostic** (cause + fix), never a raw error or leaked DSN; `check_database` probes proactively and `troubleshoot_connection` is the full gotchas checklist.
+7. When the problem isn't the database, the **doctor** (`db-conn-mcp doctor` or the `doctor` tool) sweeps the whole setup — stale processes, release freshness, config schema, secrets exposure, client entries, connectivity — into one list of sanitized, machine-actionable findings.

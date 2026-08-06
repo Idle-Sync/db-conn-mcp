@@ -442,3 +442,19 @@ def test_registry_order_and_membership():
         "client_paths",
         "connectivity",
     ]
+
+
+async def test_no_finding_ever_leaks_dsn_material(tmp_path, monkeypatch):
+    """Poisoned DSN substrings must never appear in any finding (Rule 6)."""
+    conn = {
+        "name": "db",
+        "dsn": "postgresql://sekretuser:sekretpass@sekrethost.invalid:5432/sekretdb",
+        "mode": "read",
+        "fallback_ports": [5433],
+    }
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps({"connections": [conn]}), encoding="utf-8")
+    findings = await run_checks(path, offline=True)
+    blob = json.dumps(findings)
+    for secret in ("sekretuser", "sekretpass", "sekrethost", "sekretdb"):
+        assert secret not in blob, f"finding leaked {secret!r}"

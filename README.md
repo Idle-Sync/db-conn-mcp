@@ -157,7 +157,7 @@ This is the recommended setup for any database that holds data you care about.
 
 ## MCP tools
 
-The server exposes **22 tools** and **2 prompts**:
+The server exposes **23 tools** and **2 prompts**:
 
 | Tool | Kind | Description |
 |------|------|-------------|
@@ -182,7 +182,8 @@ The server exposes **22 tools** and **2 prompts**:
 | `table_stats` | insight | Approximate row counts + disk/index sizes per table, largest first (statistics only, no scans). |
 | `show_activity` | insight | Sanitized `pg_stat_activity`: pid, state, wait events, query age — **no user names, client addresses, or query text** (text is opt-in and truncated). |
 | `set_yolo_mode` | config | Enable/disable `yolo` for one database (persisted). |
-| `check_database` | doctor | Test one database (or all) → `OK` or a sanitized diagnostic; reports `active_port` when a fallback port answered. |
+| `check_database` | doctor | Test one database (or all) → `OK` or a sanitized diagnostic; reports `active_port` when a fallback port answered, and `failed_port` on an `UNREACHABLE` row when the failure that ended the probe chain (auth, TLS, DB-not-found, …) came from a probed fallback port rather than the primary. |
+| `doctor` | doctor | Diagnose the **whole setup**, not just connectivity: stale running server processes, a newer PyPI release, `connections.json` key typos/wrong types, secrets exposure (file permissions, git), MCP client entries pointing at dead paths, and per-database connectivity with a credential-free fallback-port identity probe. Returns `{check, status, detail, suggested_action}` rows; `offline=true` skips the PyPI lookup. |
 
 **Prompts:**
 - `troubleshoot_connection` — a discoverable, full connection-gotchas checklist (host/port, firewall, `sslmode`, Docker `localhost`, db-name case, pool limits, …).
@@ -204,12 +205,15 @@ The server exposes **22 tools** and **2 prompts**:
 | `db-conn-mcp clients` | Inject the server into detected MCP clients. |
 | `db-conn-mcp clients --remove` | Uninject the server from chosen clients. |
 | `db-conn-mcp check [name]` | Probe connectivity (exit `0` all-OK, `2` if any unreachable). |
+| `db-conn-mcp doctor` | Diagnose the **whole setup** — stale processes, a newer release, config-schema typos, secrets exposure, client entries, connectivity (exit `0` if nothing failed, `2` if any check fails). `--offline` skips **only** the PyPI version lookup; the database probes still run. |
 | `db-conn-mcp remove <name>` | Remove one connection. |
 | `db-conn-mcp reset` | Remove **all** connections (delete `connections.json`) — fresh slate. |
 | `db-conn-mcp yolo <name> on\|off` | Toggle `yolo` for one database. |
 | `db-conn-mcp -v` / `--version` | Print the installed version and the exact build commit, then exit. |
 
 `--config <path>` works before or after any subcommand.
+
+> **Optional dependency:** the doctor's `process_staleness` check needs [`psutil`](https://pypi.org/project/psutil/) to inspect running processes. It is **not** required — without it that one check reports `skipped` and every other check runs normally. To enable it: `pipx inject db-conn-mcp psutil` (or `pip install psutil` into the same environment).
 
 ---
 
@@ -256,7 +260,7 @@ ruff check . && ruff format --check .
 pytest -q
 ```
 
-`pyproject.toml` is the single source of dependency truth. The codebase is split into single-purpose layers (`config`, `models`, `dialects/`, `safety`, `diagnostics`, `handlers`, `server`, `cli`); only the dialect layer knows a specific database exists. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md), [`docs/PRD.md`](./docs/PRD.md), and [`docs/PLAN.md`](./docs/PLAN.md).
+`pyproject.toml` is the single source of dependency truth. The codebase is split into single-purpose layers (`config`, `models`, `dialects/`, `safety`, `diagnostics`, `doctor`, `clients`, `handlers`, `server`, `cli`); only the dialect layer knows a specific database exists. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md), [`docs/PRD.md`](./docs/PRD.md), and [`docs/PLAN.md`](./docs/PLAN.md).
 
 ---
 
