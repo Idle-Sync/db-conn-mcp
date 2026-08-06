@@ -21,3 +21,13 @@ async def test_run_checks_never_raises_a_crashing_check(monkeypatch):
     # Only the exception TYPE is reported — never its message (may embed a host).
     assert "RuntimeError" in findings[0]["detail"]
     assert "secret-host" not in findings[0]["detail"]
+
+
+async def test_run_checks_awaits_an_async_check(monkeypatch):
+    async def _ok(ctx):
+        return [finding("async-check", "ok", "ran")]
+
+    monkeypatch.setattr(doctor, "_CHECKS", [("async-check", _ok)])
+    assert await run_checks(None, offline=True) == [
+        {"check": "async-check", "status": "ok", "detail": "ran", "suggested_action": "none"}
+    ]
