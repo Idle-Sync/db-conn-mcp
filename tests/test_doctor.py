@@ -1,7 +1,9 @@
 """The doctor engine: findings shape, crash-guarding, and each check."""
 
+import json
+
 from db_conn_mcp import doctor
-from db_conn_mcp.doctor import finding, run_checks
+from db_conn_mcp.doctor import CheckContext, check_config_schema, finding, run_checks
 
 
 def test_finding_builder_defaults_action_to_none():
@@ -31,3 +33,50 @@ async def test_run_checks_awaits_an_async_check(monkeypatch):
     assert await run_checks(None, offline=True) == [
         {"check": "async-check", "status": "ok", "detail": "ran", "suggested_action": "none"}
     ]
+
+
+def _ctx(tmp_path, text):
+    path = tmp_path / "connections.json"
+    path.write_text(text, encoding="utf-8")
+    return CheckContext(config_path=path, offline=True)
+
+
+def test_config_schema_skipped_without_config():
+    (f,) = check_config_schema(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "skipped"
+
+
+def test_config_schema_flags_typoed_key_with_did_you_mean(tmp_path):
+    cfg = {
+        "connections": [
+            {
+                "name": "db",
+                "dsn": "postgresql://u:p@h/d",
+                "mode": "read",
+                "fallback_port": [5433],
+            }
+        ]
+    }
+    findings = check_config_schema(_ctx(tmp_path, json.dumps(cfg)))
+    warn = next(f for f in findings if f["status"] == "warn")
+    assert "fallback_port" in warn["detail"] and "fallback_ports" in warn["detail"]
+    assert warn["suggested_action"] == "fix_config"
+
+
+def test_config_schema_reports_bad_type_without_echoing_values(tmp_path):
+    cfg = {"connections": [{"name": "db", "dsn": "postgresql://u:SEKRET@h/d", "mode": "banana"}]}
+    findings = check_config_schema(_ctx(tmp_path, json.dumps(cfg)))
+    fail = next(f for f in findings if f["status"] == "fail")
+    assert "mode" in fail["detail"]
+    assert "SEKRET" not in fail["detail"]
+
+
+def test_config_schema_ok_on_valid_config(tmp_path):
+    cfg = {"connections": [{"name": "db", "dsn": "postgresql://u:p@h/d", "mode": "read"}]}
+    (f,) = check_config_schema(_ctx(tmp_path, json.dumps(cfg)))
+    assert f["status"] == "ok"
+
+
+def test_config_schema_fails_on_invalid_json(tmp_path):
+    (f,) = check_config_schema(_ctx(tmp_path, "{not json"))
+    assert f["status"] == "fail"
