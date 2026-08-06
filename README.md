@@ -240,7 +240,7 @@ ruff check . && ruff format --check .
 pytest -q
 ```
 
-`pyproject.toml` is the single source of dependency truth. The codebase is split into single-purpose layers (`config`, `models`, `dialects/`, `safety`, `diagnostics`, `handlers`, `server`, `cli`); only the dialect layer knows a specific database exists. See [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`PRD.md`](./PRD.md), and [`PLAN.md`](./PLAN.md).
+`pyproject.toml` is the single source of dependency truth. The codebase is split into single-purpose layers (`config`, `models`, `dialects/`, `safety`, `diagnostics`, `handlers`, `server`, `cli`); only the dialect layer knows a specific database exists. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md), [`docs/PRD.md`](./docs/PRD.md), and [`docs/PLAN.md`](./docs/PLAN.md).
 
 ---
 

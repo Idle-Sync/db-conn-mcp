@@ -1,8 +1,9 @@
 # ---- Local-only files ----
 progress.txt
 
-# ---- Internal planning docs (kept local, not published) ----
-docs/
+# ---- Internal planning scratch (kept local, not published) ----
+# Tracked project docs live in docs/ — only the local scratch subfolder is ignored.
+docs/superpowers/
 
 # ---- Secrets / local config (NEVER commit real DSNs or credentials) ----
 connections.json

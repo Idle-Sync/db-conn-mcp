@@ -3,7 +3,7 @@
 Welcome, AI Agent (Claude, Agy, Cursor, or otherwise)! 
 When assisting the user with the `db-conn-mcp` project, please strictly adhere to the following rules to maintain the project's core philosophy.
 
-> **Note:** This file is canonical. `CLAUDE.md` and `.cursorrules` are exact copies — when you change a rule, update all three so they stay byte-identical.
+> **Note:** `docs/AGENT_RULES.md` is canonical. `CLAUDE.md` and `.cursorrules` at the repo root are exact copies — when you change a rule, update all three so they stay byte-identical.
 
 ## 1. Simplicity First (No Over-engineering)
 - **DO NOT** introduce complex architectures, custom OAuth servers, or JWT minting.
@@ -39,10 +39,10 @@ When assisting the user with the `db-conn-mcp` project, please strictly adhere t
 
 ## 7. Living Documentation (Always Keep Docs Updated)
 - **ALWAYS, ALWAYS, ALWAYS** keep the docs in sync with decisions. The moment a design, scope, or architecture decision is made or accepted, update the relevant docs in the SAME change — never defer it:
-  - `PRD.md` — product scope, features, tools.
-  - `PLAN.md` — implementation roadmap / phases.
-  - `ARCHITECTURE.md` — components, flows, diagrams.
-  - These rule files (`AGENT_RULES.md` → copied to `CLAUDE.md` and `.cursorrules`) when a rule itself changes.
+  - `docs/PRD.md` — product scope, features, tools.
+  - `docs/PLAN.md` — implementation roadmap / phases.
+  - `docs/ARCHITECTURE.md` — components, flows, diagrams.
+  - These rule files (`docs/AGENT_RULES.md` → copied to root `CLAUDE.md` and `.cursorrules`) when a rule itself changes.
 - Docs and code must never drift. A change that alters behavior or scope without updating the docs is **incomplete**.
 
 ## 8. Commit Hygiene (No Agent Watermarks)

@@ -1,7 +1,7 @@
 """The write-safety gate — a pure decision function, no I/O.
 
 Keeping this pure makes the security boundary trivially testable and unmissable.
-Decision order (see ARCHITECTURE.md §5):
+Decision order (see docs/ARCHITECTURE.md §5):
 
     1. mode != "write"   -> REJECT  (hard, native; can never be bypassed)
     2. yolo is True      -> ALLOW
