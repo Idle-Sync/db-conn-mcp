@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from db_conn_mcp import config
 from db_conn_mcp.config import ConfigError
@@ -155,3 +156,54 @@ def test_set_yolo_unknown_db_errors(tmp_path):
     path = _write(tmp_path / "c.json", VALID)
     with pytest.raises(ConfigError, match="ghost"):
         config.set_yolo(path, "ghost", True)
+
+
+# ---- fallback_ports (issue #10) -----------------------------------------------
+
+
+def test_fallback_ports_optional_and_default_none():
+    c = Connection(name="a", dsn="postgresql://u:p@h:5432/d", mode="read")
+    assert c.fallback_ports is None
+    assert "fallback_ports" not in c.public_view()
+
+
+def test_fallback_ports_in_public_view_when_set():
+    c = Connection(name="a", dsn="postgresql://u:p@h:5432/d", mode="read", fallback_ports=[5433])
+    assert c.public_view()["fallback_ports"] == [5433]
+    assert "dsn" not in c.public_view()
+
+
+def test_fallback_ports_validates_range():
+    with pytest.raises(ValidationError):
+        Connection(name="a", dsn="postgresql://u@h/d", mode="read", fallback_ports=[0])
+    with pytest.raises(ValidationError):
+        Connection(name="a", dsn="postgresql://u@h/d", mode="read", fallback_ports=[70000])
+
+
+def test_save_never_injects_fallback_ports_into_old_files(tmp_path):
+    """An existing user's file must not gain the key on a set_yolo rewrite."""
+    path = tmp_path / "connections.json"
+    path.write_text(
+        json.dumps(
+            {"connections": [{"name": "a", "dsn": "postgresql://u:p@h/d", "mode": "write"}]}
+        ),
+        encoding="utf-8",
+    )
+    config.set_yolo(path, "a", True)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert "fallback_ports" not in saved["connections"][0]
+    assert saved["connections"][0]["yolo"] is True  # existing dump behavior kept
+
+
+def test_save_round_trips_fallback_ports(tmp_path):
+    path = tmp_path / "connections.json"
+    cfg = Config(
+        connections=[
+            Connection(
+                name="a", dsn="postgresql://u:p@h/d", mode="read", fallback_ports=[5433, 15432]
+            )
+        ]
+    )
+    config.save(cfg, path)
+    reloaded = config.load(str(path))
+    assert reloaded.connections[0].fallback_ports == [5433, 15432]
