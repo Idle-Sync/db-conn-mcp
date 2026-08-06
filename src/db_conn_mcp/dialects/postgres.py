@@ -11,6 +11,7 @@ enforced natively here via session characteristics; introspection uses
 """
 
 import asyncio
+import contextlib
 import os
 import shutil
 from typing import Any
@@ -25,6 +26,12 @@ SCHEMES = ("postgresql", "postgres")
 
 #: Native, session-level read-only enforcement (the Postgres mechanism).
 _READ_ONLY_SQL = "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY"
+
+#: Timeout for each credential-free listener probe (doctor's port-identity check).
+PROBE_TIMEOUT_SECONDS = 3.0
+
+#: The 8-byte PostgreSQL SSLRequest: length=8, code=80877103 (magic constant).
+_SSL_REQUEST = (8).to_bytes(4, "big") + (80877103).to_bytes(4, "big")
 
 # Leading keywords that begin a read-only, row-returning statement. This single set
 # does double duty: execute() uses it to shape the result ({columns, rows}), and the
@@ -900,6 +907,30 @@ class PostgresDialect(Dialect):
                         }
                     )
         return {"results": results, "truncated": truncated}
+
+    async def probe_listener(self, host: str, port: int) -> bool:
+        """TCP + SSLRequest probe; sends no credentials, reads one status byte.
+
+        ``asyncio.TimeoutError`` is listed alongside the builtin because they are only
+        the same class from Python 3.11 on, and this project supports 3.10.
+        """
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=PROBE_TIMEOUT_SECONDS
+            )
+        except (OSError, asyncio.TimeoutError, TimeoutError):
+            return False
+        try:
+            writer.write(_SSL_REQUEST)
+            await writer.drain()
+            reply = await asyncio.wait_for(reader.readexactly(1), timeout=PROBE_TIMEOUT_SECONDS)
+            return reply in (b"S", b"N")
+        except (OSError, asyncio.IncompleteReadError, asyncio.TimeoutError, TimeoutError):
+            return False
+        finally:
+            writer.close()
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
 
     @staticmethod
     def _is_row_returning(sql: str) -> bool:

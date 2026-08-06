@@ -774,3 +774,46 @@ async def test_dump_schema_sql_sanitizes_failure(monkeypatch):
     result = await PostgresDialect().dump_schema_sql("postgresql://u:secretpw@host/db")
     assert result["status"] == "pg_dump_failed"
     assert "secretpw" not in result["message"]
+
+
+async def test_probe_listener_true_when_postgres_greeting():
+    """A listener replying 'N' to SSLRequest is recognized as PostgreSQL."""
+
+    async def handle(reader, writer):
+        await reader.readexactly(8)  # the SSLRequest
+        writer.write(b"N")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        assert await PostgresDialect().probe_listener("127.0.0.1", port) is True
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_probe_listener_false_when_connection_refused():
+    # Grab a free port, then close the listener so nothing answers.
+    server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    server.close()
+    await server.wait_closed()
+    assert await PostgresDialect().probe_listener("127.0.0.1", port) is False
+
+
+async def test_probe_listener_false_on_non_postgres_reply():
+    async def handle(reader, writer):
+        await reader.readexactly(8)
+        writer.write(b"HTTP/1.1 400\r\n")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        assert await PostgresDialect().probe_listener("127.0.0.1", port) is False
+    finally:
+        server.close()
+        await server.wait_closed()

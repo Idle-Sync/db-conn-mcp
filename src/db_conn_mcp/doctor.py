@@ -21,10 +21,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypedDict
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
-from . import __version__, clients
+from . import __version__, clients, config
+from .dialects.registry import dialect_for
+from .handlers import Handlers
 from .models import Config, Connection
 
 Status = Literal["ok", "warn", "fail", "skipped"]
@@ -362,6 +365,69 @@ def check_client_paths(ctx: CheckContext) -> list[Finding]:
     return findings
 
 
+def _auth_failed_with_fallbacks(entry: dict, conn) -> bool:
+    """The port-identity trigger: auth failed on the primary AND fallbacks exist."""
+    return entry.get("category") == "AUTH_FAILED" and bool(conn.fallback_ports)
+
+
+async def _probe_port_identity(conn) -> list[Finding]:
+    """Use case 3: is a *different* server answering the primary port?
+
+    Credential-free probes only (`Dialect.probe_listener`); findings name port
+    numbers, never the host (Rule 6).
+    """
+    try:
+        parts = urlsplit(conn.dsn)
+        host, primary_port = parts.hostname, parts.port
+    except ValueError:
+        return []
+    if host is None:
+        return []
+    dialect = dialect_for(conn.dsn)
+    findings: list[Finding] = []
+    for port in conn.fallback_ports or []:
+        if port == primary_port:
+            continue
+        if await dialect.probe_listener(host, port):
+            findings.append(
+                finding(
+                    "port_identity",
+                    "warn",
+                    f"{conn.name}: auth failed on the primary port, but port {port} also has "
+                    "a matching database server listening — if your target moved (e.g. a "
+                    f"tunnel), swap the DSN's primary port to {port}",
+                    "swap_primary_port",
+                )
+            )
+    return findings
+
+
+async def check_connectivity(ctx: CheckContext) -> list[Finding]:
+    """Per-database reachability (sanitized), plus the port-identity special case."""
+    name = "connectivity"
+    if ctx.config_path is None:
+        return [finding(name, "skipped", "no configuration found — no databases to probe")]
+    try:
+        cfg = config.load(str(ctx.config_path))
+        results = await Handlers(ctx.config_path).check_database(None)
+    except config.ConfigError:
+        return [
+            finding(name, "skipped", "connections.json could not be loaded — see config_schema")
+        ]
+    findings: list[Finding] = []
+    for entry in results:
+        db_name = entry["database"]
+        if entry["status"] == "OK":
+            port_note = f" (active_port={entry['active_port']})" if "active_port" in entry else ""
+            findings.append(finding(name, "ok", f"{db_name}: reachable{port_note}"))
+            continue
+        findings.append(finding(name, "fail", f"{db_name}: {entry.get('detail', entry['status'])}"))
+        conn = config.get(cfg, db_name)
+        if _auth_failed_with_fallbacks(entry, conn):
+            findings.extend(await _probe_port_identity(conn))
+    return findings
+
+
 #: The registry: (check_name, callable(ctx) -> list[Finding] | awaitable of it).
 #: Order is presentation order in the CLI.
 _CHECKS: list[tuple[str, Callable]] = [
@@ -370,6 +436,7 @@ _CHECKS: list[tuple[str, Callable]] = [
     ("config_schema", check_config_schema),
     ("secrets_exposure", check_secrets_exposure),
     ("client_paths", check_client_paths),
+    ("connectivity", check_connectivity),
 ]
 
 

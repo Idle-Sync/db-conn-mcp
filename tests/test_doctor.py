@@ -16,6 +16,7 @@ from db_conn_mcp.doctor import (
     CheckContext,
     check_client_paths,
     check_config_schema,
+    check_connectivity,
     check_process_staleness,
     check_pypi_latest,
     check_secrets_exposure,
@@ -338,3 +339,61 @@ def test_staleness_skipped_when_install_time_unknown(monkeypatch):
     monkeypatch.setattr(doctor_mod, "_installed_at", lambda: None)
     (f,) = check_process_staleness(CheckContext(config_path=None, offline=True))
     assert f["status"] == "skipped"
+
+
+def _write_cfg(tmp_path, fallback_ports=None):
+    conn = {"name": "db", "dsn": "postgresql://u:SEKRETPW@sekrethost:5432/d", "mode": "read"}
+    if fallback_ports:
+        conn["fallback_ports"] = fallback_ports
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps({"connections": [conn]}), encoding="utf-8")
+    return path
+
+
+async def test_connectivity_skipped_without_config():
+    (f,) = await check_connectivity(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "skipped"
+
+
+async def test_connectivity_auth_failed_with_fallbacks_probes_port_identity(tmp_path, monkeypatch):
+    path = _write_cfg(tmp_path, fallback_ports=[5433])
+
+    async def fake_check_database(self, database=None):
+        return [
+            {
+                "database": "db",
+                "status": "UNREACHABLE",
+                "category": "AUTH_FAILED",
+                "detail": "Authentication failed.",
+            }
+        ]
+
+    class _ProbeDialect:
+        async def probe_listener(self, host, port):
+            return port == 5433
+
+    from db_conn_mcp.handlers import Handlers
+
+    monkeypatch.setattr(Handlers, "check_database", fake_check_database)
+    monkeypatch.setattr(doctor_mod, "dialect_for", lambda dsn: _ProbeDialect())
+    findings = await check_connectivity(CheckContext(config_path=path, offline=True))
+    identity = next(f for f in findings if f["check"] == "port_identity")
+    assert identity["status"] == "warn"
+    assert "5433" in identity["detail"]
+    assert identity["suggested_action"] == "swap_primary_port"
+    # Rule 6: the host from the DSN never appears.
+    assert all("sekrethost" not in f["detail"] for f in findings)
+
+
+async def test_connectivity_ok_reports_ok(tmp_path, monkeypatch):
+    path = _write_cfg(tmp_path)
+
+    async def fake_check_database(self, database=None):
+        return [{"database": "db", "status": "OK"}]
+
+    from db_conn_mcp.handlers import Handlers
+
+    monkeypatch.setattr(Handlers, "check_database", fake_check_database)
+    (f,) = await check_connectivity(CheckContext(config_path=path, offline=True))
+    assert f["status"] == "ok"
+    assert "db" in f["detail"]

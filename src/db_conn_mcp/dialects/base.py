@@ -197,3 +197,13 @@ class Dialect(ABC):
         non-junk base tables. Returns
         ``{"results": [{schema, table, column, matches, samples}], "truncated": bool}``.
         """
+
+    @abstractmethod
+    async def probe_listener(self, host: str, port: int) -> bool:
+        """Credential-free check: is this database family listening at host:port?
+
+        MUST NOT send credentials — connection-level handshake only (Postgres: TCP
+        connect + 8-byte SSLRequest, read the 1-byte S/N reply). Returns False on
+        refusal, timeout, or a non-matching reply. Used by the doctor's
+        port-identity check; never logs or returns the host (Rule 6).
+        """
