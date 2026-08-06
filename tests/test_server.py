@@ -634,7 +634,7 @@ async def test_show_activity_handler_defaults_sanitized(cfg_path, monkeypatch):
 
 
 def test_build_server_smoke(cfg_path):
-    # The FastMCP app builds and exposes the 22 tools + 2 prompts without error.
+    # The FastMCP app builds and exposes the 23 tools + 2 prompts without error.
     app = server.build_server(cfg_path)
     assert app is not None
 
@@ -940,3 +940,16 @@ async def test_execute_write_query_tool_defaults_to_dry_run(tmp_path):
     props = tool.inputSchema["properties"]
     assert props["dry_run"]["default"] is True
     assert props["skip_dry_run"]["default"] is False
+
+
+# ---- the doctor tool is registered on the app ------------------------------------
+
+
+async def test_doctor_tool_registered(tmp_path):
+    cfg = {"connections": [{"name": "db", "dsn": "postgresql://u:p@h:5432/db", "mode": "read"}]}
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    app = build_server(config_path=path)
+    tools = await app.list_tools()
+    tool = next(t for t in tools if t.name == "doctor")
+    assert tool.inputSchema["properties"]["offline"]["default"] is False
