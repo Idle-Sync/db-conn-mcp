@@ -63,12 +63,29 @@ def test_config_schema_flags_typoed_key_with_did_you_mean(tmp_path):
     assert warn["suggested_action"] == "fix_config"
 
 
+def test_config_schema_flags_unknown_key_without_a_bogus_did_you_mean(tmp_path):
+    cfg = {"connections": [], "zzzz": 1}
+    findings = check_config_schema(_ctx(tmp_path, json.dumps(cfg)))
+    warn = next(f for f in findings if f["status"] == "warn")
+    assert "zzzz" in warn["detail"]
+    # Nothing in the schema is close to "zzzz" — don't invent a suggestion.
+    assert "did you mean" not in warn["detail"]
+
+
 def test_config_schema_reports_bad_type_without_echoing_values(tmp_path):
     cfg = {"connections": [{"name": "db", "dsn": "postgresql://u:SEKRET@h/d", "mode": "banana"}]}
     findings = check_config_schema(_ctx(tmp_path, json.dumps(cfg)))
     fail = next(f for f in findings if f["status"] == "fail")
     assert "mode" in fail["detail"]
     assert "SEKRET" not in fail["detail"]
+    # A leak in ANY finding is a Rule 6 violation, not just the one we inspected.
+    assert not any("SEKRET" in f["detail"] for f in findings)
+
+
+def test_config_schema_names_the_document_when_the_whole_file_is_wrong_type(tmp_path):
+    (f,) = check_config_schema(_ctx(tmp_path, json.dumps([1, 2])))
+    assert f["status"] == "fail"
+    assert "the top-level document" in f["detail"]
 
 
 def test_config_schema_ok_on_valid_config(tmp_path):
@@ -80,3 +97,15 @@ def test_config_schema_ok_on_valid_config(tmp_path):
 def test_config_schema_fails_on_invalid_json(tmp_path):
     (f,) = check_config_schema(_ctx(tmp_path, "{not json"))
     assert f["status"] == "fail"
+    assert f["suggested_action"] == "fix_config"
+
+
+def test_config_schema_fails_on_non_utf8_config(tmp_path):
+    # UnicodeDecodeError is a ValueError, not an OSError — it must be diagnosed
+    # here, not escape as a generic "check crashed" finding.
+    path = tmp_path / "connections.json"
+    path.write_bytes(b'{"connections": [\xc9]}')
+    (f,) = check_config_schema(CheckContext(config_path=path, offline=True))
+    assert f["status"] == "fail"
+    assert f["suggested_action"] == "fix_config"
+    assert "\\xc9" not in f["detail"] and "É" not in f["detail"]

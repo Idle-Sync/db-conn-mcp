@@ -75,14 +75,21 @@ def check_config_schema(ctx: CheckContext) -> list[Finding]:
                 "fix_config",
             )
         ]
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, not an OSError — catch it explicitly
+        # so a non-UTF-8 file is diagnosed here instead of crashing the check.
         return [
-            finding(name, "fail", "connections.json exists but could not be read", "fix_config")
+            finding(
+                name,
+                "fail",
+                "connections.json exists but could not be read (not readable, or not UTF-8)",
+                "fix_config",
+            )
         ]
 
     findings: list[Finding] = []
 
-    def _flag_unknown(keys: dict, known: set[str], where: str) -> None:
+    def _flag_unknown(keys: dict[str, object], known: set[str], where: str) -> None:
         """Warn about every key in ``keys`` that pydantic would silently ignore."""
         for key in keys:
             if key in known:
@@ -106,7 +113,7 @@ def check_config_schema(ctx: CheckContext) -> list[Finding]:
         Config.model_validate(raw)
     except ValidationError as exc:
         for err in exc.errors(include_input=False, include_url=False):
-            loc = ".".join(str(p) for p in err["loc"])
+            loc = ".".join(str(p) for p in err["loc"]) or "the top-level document"
             findings.append(
                 finding(name, "fail", f"invalid value for {loc}: {err['msg']}", "fix_config")
             )
