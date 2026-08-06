@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from db_conn_mcp import cli, config
+from db_conn_mcp import cli, clients, config
 
 
 def _scripted_input(answers):
@@ -319,7 +319,9 @@ def test_detected_clients_only_returns_existing(tmp_path, monkeypatch):
     present = cli.ClientSpec("a", "A", tmp_path / "a.json", "mcpServers")
     missing = cli.ClientSpec("b", "B", tmp_path / "b.json", "mcpServers")
     (tmp_path / "a.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(cli, "client_specs", lambda: [present, missing])
+    # detected_clients lives in clients.py, so its client_specs lookup binds there;
+    # cli.detected_clients is the same function, re-exported for back-compat.
+    monkeypatch.setattr(clients, "client_specs", lambda: [present, missing])
     assert [s.key for s in cli.detected_clients()] == ["a"]
 
 
@@ -733,3 +735,24 @@ def test_cmd_check_prints_active_port(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "a: OK (active_port=15432)" in out
+
+
+def test_injected_command_reads_mcpservers_entry(tmp_path):
+    from db_conn_mcp.clients import ClientSpec, injected_command
+
+    cfg = tmp_path / "c.json"
+    cfg.write_text(
+        json.dumps({"mcpServers": {"db-conn-mcp": {"command": "/x/db-conn-mcp", "args": []}}}),
+        encoding="utf-8",
+    )
+    spec = ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
+    assert injected_command(spec) == "/x/db-conn-mcp"
+
+
+def test_injected_command_none_when_absent(tmp_path):
+    from db_conn_mcp.clients import ClientSpec, injected_command
+
+    cfg = tmp_path / "c.json"
+    cfg.write_text("{}", encoding="utf-8")
+    spec = ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
+    assert injected_command(spec) is None
