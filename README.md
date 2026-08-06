@@ -75,7 +75,8 @@ The wizard asks for:
 2. **Connection name** — e.g. `prod`.
 3. **DSN** — e.g. `postgresql://user:pass@host:5432/dbname`.
 4. **Mode** — `read` (recommended) or `write`.
-5. **Client injection** — pick which detected MCP clients to wire up (e.g. `1,3` or `all`).
+5. **Fallback ports** *(optional)* — comma-separated extra ports to try if the primary one refuses; press Enter to skip.
+6. **Client injection** — pick which detected MCP clients to wire up (e.g. `1,3` or `all`).
 
 It then writes your config and (optionally) registers the server in your chosen AI clients. Restart/reconnect the client and the tools are available.
 
@@ -106,6 +107,20 @@ The single source of truth is **`connections.json`**, resolved in this order (fi
 | `dsn`  | yes | Connection string. **Secret** — never shown by any tool. |
 | `mode` | yes | `read` or `write`. An absolute, native security boundary. |
 | `yolo` | no (default `false`) | If `true`, skip the per-write consent prompt for this database. |
+| `fallback_ports` | no | Extra ports to probe, in order, when the primary port refuses or times out. See below. |
+
+- **`fallback_ports`** *(optional)* — extra ports probed **in order** when the
+  primary port refuses or times out (auth/TLS errors fail immediately and are never
+  masked). For DSNs behind SSH tunnels that don't always land on the same port.
+  The winning port is remembered for the server's lifetime and shown as
+  `active_port` in `list_databases` / `check_database`. Hand-edit the JSON (agents
+  may too) or answer the wizard prompt. Example:
+  `"fallback_ports": [5433, 15432]`
+
+Probing is strictly opt-in and bounded: only the ports you list are ever tried (no
+scanning), each **fallback** probe is capped at 5 seconds, and a connection without the key behaves
+exactly as it always has. Existing `connections.json` files keep working untouched —
+the server never adds the key to a file that doesn't have it.
 
 > `connections.json` is git-ignored by this project's `.gitignore` — never commit real DSNs.
 
@@ -145,7 +160,7 @@ The server exposes **22 tools** and **2 prompts**:
 
 | Tool | Kind | Description |
 |------|------|-------------|
-| `list_databases` | explore | Configured databases (name, mode, yolo — **no DSN**). |
+| `list_databases` | explore | Configured databases (name, mode, yolo, and `active_port` when a fallback port is in use — **no DSN**). |
 | `list_tables` | explore | Tables and views in a database. |
 | `get_table_schema` | explore | Columns, types, primary/foreign keys for a table. |
 | `get_database_schema` | explore | The whole database's schema in one deterministic call. `format="json"` (default) returns every table's columns/types/PK/FK; `format="sql"` returns a **self-contained, runnable DDL script** (tables, sequences, PK/FK/UNIQUE/CHECK, indexes, trigger functions, triggers) — no extra tools required. Pass `output_dir` to write `{database}_schema_{UTC}.{json,sql}` instead of returning it inline (recommended for large DBs). |
@@ -166,7 +181,7 @@ The server exposes **22 tools** and **2 prompts**:
 | `table_stats` | insight | Approximate row counts + disk/index sizes per table, largest first (statistics only, no scans). |
 | `show_activity` | insight | Sanitized `pg_stat_activity`: pid, state, wait events, query age — **no user names, client addresses, or query text** (text is opt-in and truncated). |
 | `set_yolo_mode` | config | Enable/disable `yolo` for one database (persisted). |
-| `check_database` | doctor | Test one database (or all) → `OK` or a sanitized diagnostic. |
+| `check_database` | doctor | Test one database (or all) → `OK` or a sanitized diagnostic; reports `active_port` when a fallback port answered. |
 
 **Prompts:**
 - `troubleshoot_connection` — a discoverable, full connection-gotchas checklist (host/port, firewall, `sslmode`, Docker `localhost`, db-name case, pool limits, …).
@@ -183,7 +198,7 @@ The server exposes **22 tools** and **2 prompts**:
 | `db-conn-mcp` | Run the server over **stdio** (the default an MCP client uses). Run directly in a terminal it prints guidance and exits — it does not hang. |
 | `db-conn-mcp --transport http` | Run over **HTTP (SSE)** instead. |
 | `db-conn-mcp setup` | Guided setup; shows status + an action menu if already configured. |
-| `db-conn-mcp status` | List configured databases and which clients have the server injected. |
+| `db-conn-mcp status` | List configured databases (including `fallback_ports` where configured) and which clients have the server injected. |
 | `db-conn-mcp add` | Add another database connection. |
 | `db-conn-mcp clients` | Inject the server into detected MCP clients. |
 | `db-conn-mcp clients --remove` | Uninject the server from chosen clients. |

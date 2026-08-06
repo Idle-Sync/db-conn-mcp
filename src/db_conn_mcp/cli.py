@@ -345,6 +345,19 @@ def _inject_clients_interactive(path: Path) -> None:
         _inject_into_client(spec, command, args)
 
 
+def _parse_fallback_ports(raw: str) -> list[int] | None:
+    """Parse '5433, 15432' -> [5433, 15432]; empty input -> None (key omitted)."""
+    if not raw.strip():
+        return None
+    ports: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part.isdigit() or not 1 <= int(part) <= 65535:
+            raise ValueError(f"Invalid port {part!r}: ports are integers 1-65535.")
+        ports.append(int(part))
+    return ports
+
+
 def _add_connection_interactive(path: Path) -> bool:
     """Prompt for one database, validate, gather injection, then commit.
 
@@ -356,6 +369,12 @@ def _add_connection_interactive(path: Path) -> bool:
     dsn = input("DSN (e.g. postgresql://user:pass@host:5432/db): ").strip()
     mode = input("Mode - [r]ead or [w]rite? (r/w): ").strip().lower()
     mode_name = "write" if mode.startswith("w") else "read"
+    ports_raw = input("Fallback ports, for tunnels that move (comma-separated, Enter to skip): ")
+    try:
+        fallback_ports = _parse_fallback_ports(ports_raw)
+    except ValueError as exc:
+        print(f"Could not add: {exc}")
+        return False
 
     try:
         _ensure_new_connection(cfg, name, dsn)
@@ -364,7 +383,9 @@ def _add_connection_interactive(path: Path) -> bool:
         return False
 
     chosen = _choose_injection_targets()
-    cfg.connections.append(Connection(name=name, dsn=dsn, mode=mode_name))
+    cfg.connections.append(
+        Connection(name=name, dsn=dsn, mode=mode_name, fallback_ports=fallback_ports)
+    )
     config.save(cfg, path)
     # Echo only the name — never the DSN (Rule 6).
     print(f"Registered {name!r} ({mode_name}) -> {path}")
@@ -383,7 +404,8 @@ def _print_status(path: Path) -> None:
         print("  (none)")
     for c in cfg.connections:
         view = c.public_view()
-        print(f"  - {view['name']}  (mode={view['mode']}, yolo={view['yolo']})")
+        extra = f", fallback_ports={view['fallback_ports']}" if "fallback_ports" in view else ""
+        print(f"  - {view['name']}  (mode={view['mode']}, yolo={view['yolo']}{extra})")
 
     print("\nMCP clients:")
     detected = detected_clients()
@@ -522,7 +544,8 @@ def cmd_check(config_arg: str | None = None, name: str | None = None) -> int:
     all_ok = True
     for entry in results:
         if entry["status"] == "OK":
-            print(f"  {entry['database']}: OK")
+            port_note = f" (active_port={entry['active_port']})" if "active_port" in entry else ""
+            print(f"  {entry['database']}: OK{port_note}")
         else:
             all_ok = False
             print(f"  {entry['database']}: {entry.get('detail', entry['status'])}")

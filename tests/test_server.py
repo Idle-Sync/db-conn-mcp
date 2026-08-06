@@ -6,7 +6,9 @@ reads connect read-only, the write gate is enforced, and connection failures sur
 as sanitized diagnostics.
 """
 
+import asyncio
 import json
+import time
 from pathlib import Path
 
 import asyncpg
@@ -626,3 +628,264 @@ def test_build_server_smoke(cfg_path):
     # The FastMCP app builds and exposes the 22 tools + 2 prompts without error.
     app = server.build_server(cfg_path)
     assert app is not None
+
+
+# ---- _dsn_with_port (pure, issue #10) ------------------------------------------
+
+
+def test_dsn_with_port_replaces_existing_port():
+    out = handlers_mod._dsn_with_port("postgresql://u:pw@localhost:5432/db?sslmode=require", 5433)
+    assert out == "postgresql://u:pw@localhost:5433/db?sslmode=require"
+
+
+def test_dsn_with_port_appends_when_missing():
+    assert handlers_mod._dsn_with_port("postgresql://u:pw@localhost/db", 5433) == (
+        "postgresql://u:pw@localhost:5433/db"
+    )
+
+
+def test_dsn_with_port_preserves_credentials_with_special_chars():
+    out = handlers_mod._dsn_with_port("postgresql://u%40x:p%23w@h:1/db", 9)
+    assert out == "postgresql://u%40x:p%23w@h:9/db"
+
+
+def test_dsn_with_port_unparsable_returns_none():
+    assert handlers_mod._dsn_with_port("not a dsn at all", 5433) is None
+    assert handlers_mod._dsn_with_port("postgresql://h:notaport/db", 5433) is None
+
+
+# ---- fallback-port probing (issue #10) ------------------------------------------
+
+TUNNEL_CONFIG = {
+    "connections": [
+        {
+            "name": "tunnel",
+            "dsn": "postgresql://u:SECRET@tunnelhost.invalid:5432/db",
+            "mode": "read",
+            "fallback_ports": [5433, 15432],
+        },
+        {
+            "name": "plain",
+            "dsn": "postgresql://u:SECRET@tunnelhost.invalid:5432/db",
+            "mode": "read",
+        },
+    ]
+}
+
+
+@pytest.fixture
+def tunnel_cfg_path(tmp_path):
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps(TUNNEL_CONFIG), encoding="utf-8")
+    return path
+
+
+class InvalidPasswordError(Exception):
+    """Name-matched by diagnostics._classify -> AUTH_FAILED."""
+
+
+class PortFakeDialect(FakeDialect):
+    """Refuses, auth-rejects, or black-holes specific ports; records every port dialed."""
+
+    def __init__(self, refuse_ports=(), auth_fail_ports=(), hang_ports=(), **kw):
+        super().__init__(**kw)
+        self.refuse_ports = set(refuse_ports)
+        self.auth_fail_ports = set(auth_fail_ports)
+        self.hang_ports = set(hang_ports)
+        self.dialed: list[int] = []
+
+    async def connect(self, dsn, *, read_only):
+        port = int(dsn.rsplit("/", 1)[0].rsplit(":", 1)[1])
+        self.dialed.append(port)
+        if port in self.refuse_ports:
+            raise ConnectionRefusedError("connection refused")
+        if port in self.auth_fail_ports:
+            raise InvalidPasswordError("bad password")
+        if port in self.hang_ports:
+            await asyncio.sleep(30)  # a firewalled port: never answers, never refuses
+        return await super().connect(dsn, read_only=read_only)
+
+
+async def test_probe_tries_fallbacks_in_order_and_remembers(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(refuse_ports={5432, 5433})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    await h.list_tables("tunnel")
+    assert dialect.dialed == [5432, 5433, 15432]
+    assert h._active_ports == {"tunnel": 15432}
+
+
+async def test_remembered_port_tried_first_next_time(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(refuse_ports={5432})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    h._active_ports["tunnel"] = 15432
+    await h.list_tables("tunnel")
+    assert dialect.dialed == [15432]
+
+
+async def test_remembered_port_failure_reprobes_from_primary(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(refuse_ports={15432})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    h._active_ports["tunnel"] = 15432
+    await h.list_tables("tunnel")
+    assert dialect.dialed == [15432, 5432]
+    assert "tunnel" not in h._active_ports  # primary won -> memory cleared
+
+
+async def test_auth_error_fails_fast_without_probing(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(auth_fail_ports={5432})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    with pytest.raises(handlers_mod.ConnectionFailedError) as exc:
+        await h.list_tables("tunnel")
+    assert dialect.dialed == [5432]  # no fallback attempted
+    assert exc.value.diag["category"] == "AUTH_FAILED"
+    assert "SECRET" not in str(exc.value)
+
+
+async def test_all_ports_refused_reports_tried_ports_sanitized(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(refuse_ports={5432, 5433, 15432})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    with pytest.raises(handlers_mod.ConnectionFailedError) as exc:
+        await h.list_tables("tunnel")
+    msg = str(exc.value)
+    cause = exc.value.diag["cause"]
+    assert "5433" in cause and "15432" in cause
+    # Nothing DSN-derived reaches the agent — not the password, not the host (Rule 6).
+    # (`localhost` is deliberately NOT asserted absent: the canned HOST_UNREACHABLE
+    # advice mentions it as generic Docker guidance, fixed text never built from a DSN.)
+    assert "SECRET" not in msg
+    assert "tunnelhost.invalid" not in msg
+    assert "SECRET" not in cause and "tunnelhost.invalid" not in cause
+
+
+async def test_hanging_fallback_times_out_and_probing_continues(tunnel_cfg_path, monkeypatch):
+    """A black-holed fallback must not stall the chain — the deadline moves it along."""
+    dialect = PortFakeDialect(refuse_ports={5432}, hang_ports={5433})
+    _patch_dialect(monkeypatch, dialect)
+    monkeypatch.setattr(handlers_mod, "FALLBACK_CONNECT_TIMEOUT_SECONDS", 0.05)
+    h = Handlers(tunnel_cfg_path)
+    started = time.monotonic()
+    await h.list_tables("tunnel")
+    elapsed = time.monotonic() - started
+    assert dialect.dialed == [5432, 5433, 15432]
+    assert h._active_ports == {"tunnel": 15432}
+    assert elapsed < 5  # the 30s hang was cut short, not waited out
+
+
+async def test_all_fallbacks_hang_reports_tried_ports_sanitized(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(refuse_ports={5432}, hang_ports={5433, 15432})
+    _patch_dialect(monkeypatch, dialect)
+    monkeypatch.setattr(handlers_mod, "FALLBACK_CONNECT_TIMEOUT_SECONDS", 0.05)
+    h = Handlers(tunnel_cfg_path)
+    with pytest.raises(handlers_mod.ConnectionFailedError) as exc:
+        await h.list_tables("tunnel")
+    assert dialect.dialed == [5432, 5433, 15432]
+    cause = exc.value.diag["cause"]
+    assert exc.value.diag["category"] == "HOST_UNREACHABLE"  # not UNKNOWN (py3.10 gotcha)
+    assert "5433" in cause and "15432" in cause
+    assert "SECRET" not in str(exc.value) and "tunnelhost.invalid" not in str(exc.value)
+
+
+async def test_no_fallback_key_never_probes(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(refuse_ports={5432})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    with pytest.raises(handlers_mod.ConnectionFailedError):
+        await h.list_tables("plain")
+    assert dialect.dialed == [5432]
+
+
+async def test_list_databases_shows_fallback_and_active_port(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(refuse_ports={5432, 5433})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    await h.list_tables("tunnel")  # probe lands on 15432
+    rows = {r["name"]: r for r in await h.list_databases()}
+    assert rows["tunnel"]["fallback_ports"] == [5433, 15432]
+    assert rows["tunnel"]["active_port"] == 15432
+    assert "active_port" not in rows["plain"] and "fallback_ports" not in rows["plain"]
+
+
+async def test_check_database_reports_active_port(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(refuse_ports={5432, 5433})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    report = {r["database"]: r for r in await h.check_database()}
+    assert report["tunnel"]["status"] == "OK"
+    assert report["tunnel"]["active_port"] == 15432
+    assert "active_port" not in report["plain"]
+
+
+async def test_dump_schema_faithful_uses_remembered_fallback_port(tunnel_cfg_path, monkeypatch):
+    """The native dump must dial the port the driver actually landed on (no re-probing)."""
+    dialect = PortFakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    h._active_ports["tunnel"] = 15432
+    await h.dump_schema_faithful("tunnel")
+    assert dialect.dumped_dsn == "postgresql://u:SECRET@tunnelhost.invalid:15432/db"
+
+
+async def test_dump_schema_faithful_without_memory_uses_primary_dsn(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    await h.dump_schema_faithful("tunnel")
+    assert dialect.dumped_dsn == "postgresql://u:SECRET@tunnelhost.invalid:5432/db"
+
+
+def test_dsn_with_port_handles_empty_port():
+    assert handlers_mod._dsn_with_port("postgresql://h:/db", 5433) == "postgresql://h:5433/db"
+
+
+def test_dsn_with_port_without_credentials():
+    assert handlers_mod._dsn_with_port("postgresql://host/db", 5433) == (
+        "postgresql://host:5433/db"
+    )
+
+
+def test_dsn_with_port_handles_ipv6_literals():
+    assert handlers_mod._dsn_with_port("postgresql://[::1]/db", 5433) == (
+        "postgresql://[::1]:5433/db"
+    )
+    assert handlers_mod._dsn_with_port("postgresql://u:pw@[::1]:5432/db", 5433) == (
+        "postgresql://u:pw@[::1]:5433/db"
+    )
+
+
+async def test_hard_failure_on_fallback_port_names_the_port(tunnel_cfg_path, monkeypatch):
+    """A non-HOST_UNREACHABLE failure found while probing says which port — number only."""
+    dialect = PortFakeDialect(refuse_ports={5432}, auth_fail_ports={5433})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    with pytest.raises(handlers_mod.ConnectionFailedError) as exc:
+        await h.list_tables("tunnel")
+    assert exc.value.diag["category"] == "AUTH_FAILED"
+    assert "fallback port 5433" in exc.value.diag["cause"]
+    assert "SECRET" not in str(exc.value) and "tunnelhost.invalid" not in str(exc.value)
+
+
+async def test_duplicate_fallback_ports_are_dialed_once(tmp_path, monkeypatch):
+    """Repeats — including one that just restates the primary's port — are skipped."""
+    cfg = {
+        "connections": [
+            {
+                "name": "dup",
+                "dsn": "postgresql://u:SECRET@tunnelhost.invalid:5432/db",
+                "mode": "read",
+                "fallback_ports": [5433, 5433, 5432],
+            }
+        ]
+    }
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    dialect = PortFakeDialect(refuse_ports={5432, 5433})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(path)
+    with pytest.raises(handlers_mod.ConnectionFailedError):
+        await h.list_tables("dup")
+    assert dialect.dialed == [5432, 5433]

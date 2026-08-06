@@ -72,6 +72,14 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 - [x] **Insight tools:** `diff_schemas` (structural diff of two configured DBs), `check_sequences` (stale-sequence detector), `table_stats` (rows + sizes, no scans), `show_activity` (sanitized `pg_stat_activity`), `explain_query` (EXPLAIN/ANALYZE of validated read-only SQL).
 - [x] **Compat fix:** pin `mcp>=1.0.0,<2.0.0` — SDK 2.0 removed `mcp.server.fastmcp` and broke fresh installs. SDK 2.x migration tracked separately.
 
+## Phase 6.6: Issue #10 — fallback_ports (v0.5.1)
+> From GitHub issue #10: an SSH tunnel doesn't always land on the same local port, so a perfectly valid connection intermittently reads as "database down". Opt-in, bounded, and entirely above the `Dialect` seam.
+- [x] **Config schema:** optional `fallback_ports: list[int] | None` on `Connection` (`models.py`), validated as integers `1-65535`. Omitted by default; `config.save()` never injects the key into an existing file, so current `connections.json` files keep working unchanged.
+- [x] **Probe on unreachable only:** `handlers._connect` walks primary → each configured fallback in order, continuing **only** on the `HOST_UNREACHABLE` diagnostic category; auth/TLS/DNS/db-not-found errors are raised immediately and never masked. Each fallback attempt is capped at `FALLBACK_CONNECT_TIMEOUT_SECONDS` (5s); the primary keeps the driver's own behavior. No scanning — only listed ports are ever tried.
+- [x] **Per-process port memory + surfacing:** the winning port is cached in `Handlers._active_ports` (never persisted), tried first on the next connect, re-probed from the primary if it fails, forgotten when the primary succeeds; exposed as `active_port` in `list_databases` and `check_database`. On total failure the sanitized cause lists the tried port numbers only (Rule 6).
+- [x] **Wizard + CLI:** `db-conn-mcp setup`/`add` prompt "Fallback ports, for tunnels that move (comma-separated, Enter to skip)" (Enter omits the key); `db-conn-mcp status` shows `fallback_ports=[...]` for entries that configure it.
+- [x] **Docs (Rule 7):** README configuration keys, PRD key features + `connections.json` schema, ARCHITECTURE Flow E probing paragraph, AGENT_RULES Rule 3 (copied byte-identically to `CLAUDE.md`/`.cursorrules`); version bumped to `0.5.1`.
+
 ## Phase 7: Future Dialects (Post-v1, Extensibility Payoff)
 > Not part of v1. Listed to prove the seam works — each is a single new file + one registry line, no changes above the dialect layer.
 - [ ] **MySQL:** `dialects/mysql.py` (`aiomysql`/`asyncmy`), `START TRANSACTION READ ONLY`, `information_schema`.

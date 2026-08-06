@@ -8,6 +8,7 @@ Every method that opens a connection routes failures through
 DSN never appears in any result (Rule 6).
 """
 
+import asyncio
 import contextlib
 import json
 import re
@@ -16,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from . import config, diagnostics, safety
 from .dialects.registry import dialect_for
@@ -26,6 +28,13 @@ MAX_OPEN_CURSORS = 5
 #: Idle cursors are reaped after this many seconds (checked on every cursor call).
 CURSOR_IDLE_TTL_SECONDS = 900.0
 
+#: Deadline for a single fallback-port PROBE attempt (issue #10).
+#: Applies only to fallback candidates — the primary DSN keeps the driver's own
+#: connect behavior. A refused port fails instantly, but a dropped/firewalled one
+#: hangs for the driver's default (~60s); without this cap, probing several ports
+#: would stack those hangs into minutes.
+FALLBACK_CONNECT_TIMEOUT_SECONDS = 5.0
+
 
 def _safe_filename_stem(name: str) -> str:
     """Make a connection name safe to embed in a filename (Rule 9 spirit).
@@ -34,6 +43,28 @@ def _safe_filename_stem(name: str) -> str:
     never escape the intended directory or produce an odd path.
     """
     return re.sub(r"[^A-Za-z0-9._-]", "_", name) or "database"
+
+
+def _dsn_with_port(dsn: str, port: int) -> str | None:
+    """Return ``dsn`` with the netloc port replaced (or appended); ``None`` if unparsable.
+
+    Pure string surgery on the URL netloc — credentials pass through untouched and
+    are never logged (Rule 6). ``None`` tells the caller to skip port fallbacks and
+    behave exactly as if the feature were off.
+    """
+    try:
+        parts = urlsplit(dsn)
+        if not parts.scheme or parts.hostname is None:
+            return None
+        _ = parts.port  # raises ValueError on a malformed port
+    except ValueError:
+        return None
+    creds, _, hostport = parts.netloc.rpartition("@")
+    # Strip an existing ":port" — including an empty one ("h:") that ``parts.port``
+    # reports as None. The ``]`` check keeps bare IPv6 literals (``[::1]``) intact.
+    host = hostport.rsplit(":", 1)[0] if hostport.rfind(":") > hostport.rfind("]") else hostport
+    netloc = f"{creds}@{host}:{port}" if creds else f"{host}:{port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def _format_diagnostic(diag: dict) -> str:
@@ -110,24 +141,107 @@ class Handlers:
         self.config_path = Path(config_path)
         #: Open server-side cursors: id -> {cursor, database, last_used}.
         self._cursors: dict[str, dict] = {}
+        #: Fallback-port memory: connection name -> port that answered (issue #10).
+        self._active_ports: dict[str, int] = {}
 
     def _load(self) -> config.Config:
         return config.load(str(self.config_path))
 
-    async def _connect(self, conn, *, read_only: bool) -> Any:
-        """Open a connection, converting any failure into a sanitized error."""
-        dialect = dialect_for(conn.dsn)
+    def _dsn_candidates(self, conn: Any) -> list[tuple[int | None, str]]:
+        """Return ``(port, dsn)`` pairs in probe order; ``None`` port = primary DSN.
+
+        Remembered active port (if any) moves to the front; the rest keep the
+        configured order. Duplicates are skipped — including a fallback that merely
+        repeats the primary DSN's own port. Without ``fallback_ports`` this is just
+        the primary.
+        """
+        candidates: list[tuple[int | None, str]] = [(None, conn.dsn)]
         try:
-            db = await dialect.connect(conn.dsn, read_only=read_only)
-        except Exception as exc:  # noqa: BLE001 — intentional: classify & sanitize all
-            raise ConnectionFailedError(diagnostics.explain(exc)) from None
-        return dialect, db
+            seen: set[int | None] = {urlsplit(conn.dsn).port}
+        except ValueError:
+            seen = set()
+        for port in conn.fallback_ports or []:
+            if port in seen:
+                continue
+            dsn = _dsn_with_port(conn.dsn, port)
+            if dsn is not None:
+                seen.add(port)
+                candidates.append((port, dsn))
+        remembered = self._active_ports.get(conn.name)
+        if remembered is not None:
+            front = [c for c in candidates if c[0] == remembered]
+            candidates = front + [c for c in candidates if c[0] != remembered]
+        return candidates
+
+    async def _connect(self, conn: Any, *, read_only: bool) -> Any:
+        """Open a connection, converting any failure into a sanitized error.
+
+        With ``fallback_ports`` configured, a refused/timed-out primary is retried
+        on each fallback port in order (auth/TLS/etc. errors fail immediately —
+        never masked by probing). Each fallback probe is capped at
+        ``FALLBACK_CONNECT_TIMEOUT_SECONDS`` so a black-holed port cannot stall the
+        whole chain. The winning fallback port is remembered for this process; a
+        primary success forgets it.
+        """
+        dialect = dialect_for(conn.dsn)
+        candidates = self._dsn_candidates(conn)
+        tried_fallbacks: list[int] = []
+        last_diag: dict | None = None
+        for port, dsn in candidates:
+            try:
+                if port is None:
+                    db = await dialect.connect(dsn, read_only=read_only)
+                else:
+                    db = await asyncio.wait_for(
+                        dialect.connect(dsn, read_only=read_only),
+                        timeout=FALLBACK_CONNECT_TIMEOUT_SECONDS,
+                    )
+            except (TimeoutError, asyncio.TimeoutError):
+                # A probe that runs out its deadline means "nothing answered here" —
+                # keep probing. Classified locally rather than via ``diagnostics``
+                # because on Python 3.10 ``asyncio.TimeoutError`` is NOT the builtin
+                # and would classify as UNKNOWN, wrongly aborting the probe chain.
+                # ``explain`` of a builtin ``TimeoutError`` yields the canned,
+                # sanitized HOST_UNREACHABLE advice (no DSN, host, or user).
+                last_diag = diagnostics.explain(TimeoutError())
+                if port is not None:
+                    tried_fallbacks.append(port)
+                continue
+            except Exception as exc:  # noqa: BLE001 — intentional: classify & sanitize all
+                diag = diagnostics.explain(exc)
+                if diag["category"] != "HOST_UNREACHABLE":
+                    if port is not None:
+                        # Say which probed port produced it — port number only (Rule 6).
+                        diag = dict(diag)
+                        diag["cause"] += f" (on fallback port {port})"
+                    raise ConnectionFailedError(diag) from None
+                last_diag = diag
+                if port is not None:
+                    tried_fallbacks.append(port)
+                continue
+            if port is None:
+                self._active_ports.pop(conn.name, None)
+            else:
+                self._active_ports[conn.name] = port
+            return dialect, db
+        assert last_diag is not None  # loop ran at least once (primary)
+        if tried_fallbacks:
+            last_diag = dict(last_diag)
+            ports = ", ".join(str(p) for p in tried_fallbacks)
+            last_diag["cause"] += f" (also tried fallback port(s): {ports})"
+        raise ConnectionFailedError(last_diag) from None
 
     # ---- Exploration tools ---------------------------------------------------
 
     async def list_databases(self) -> list[dict]:
-        """Return configured databases as ``{name, mode, yolo}`` — never the DSN."""
-        return [c.public_view() for c in self._load().connections]
+        """Return configured databases as ``{name, mode, yolo, ...}`` — never the DSN."""
+        rows = []
+        for c in self._load().connections:
+            view = c.public_view()
+            if c.name in self._active_ports:
+                view["active_port"] = self._active_ports[c.name]
+            rows.append(view)
+        return rows
 
     async def list_tables(self, database: str) -> list[dict]:
         """Return tables and views for one database."""
@@ -212,10 +326,17 @@ class Handlers:
         returns ``saved_to`` when ``output_dir`` is set). If the native tool isn't
         installed, returns ``{status: "pg_dump_not_found", message}`` with install
         guidance so the caller can offer to install it; failures come back sanitized.
+
+        Uses the remembered fallback port when one is active, so the native tool dials
+        the same port the driver did. The subprocess never probes — one port, one shot.
         """
         conn = config.get(self._load(), database)
         dialect = dialect_for(conn.dsn)
-        result = await dialect.dump_schema_sql(conn.dsn)
+        active_port = self._active_ports.get(conn.name)
+        dsn = conn.dsn
+        if active_port is not None:
+            dsn = _dsn_with_port(conn.dsn, active_port) or conn.dsn
+        result = await dialect.dump_schema_sql(dsn)
         if result.get("status") != "ok":
             return result  # pg_dump_not_found / pg_dump_failed — already sanitized
 
@@ -516,7 +637,10 @@ class Handlers:
             try:
                 _, db = await self._connect(conn, read_only=True)
                 await db.close()
-                report.append({"database": conn.name, "status": "OK"})
+                row = {"database": conn.name, "status": "OK"}
+                if conn.name in self._active_ports:
+                    row["active_port"] = self._active_ports[conn.name]
+                report.append(row)
             except ConnectionFailedError as exc:
                 report.append(
                     {

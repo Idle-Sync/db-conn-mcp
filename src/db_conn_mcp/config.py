@@ -110,7 +110,8 @@ def get(config: Config, name: str) -> Connection:
 def save(config: Config, path: Path) -> None:
     """Atomically rewrite ``connections.json`` (temp file + replace)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = config.model_dump(exclude_defaults=False)
+    # exclude_none: optional keys absent from a user's file must stay absent (issue #10).
+    payload = config.model_dump(exclude_none=True)
     tmp = path.with_name(f"{path.name}.tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, path)
