@@ -756,3 +756,33 @@ def test_injected_command_none_when_absent(tmp_path):
     cfg.write_text("{}", encoding="utf-8")
     spec = ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
     assert injected_command(spec) is None
+
+
+def test_injected_command_reads_zed_nested_path(tmp_path):
+    from db_conn_mcp.clients import ClientSpec, injected_command
+
+    cfg = tmp_path / "settings.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "context_servers": {
+                    "db-conn-mcp": {
+                        "source": "custom",
+                        "command": {"path": "/x/db-conn-mcp", "args": []},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    spec = ClientSpec("zed", "Zed", cfg, "zed")
+    assert injected_command(spec) == "/x/db-conn-mcp"
+
+
+def test_injected_command_none_for_non_dict_entry(tmp_path):
+    from db_conn_mcp.clients import ClientSpec, injected_command
+
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"mcpServers": {"db-conn-mcp": "not-a-dict"}}), encoding="utf-8")
+    spec = ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
+    assert injected_command(spec) is None

@@ -6,9 +6,11 @@ import subprocess
 
 import pytest
 
+from db_conn_mcp import clients as clients_mod
 from db_conn_mcp import doctor
 from db_conn_mcp.doctor import (
     CheckContext,
+    check_client_paths,
     check_config_schema,
     check_secrets_exposure,
     finding,
@@ -174,3 +176,57 @@ def test_secrets_world_readable_warns(tmp_path):
     perm = next(f for f in findings if "chmod" in f["detail"])
     assert perm["status"] == "warn"
     assert perm["suggested_action"] == "fix_permissions"
+
+
+def _client_with_command(tmp_path, command):
+    cfg = tmp_path / "client.json"
+    cfg.write_text(
+        json.dumps({"mcpServers": {"db-conn-mcp": {"command": command, "args": []}}}),
+        encoding="utf-8",
+    )
+    return clients_mod.ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
+
+
+def test_client_paths_warns_on_missing_binary(tmp_path, monkeypatch):
+    spec = _client_with_command(tmp_path, str(tmp_path / "gone" / "db-conn-mcp.exe"))
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [spec])
+    (f,) = check_client_paths(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "warn"
+    assert f["suggested_action"] == "repair_client_config"
+    assert "Claude Desktop" in f["detail"]
+
+
+def test_client_paths_ok_when_binary_exists(tmp_path, monkeypatch):
+    exe = tmp_path / "db-conn-mcp.exe"
+    exe.write_text("", encoding="utf-8")
+    spec = _client_with_command(tmp_path, str(exe))
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [spec])
+    (f,) = check_client_paths(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "ok"
+
+
+def test_client_paths_warns_when_the_entry_has_no_readable_command(tmp_path, monkeypatch):
+    # Injected, but the entry is malformed — injected_command() returns None.
+    cfg = tmp_path / "client.json"
+    cfg.write_text(json.dumps({"mcpServers": {"db-conn-mcp": "not-a-dict"}}), encoding="utf-8")
+    spec = clients_mod.ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [spec])
+    (f,) = check_client_paths(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "warn"
+    assert f["suggested_action"] == "repair_client_config"
+
+
+def test_client_paths_skips_a_detected_client_without_the_entry(tmp_path, monkeypatch):
+    cfg = tmp_path / "client.json"
+    cfg.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}), encoding="utf-8")
+    spec = clients_mod.ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [spec])
+    (f,) = check_client_paths(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "ok"
+    assert "no detected MCP client" in f["detail"]
+
+
+def test_client_paths_ok_when_nothing_injected(monkeypatch):
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [])
+    (f,) = check_client_paths(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "ok"

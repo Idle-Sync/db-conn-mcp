@@ -22,6 +22,7 @@ from typing import Literal, TypedDict
 
 from pydantic import ValidationError
 
+from . import clients
 from .models import Config, Connection
 
 Status = Literal["ok", "warn", "fail", "skipped"]
@@ -215,11 +216,47 @@ def check_secrets_exposure(ctx: CheckContext) -> list[Finding]:
     return findings
 
 
+def check_client_paths(ctx: CheckContext) -> list[Finding]:
+    """Use case 6: injected client entries whose command path no longer exists."""
+    name = "client_paths"
+    findings: list[Finding] = []
+    for spec in clients.detected_clients():
+        if not clients.is_injected(spec):
+            continue
+        command = clients.injected_command(spec)
+        if command is None:
+            findings.append(
+                finding(
+                    name,
+                    "warn",
+                    f"{spec.label}: db-conn-mcp entry has no readable command — "
+                    "run `db-conn-mcp clients` to re-inject",
+                    "repair_client_config",
+                )
+            )
+        elif Path(command).is_file() or shutil.which(command):
+            findings.append(finding(name, "ok", f"{spec.label}: injected, command exists"))
+        else:
+            findings.append(
+                finding(
+                    name,
+                    "warn",
+                    f"{spec.label}: db-conn-mcp entry points at a command that no longer "
+                    "exists — run `db-conn-mcp clients` to re-inject",
+                    "repair_client_config",
+                )
+            )
+    if not findings:
+        findings.append(finding(name, "ok", "no detected MCP client has db-conn-mcp injected"))
+    return findings
+
+
 #: The registry: (check_name, callable(ctx) -> list[Finding] | awaitable of it).
 #: Order is presentation order in the CLI.
 _CHECKS: list[tuple[str, Callable]] = [
     ("config_schema", check_config_schema),
     ("secrets_exposure", check_secrets_exposure),
+    ("client_paths", check_client_paths),
 ]
 
 
