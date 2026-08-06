@@ -626,3 +626,27 @@ def test_build_server_smoke(cfg_path):
     # The FastMCP app builds and exposes the 22 tools + 2 prompts without error.
     app = server.build_server(cfg_path)
     assert app is not None
+
+
+# ---- _dsn_with_port (pure, issue #10) ------------------------------------------
+
+
+def test_dsn_with_port_replaces_existing_port():
+    out = handlers_mod._dsn_with_port("postgresql://u:pw@localhost:5432/db?sslmode=require", 5433)
+    assert out == "postgresql://u:pw@localhost:5433/db?sslmode=require"
+
+
+def test_dsn_with_port_appends_when_missing():
+    assert handlers_mod._dsn_with_port("postgresql://u:pw@localhost/db", 5433) == (
+        "postgresql://u:pw@localhost:5433/db"
+    )
+
+
+def test_dsn_with_port_preserves_credentials_with_special_chars():
+    out = handlers_mod._dsn_with_port("postgresql://u%40x:p%23w@h:1/db", 9)
+    assert out == "postgresql://u%40x:p%23w@h:9/db"
+
+
+def test_dsn_with_port_unparsable_returns_none():
+    assert handlers_mod._dsn_with_port("not a dsn at all", 5433) is None
+    assert handlers_mod._dsn_with_port("postgresql://h:notaport/db", 5433) is None

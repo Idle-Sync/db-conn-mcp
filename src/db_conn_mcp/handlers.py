@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from . import config, diagnostics, safety
 from .dialects.registry import dialect_for
@@ -34,6 +35,26 @@ def _safe_filename_stem(name: str) -> str:
     never escape the intended directory or produce an odd path.
     """
     return re.sub(r"[^A-Za-z0-9._-]", "_", name) or "database"
+
+
+def _dsn_with_port(dsn: str, port: int) -> str | None:
+    """Return ``dsn`` with the netloc port replaced (or appended); ``None`` if unparsable.
+
+    Pure string surgery on the URL netloc — credentials pass through untouched and
+    are never logged (Rule 6). ``None`` tells the caller to skip port fallbacks and
+    behave exactly as if the feature were off.
+    """
+    try:
+        parts = urlsplit(dsn)
+        if not parts.scheme or parts.hostname is None:
+            return None
+        _ = parts.port  # raises ValueError on a malformed port
+    except ValueError:
+        return None
+    creds, _, hostport = parts.netloc.rpartition("@")
+    host = hostport.rsplit(":", 1)[0] if parts.port is not None else hostport
+    netloc = f"{creds}@{host}:{port}" if creds else f"{host}:{port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def _format_diagnostic(diag: dict) -> str:
