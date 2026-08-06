@@ -131,18 +131,63 @@ class Handlers:
         self.config_path = Path(config_path)
         #: Open server-side cursors: id -> {cursor, database, last_used}.
         self._cursors: dict[str, dict] = {}
+        #: Fallback-port memory: connection name -> port that answered (issue #10).
+        self._active_ports: dict[str, int] = {}
 
     def _load(self) -> config.Config:
         return config.load(str(self.config_path))
 
-    async def _connect(self, conn, *, read_only: bool) -> Any:
-        """Open a connection, converting any failure into a sanitized error."""
+    def _dsn_candidates(self, conn: Any) -> list[tuple[int | None, str]]:
+        """Return ``(port, dsn)`` pairs in probe order; ``None`` port = primary DSN.
+
+        Remembered active port (if any) moves to the front; the rest keep the
+        configured order. Without ``fallback_ports`` this is just the primary.
+        """
+        candidates: list[tuple[int | None, str]] = [(None, conn.dsn)]
+        for port in conn.fallback_ports or []:
+            dsn = _dsn_with_port(conn.dsn, port)
+            if dsn is not None:
+                candidates.append((port, dsn))
+        remembered = self._active_ports.get(conn.name)
+        if remembered is not None:
+            front = [c for c in candidates if c[0] == remembered]
+            candidates = front + [c for c in candidates if c[0] != remembered]
+        return candidates
+
+    async def _connect(self, conn: Any, *, read_only: bool) -> Any:
+        """Open a connection, converting any failure into a sanitized error.
+
+        With ``fallback_ports`` configured, a refused/timed-out primary is retried
+        on each fallback port in order (auth/TLS/etc. errors fail immediately —
+        never masked by probing). The winning fallback port is remembered for this
+        process; a primary success forgets it.
+        """
         dialect = dialect_for(conn.dsn)
-        try:
-            db = await dialect.connect(conn.dsn, read_only=read_only)
-        except Exception as exc:  # noqa: BLE001 — intentional: classify & sanitize all
-            raise ConnectionFailedError(diagnostics.explain(exc)) from None
-        return dialect, db
+        candidates = self._dsn_candidates(conn)
+        tried_fallbacks: list[int] = []
+        last_diag: dict | None = None
+        for port, dsn in candidates:
+            try:
+                db = await dialect.connect(dsn, read_only=read_only)
+            except Exception as exc:  # noqa: BLE001 — intentional: classify & sanitize all
+                diag = diagnostics.explain(exc)
+                if diag["category"] != "HOST_UNREACHABLE":
+                    raise ConnectionFailedError(diag) from None
+                last_diag = diag
+                if port is not None:
+                    tried_fallbacks.append(port)
+                continue
+            if port is None:
+                self._active_ports.pop(conn.name, None)
+            else:
+                self._active_ports[conn.name] = port
+            return dialect, db
+        assert last_diag is not None  # loop ran at least once (primary)
+        if tried_fallbacks:
+            last_diag = dict(last_diag)
+            ports = ", ".join(str(p) for p in tried_fallbacks)
+            last_diag["cause"] += f" (also tried fallback port(s): {ports})"
+        raise ConnectionFailedError(last_diag) from None
 
     # ---- Exploration tools ---------------------------------------------------
 
