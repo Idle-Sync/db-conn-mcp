@@ -30,7 +30,10 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12" # lint once; ruff's target-version drives the rules
-      - run: python -m pip install --upgrade "ruff>=0.6.0"
+      - name: Install ruff at the pinned version
+        # From the dev extra, so pyproject stays the single source of truth for
+        # dependencies (Rule 4) and CI runs the exact ruff a developer has locally.
+        run: python -m pip install -e ".[dev]"
       - run: ruff check .
       - run: ruff format --check .
 
@@ -45,9 +48,12 @@ jobs:
         python-version: ["3.12", "3.13", "3.14"]
         os: [ubuntu-latest]
         include:
-          # Windows and macOS on the floor version only: the path handling
-          # (server_launch, config resolution, client config paths) is the
-          # OS-specific part, and it does not vary by Python version.
+          # Windows and macOS on the floor version only. `client_specs()` branches
+          # three ways on sys.platform — win32, darwin (~/Library/Application
+          # Support), and everything else — so each needs a runner, but that path
+          # logic does not vary by Python version. Free either way: public repos
+          # get unlimited standard-runner minutes on all three OSes (the 10x macOS
+          # multiplier applies only to private repos).
           - python-version: "3.12"
             os: windows-latest
           - python-version: "3.12"
