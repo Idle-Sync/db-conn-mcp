@@ -9,16 +9,41 @@ We use FastMCP — the official high-level SDK API — over the lower-level
 remaining the same SDK.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ContentBlock
 
 from . import doctor as doctor_mod
 from .config import resolve_path
+from .guard import UNTRUSTED_DATA_POLICY, guard_content_blocks
 from .handlers import Handlers
 
 Transport = Literal["stdio", "http"]
+
+#: What ``FastMCP.call_tool`` may return: the text blocks alone, or — for a tool
+#: with an output schema (all 23 of ours) — ``(text blocks, structured content)``.
+ToolResult = Sequence[ContentBlock] | tuple[Sequence[ContentBlock], dict[str, Any]]
+
+
+class GuardedFastMCP(FastMCP):
+    """FastMCP that fences every tool's *text* output as untrusted database data.
+
+    One seam guards all 23 tools (Rule 1: no per-tool boilerplate). Only the text
+    channel is wrapped — ``structuredContent`` is passed through **untouched** so it
+    stays valid against the tool's output schema, which clients rely on.
+    """
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+        """Run the tool, then wrap its text blocks with the untrusted-data guard."""
+        result = await super().call_tool(name, arguments)
+        if isinstance(result, tuple):
+            unstructured, structured = result
+            return guard_content_blocks(unstructured), structured
+        return guard_content_blocks(result)
+
 
 #: The full connection-gotchas checklist exposed by the troubleshoot_connection prompt.
 TROUBLESHOOT_CHECKLIST = """\
@@ -61,11 +86,14 @@ If they don't want to install anything, fall back to get_database_schema(format=
 """
 
 
-def build_server(config_path: Path | str | None = None) -> FastMCP:
-    """Construct the FastMCP app with all 23 tools and 2 prompts."""
+def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
+    """Construct the guarded FastMCP app with all 23 tools and 2 prompts."""
     resolved = resolve_path(str(config_path) if config_path else None)
     handlers = Handlers(resolved)
-    app = FastMCP("db-conn-mcp")  # 23 tools + 2 prompts registered below
+    # 23 tools + 2 prompts registered below. `instructions` reaches the client in the
+    # initialize response — the durable half of the prompt-injection defence, since a
+    # client reading only structuredContent never sees the per-response text guard.
+    app = GuardedFastMCP("db-conn-mcp", instructions=UNTRUSTED_DATA_POLICY)
 
     # ---- Exploration tools ---------------------------------------------------
     @app.tool()
