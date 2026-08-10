@@ -7,7 +7,8 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 ## Phase 1: Project Scaffolding & Tooling
 - [x] **Virtual Environment:** Create and use a project-local `.venv` (`python -m venv .venv`) for all work (git-ignored).
 - [x] **Repository Structure:** Set up the standard Python package layout (`src/db_conn_mcp/`) per the module map in `ARCHITECTURE.md`.
-- [x] **Code Quality:** Initialize `ruff` configuration for aggressive, consistent linting and formatting.
+- [x] **Code Quality:** Initialize `ruff` configuration for aggressive, consistent linting and formatting. Ruff is **pinned exactly** in the `dev` extra — a linter is not semver-stable in what it flags, so a floor would let CI enforce rules a developer cannot reproduce locally. Markdown is excluded (`extend-exclude`): ruff 0.16+ formats Python blocks inside `.md`, and doc snippets are illustrative while `docs/superpowers/` holds dated artifacts that must stay verbatim.
+- [x] **CI (`ci.yml`):** Lint + full suite on every push to `main` and every PR — 3.12/3.13/3.14 on Linux, plus the floor version on Windows and macOS (`client_specs()` branches three ways on `sys.platform`). `fail-fast: false`. Installs the `doctor` extra so the psutil-backed check runs rather than skipping. Separate from `publish.yml`, which is tag-only and never ran the tests. Python floor is **3.12** (3.10 EOL 2026-10-31; 3.11 security-only).
 - [x] **Dependencies:** Declare all packages in `pyproject.toml` (the single source of truth — `mcp`, `asyncpg`, `pydantic`); install with `pip install -e .`. No `requirements.txt`.
 - [x] **.gitignore:** Python caches, `.venv`, build artifacts, and secrets (`connections.json`, `.env`).
 
