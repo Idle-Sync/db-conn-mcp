@@ -159,6 +159,11 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
     ) -> dict:
         """Run a read-only SELECT query (enforced as a read-only transaction).
 
+        Know the schema before you query: if the exact table and column names are not
+        already in this conversation, call get_table_schema (or list_tables /
+        find_columns) first instead of guessing — a wrong name costs a failed
+        round-trip. Don't re-fetch a schema you already have.
+
         ALWAYS pass user-supplied values via `params` with $1/$2/... placeholders in the
         SQL (real driver bind parameters — no quoting/injection pitfalls), not by pasting
         them into the SQL string. Optional timeout_ms cancels an overrunning query.
@@ -176,6 +181,11 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
         timeout_ms: int | None = None,
     ) -> dict:
         """Run an INSERT/UPDATE/DELETE/DDL statement on a write-mode database.
+
+        Know the schema before you write: if the exact table and column names are not
+        already in this conversation, call get_table_schema first instead of guessing —
+        a wrong name wastes a whole dry-run round-trip. Don't re-fetch a schema you
+        already have.
 
         SAFETY — the server enforces this flow; you cannot skip it silently:
         1. Call with dry_run=true (the default): the statement executes inside a
