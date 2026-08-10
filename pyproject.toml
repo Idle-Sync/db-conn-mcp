@@ -51,6 +51,8 @@ db-conn-mcp = "db_conn_mcp.cli:main"
 Homepage = "https://github.com/Idle-Sync/db-conn-mcp"
 Repository = "https://github.com/Idle-Sync/db-conn-mcp"
 Issues = "https://github.com/Idle-Sync/db-conn-mcp/issues"
+# Renders as a "Changelog" link on the PyPI project page.
+Changelog = "https://github.com/Idle-Sync/db-conn-mcp/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/db_conn_mcp"]

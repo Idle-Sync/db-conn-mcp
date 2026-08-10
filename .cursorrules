@@ -42,6 +42,7 @@ When assisting the user with the `db-conn-mcp` project, please strictly adhere t
   - `docs/PRD.md` — product scope, features, tools.
   - `docs/PLAN.md` — implementation roadmap / phases.
   - `docs/ARCHITECTURE.md` — components, flows, diagrams.
+  - `CHANGELOG.md` — every user-visible change, under the `## [Unreleased]` heading. Anything that alters what a consumer observes — tool output shape, gate behavior, supported Python, config schema — MUST also get a **Breaking / Behaviour changes** bullet written in the user's terms ("your X will now do Y"), not the PR title. This file is the source the release workflow reads for GitHub Release notes, so a missing entry ships a silent release.
   - These rule files (`docs/AGENT_RULES.md` → copied to root `CLAUDE.md` and `.cursorrules`) when a rule itself changes.
 - Docs and code must never drift. A change that alters behavior or scope without updating the docs is **incomplete**.
 

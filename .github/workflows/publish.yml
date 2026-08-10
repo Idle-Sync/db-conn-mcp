@@ -88,9 +88,34 @@ jobs:
       contents: write # create the release/tag
     steps:
       - uses: actions/checkout@v6
+      - name: Extract this version's section from CHANGELOG.md
+        # CHANGELOG.md is the single source of truth for release notes, so GitHub,
+        # PyPI and the repo cannot disagree. Literal prefix matching (index(), not
+        # regex) keeps the version's dots and brackets from needing escaping.
+        # Stops at the next "## [" heading or at the link-reference block.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v hdr="## [$VERSION]" '
+            index($0, hdr) == 1 { found=1; next }
+            found && index($0, "## [") == 1 { exit }
+            found && index($0, "[") == 1 && index($0, "]: ") > 0 { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md || true
+          if [ -s release-notes.md ]; then
+            echo "Using the CHANGELOG section for $VERSION:"
+            cat release-notes.md
+          else
+            # Never fail a release over missing notes — fall back to generated ones.
+            echo "::warning::No CHANGELOG.md section for $VERSION; falling back to --generate-notes"
+          fi
       - name: Create the GitHub Release for this tag (skipped if it already exists)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — nothing to do."
+          elif [ -s release-notes.md ]; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md
+          else
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
