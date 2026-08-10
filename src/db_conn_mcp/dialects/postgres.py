@@ -754,7 +754,7 @@ class PostgresDialect(Dialect):
                 return {"columns": columns, "rows": mapped}
             status = await conn.execute(sql, *args, timeout=timeout)
             return {"rows_affected": _parse_affected(status)}
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             # Sanitized: the query was cancelled server-side by the driver.
             raise ValueError(f"Query exceeded timeout_ms={timeout_ms} and was cancelled.") from None
 
@@ -909,23 +909,19 @@ class PostgresDialect(Dialect):
         return {"results": results, "truncated": truncated}
 
     async def probe_listener(self, host: str, port: int) -> bool:
-        """TCP + SSLRequest probe; sends no credentials, reads one status byte.
-
-        ``asyncio.TimeoutError`` is listed alongside the builtin because they are only
-        the same class from Python 3.11 on, and this project supports 3.10.
-        """
+        """TCP + SSLRequest probe; sends no credentials, reads one status byte."""
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=PROBE_TIMEOUT_SECONDS
             )
-        except (OSError, asyncio.TimeoutError, TimeoutError):
+        except (OSError, TimeoutError):
             return False
         try:
             writer.write(_SSL_REQUEST)
             await writer.drain()
             reply = await asyncio.wait_for(reader.readexactly(1), timeout=PROBE_TIMEOUT_SECONDS)
             return reply in (b"S", b"N")
-        except (OSError, asyncio.IncompleteReadError, asyncio.TimeoutError, TimeoutError):
+        except (OSError, asyncio.IncompleteReadError, TimeoutError):
             return False
         finally:
             writer.close()

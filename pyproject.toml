@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "db-conn-mcp"
-version = "0.5.3"
+version = "0.5.4"
 description = "A dead-simple, self-hosted MCP server for securely querying databases via AI agents."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "db-conn-mcp contributors" }]
 keywords = ["mcp", "model-context-protocol", "postgresql", "database", "ai-agent"]
@@ -15,9 +15,9 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Database",
 ]
 
@@ -32,7 +32,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.6.0",
+    # Pinned exactly, not floored: a linter/formatter is not semver-stable in what
+    # it flags, so a range lets CI enforce rules a developer cannot reproduce
+    # locally. Bump this deliberately, with the resulting fixes in the same change.
+    "ruff==0.16.2",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "build>=1.2.0",
@@ -55,8 +58,12 @@ packages = ["src/db_conn_mcp"]
 # ---- Ruff: strict, consistent linting + formatting (Rule 2) ----
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 src = ["src", "tests"]
+# Ruff 0.16+ also formats Python blocks inside Markdown. We don't want that here:
+# doc snippets are illustrative (sometimes abbreviated or deliberately aligned),
+# and docs/superpowers/ holds dated historical artifacts that must stay verbatim.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 # A pragmatic-but-strict selection: pycodestyle, pyflakes, isort, bugbear,

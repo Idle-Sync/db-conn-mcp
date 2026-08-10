@@ -316,7 +316,7 @@ async def test_execute_passes_timeout_in_seconds():
 async def test_execute_timeout_raises_sanitized_valueerror():
     class TimingOutConn(FakeConn):
         async def fetch(self, sql, *args, timeout=None):
-            raise asyncio.TimeoutError
+            raise TimeoutError
 
     with pytest.raises(ValueError, match="timeout_ms=100"):
         await PostgresDialect().execute(TimingOutConn(), "SELECT 1", timeout_ms=100)
