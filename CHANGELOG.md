@@ -13,6 +13,33 @@ the time of that release.
 
 Nothing yet.
 
+## [0.5.5] — 2026-08-10
+
+Documentation and packaging only. No code change, no behaviour change — still 23 tools and
+2 prompts, and nothing about how the server runs is different from 0.5.4.
+
+### Added
+
+- **This changelog**, covering all releases back to 0.1.0. Entries for 0.5.2 and earlier were
+  backfilled from each release's own contemporaneous notes.
+- A **Changelog link on the PyPI project page**, via a `Changelog` project URL.
+
+### Changed
+
+- Release notes now come from this file. The release workflow extracts the tag's section and
+  passes it to `gh release create --notes-file`, so GitHub, PyPI and the repo cannot drift
+  apart. A missing section logs a warning and falls back to generated notes, so a release can
+  never fail for want of prose.
+
+  This replaces `--generate-notes`, which emitted PR-title lists. That was how 0.5.3 shipped a
+  breaking change to tool output described only as "Fence tool output as untrusted database
+  data" — accurate about the work, silent about the consequence.
+- The notes for 0.5.2, 0.5.3 and 0.5.4 have been rewritten from their changelog entries.
+  0.1.0 through 0.5.1 keep their original hand-written notes, which were already better than
+  anything a regeneration would produce.
+- Rule 7 (living documentation) now covers `CHANGELOG.md`, so entries are written with the
+  change rather than remembered afterwards.
+
 ## [0.5.4] — 2026-08-10
 
 Infrastructure only. No tool was added, removed or changed — still 23 tools and 2 prompts.
@@ -286,7 +313,8 @@ agents.
 - Setup and management CLI — `setup`, `status`, `add`, `clients`, `check`, `remove`, `yolo` —
   with auto-injection into 8 MCP clients.
 
-[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.1...v0.5.2
