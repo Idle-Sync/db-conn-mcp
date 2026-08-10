@@ -15,7 +15,7 @@ import json
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -202,12 +202,11 @@ class Handlers:
                         dialect.connect(dsn, read_only=read_only),
                         timeout=FALLBACK_CONNECT_TIMEOUT_SECONDS,
                     )
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 # A probe that runs out its deadline means "nothing answered here" —
-                # keep probing. Classified locally rather than via ``diagnostics``
-                # because on Python 3.10 ``asyncio.TimeoutError`` is NOT the builtin
-                # and would classify as UNKNOWN, wrongly aborting the probe chain.
-                # ``explain`` of a builtin ``TimeoutError`` yields the canned,
+                # keep probing rather than abort the chain. Classified locally so the
+                # outcome never depends on how ``diagnostics`` happens to bucket a
+                # timeout; ``explain`` of a builtin ``TimeoutError`` yields the canned,
                 # sanitized HOST_UNREACHABLE advice (no DSN, host, or user).
                 last_diag = diagnostics.explain(TimeoutError())
                 if port is not None:
@@ -298,7 +297,7 @@ class Handlers:
         finally:
             await db.close()
 
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
         if format == "sql":
             if output_dir is None:
@@ -350,7 +349,7 @@ class Handlers:
         if result.get("status") != "ok":
             return result  # pg_dump_not_found / pg_dump_failed — already sanitized
 
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         ddl = result["ddl"]
         if output_dir is None:
             return {"status": "ok", "database": database, "generated_utc": stamp, "ddl": ddl}

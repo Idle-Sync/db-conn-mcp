@@ -23,7 +23,7 @@ It does one thing well: let an agent **safely explore and query** a database you
 
 ## Install
 
-Requires **Python 3.10+**.
+Requires **Python 3.12+**.
 
 ```bash
 # Recommended: isolated but globally available on your PATH

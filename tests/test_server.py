@@ -854,7 +854,7 @@ async def test_all_fallbacks_hang_reports_tried_ports_sanitized(tunnel_cfg_path,
         await h.list_tables("tunnel")
     assert dialect.dialed == [5432, 5433, 15432]
     cause = exc.value.diag["cause"]
-    assert exc.value.diag["category"] == "HOST_UNREACHABLE"  # not UNKNOWN (py3.10 gotcha)
+    assert exc.value.diag["category"] == "HOST_UNREACHABLE"  # a timeout is not UNKNOWN
     assert "5433" in cause and "15432" in cause
     assert "SECRET" not in str(exc.value) and "tunnelhost.invalid" not in str(exc.value)
 

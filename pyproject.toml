@@ -7,7 +7,7 @@ name = "db-conn-mcp"
 version = "0.5.3"
 description = "A dead-simple, self-hosted MCP server for securely querying databases via AI agents."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "db-conn-mcp contributors" }]
 keywords = ["mcp", "model-context-protocol", "postgresql", "database", "ai-agent"]
@@ -15,9 +15,9 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Database",
 ]
 
@@ -55,7 +55,7 @@ packages = ["src/db_conn_mcp"]
 # ---- Ruff: strict, consistent linting + formatting (Rule 2) ----
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]

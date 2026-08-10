@@ -81,7 +81,7 @@ To provide the best Agent Experience (AgentX), the server exposes **23 tools + 2
 - **`faithful_schema_export`**: Explains the two schema-export paths — the self-contained `get_database_schema(format="sql")` vs. the faithful `dump_schema_faithful` (`pg_dump`) — and, when `pg_dump` is missing, the per-OS commands to offer installing it (only with the user's consent) before retrying.
 
 ## 6. Technical Stack
-- **Language:** Python 3.10+
+- **Language:** Python 3.12+ (tested in CI on 3.12, 3.13 and 3.14)
 - **Core Library:** Official `mcp` Python SDK (`pip install mcp`).
 - **Database Drivers (v1):** `asyncpg` for PostgreSQL. Future dialects bring their own driver (e.g. `aiomysql`, `aiosqlite`) behind the `Dialect` seam.
 - **Validation:** `pydantic` for the `connections.json` models.
