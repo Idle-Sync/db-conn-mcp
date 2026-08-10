@@ -334,6 +334,27 @@ def test_staleness_ok_when_all_processes_fresh(monkeypatch):
     assert f["status"] == "ok"
 
 
+def test_staleness_flags_the_doctors_own_stale_process(monkeypatch):
+    """Doctor running AS the stale server must report itself, not stay silent."""
+    own = _FakeProc(os.getpid(), ["db-conn-mcp", "--transport", "stdio"], create_time=100.0)
+    monkeypatch.setitem(sys.modules, "psutil", _FakePsutil([own]))
+    monkeypatch.setattr(doctor_mod, "_installed_at", lambda: 1000.0)
+    findings = check_process_staleness(CheckContext(config_path=None, offline=True))
+    warns = [f for f in findings if f["status"] == "warn"]
+    assert len(warns) == 1
+    assert "itself" in warns[0]["detail"]
+    assert str(os.getpid()) in warns[0]["detail"]
+    assert warns[0]["suggested_action"] == "reconnect_client"
+
+
+def test_staleness_ok_when_own_process_is_fresh(monkeypatch):
+    own = _FakeProc(os.getpid(), ["db-conn-mcp", "--transport", "stdio"], create_time=9999.0)
+    monkeypatch.setitem(sys.modules, "psutil", _FakePsutil([own]))
+    monkeypatch.setattr(doctor_mod, "_installed_at", lambda: 1000.0)
+    (f,) = check_process_staleness(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "ok"
+
+
 def test_staleness_skipped_when_install_time_unknown(monkeypatch):
     monkeypatch.setitem(sys.modules, "psutil", _FakePsutil([]))
     monkeypatch.setattr(doctor_mod, "_installed_at", lambda: None)
@@ -444,17 +465,34 @@ def test_registry_order_and_membership():
     ]
 
 
-async def test_no_finding_ever_leaks_dsn_material(tmp_path, monkeypatch):
-    """Poisoned DSN substrings must never appear in any finding (Rule 6)."""
-    conn = {
-        "name": "db",
-        "dsn": "postgresql://sekretuser:sekretpass@sekrethost.invalid:5432/sekretdb",
-        "mode": "read",
-        "fallback_ports": [5433],
-    }
+_POISON = ("sekretuser", "sekretpass", "sekrethost", "sekretdb")
+_POISONED_DSN = "postgresql://sekretuser:sekretpass@sekrethost.invalid:5432/sekretdb"
+
+
+async def _assert_no_leak(tmp_path, conn):
     path = tmp_path / "connections.json"
     path.write_text(json.dumps({"connections": [conn]}), encoding="utf-8")
     findings = await run_checks(path, offline=True)
     blob = json.dumps(findings)
-    for secret in ("sekretuser", "sekretpass", "sekrethost", "sekretdb"):
+    for secret in _POISON:
         assert secret not in blob, f"finding leaked {secret!r}"
+
+
+async def test_no_finding_ever_leaks_dsn_material(tmp_path):
+    """Poisoned DSN substrings must never appear in any finding (Rule 6)."""
+    await _assert_no_leak(
+        tmp_path,
+        {"name": "db", "dsn": _POISONED_DSN, "mode": "read", "fallback_ports": [5433]},
+    )
+
+
+async def test_no_finding_leaks_dsn_material_from_invalid_field_values(tmp_path):
+    """The pydantic-error path must stay value-free even when the VALUES are secrets.
+
+    Here the invalid `mode` is the DSN itself and `yolo` is the password, so any future
+    validator that interpolates the offending input would leak straight into a finding.
+    """
+    await _assert_no_leak(
+        tmp_path,
+        {"name": "db", "dsn": _POISONED_DSN, "mode": _POISONED_DSN, "yolo": "sekretpass"},
+    )

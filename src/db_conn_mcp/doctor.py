@@ -110,11 +110,24 @@ def check_process_staleness(ctx: CheckContext) -> list[Finding]:
             cmdline = " ".join(info["cmdline"] or [])
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-        if info["pid"] == own_pid:
-            continue
         if "db-conn-mcp" not in cmdline and "db_conn_mcp" not in cmdline:
             continue
-        if info["create_time"] < installed_at:
+        if info["create_time"] >= installed_at:
+            continue
+        if info["pid"] == own_pid:
+            # Use case 1 from the inside: doctor is running AS the stale server, so the
+            # fix is to reconnect *this* client — not to upgrade the package again.
+            findings.append(
+                finding(
+                    name,
+                    "warn",
+                    f"this db-conn-mcp process itself (pid {info['pid']}) started before "
+                    f"v{__version__} was installed — reconnect this MCP client to load "
+                    "the new version",
+                    "reconnect_client",
+                )
+            )
+        else:
             findings.append(
                 finding(
                     name,

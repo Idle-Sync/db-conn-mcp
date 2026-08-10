@@ -328,7 +328,7 @@ class Finding(TypedDict):
 
 **Two invariants.** (1) `run_checks` never raises: a crashing check becomes a `fail` finding naming only the exception **type**, because driver messages can embed hosts. (2) A check that cannot run reports `skipped`, never a false alarm — no `psutil`, no PyPI reachability, no config file, a non-POSIX filesystem, or a git that can't evaluate ignore rules all degrade to `skipped`. The CLI exits `2` only when at least one finding is a `fail`; `warn` and `skipped` do not fail the run.
 
-`process_staleness` is the one check with an optional dependency: `psutil` is deliberately **not** a hard requirement of the package, so its absence skips that check and nothing else.
+`process_staleness` is the one check with an optional dependency: `psutil` is deliberately **not** a hard requirement of the package, so its absence skips that check and nothing else. It also inspects **its own process**: when the doctor runs as the MCP tool inside a server that started before the installed build, that is precisely the reported symptom, so it emits `warn` + `reconnect_client` phrased at *this* client rather than staying silent (a fresh own process still says nothing). Findings name only the PID and the version — never the command line.
 
 ---
 
