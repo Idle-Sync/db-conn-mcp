@@ -6,7 +6,8 @@ Two responsibilities, no DB knowledge:
     (optionally) inject the server into detected MCP client configs. Each client
     carries its own config path and entry format (``mcpServers`` for Claude
     Desktop/Cursor/Agy/Windsurf/Claude Code/Cline, ``servers`` for VS Code,
-    ``context_servers`` for Zed) via :class:`ClientSpec`.
+    ``context_servers`` for Zed) via :class:`db_conn_mcp.clients.ClientSpec` —
+    those helpers live in ``clients.py`` and are re-imported here.
 
 The wizard's *logic* (path resolution, DB registration, config injection) lives in
 pure helpers so it stays testable; the interactive loop is a thin shell over them.
@@ -16,24 +17,27 @@ Only the connection *name* is ever echoed — never the DSN (Rule 6).
 import argparse
 import asyncio
 import json
-import os
 import re
 import shutil
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from . import __commit__, __version__, config, server
+from . import __commit__, __version__, config, doctor, server
+from .clients import (
+    ClientSpec,
+    agent_config_paths,  # noqa: F401  re-exported for back-compat; unused in this module
+    client_specs,
+    detected_clients,
+    inject_entry,
+    is_injected,
+    remove_entry,
+)
 from .dialects.registry import dialect_for
 from .handlers import Handlers
 from .models import Config, Connection
 
 Scope = Literal["global", "repo"]
-
-#: How an MCP client stores server entries. Each value maps to a container key +
-#: entry shape in :func:`inject_entry`.
-ClientFormat = Literal["mcpServers", "vscode", "zed"]
 
 #: The console-script name declared in pyproject (its absolute path is what we inject).
 SERVER_SCRIPT = "db-conn-mcp"
@@ -107,6 +111,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add("check", "Probe connectivity for one database (or all); sanitized result.").add_argument(
         "name", nargs="?", default=None, help="Database to check; omit to check all."
     )
+    p_doctor = _add(
+        "doctor", "Diagnose the whole setup: versions, processes, config, secrets, clients, DBs."
+    )
+    p_doctor.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip the PyPI version lookup; database probes still run.",
+    )
     _add("remove", "Remove a database connection by name.").add_argument(
         "name", help="The connection name to remove."
     )
@@ -159,113 +171,6 @@ def register_database(scope: Scope, name: str, dsn: str, mode: str, yolo: bool =
     cfg.connections.append(Connection(name=name, dsn=dsn, mode=mode, yolo=yolo))
     config.save(cfg, path)
     return path
-
-
-@dataclass(frozen=True)
-class ClientSpec:
-    """One MCP client: where its config lives and which entry format it uses."""
-
-    key: str  # short id, e.g. "vscode"
-    label: str  # human-facing name
-    path: Path  # config file (may not exist yet)
-    fmt: ClientFormat
-
-
-#: Container key (top-level JSON object) each format stores server entries under.
-_CONTAINER_KEY: dict[ClientFormat, str] = {
-    "mcpServers": "mcpServers",
-    "vscode": "servers",
-    "zed": "context_servers",
-}
-
-
-def _build_entry(fmt: ClientFormat, command: str, args: list[str]) -> dict:
-    """Build a single server entry in the shape the given client format expects."""
-    if fmt == "vscode":
-        return {"type": "stdio", "command": command, "args": args}
-    if fmt == "zed":
-        return {"source": "custom", "command": {"path": command, "args": args}}
-    return {"command": command, "args": args}  # mcpServers (Claude/Cursor/Windsurf/...)
-
-
-def inject_entry(
-    existing: dict, fmt: ClientFormat, name: str, command: str, args: list[str]
-) -> dict:
-    """Insert/overwrite the server entry under the format's container key, preserving the rest."""
-    existing.setdefault(_CONTAINER_KEY[fmt], {})[name] = _build_entry(fmt, command, args)
-    return existing
-
-
-def remove_entry(existing: dict, fmt: ClientFormat, name: str) -> dict:
-    """Delete the server entry from the format's container key (no-op if absent)."""
-    container = existing.get(_CONTAINER_KEY[fmt])
-    if isinstance(container, dict):
-        container.pop(name, None)
-    return existing
-
-
-def client_specs() -> list[ClientSpec]:
-    """OS-aware specs for known MCP clients (config files may not exist yet)."""
-    home = Path.home()
-    appdata = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
-    if sys.platform == "win32":
-        claude = appdata / "Claude" / "claude_desktop_config.json"
-        vscode_user = appdata / "Code" / "User"
-        zed = appdata / "Zed" / "settings.json"
-    elif sys.platform == "darwin":
-        support = home / "Library" / "Application Support"
-        claude = support / "Claude" / "claude_desktop_config.json"
-        vscode_user = support / "Code" / "User"
-        zed = home / ".config" / "zed" / "settings.json"
-    else:
-        claude = home / ".config" / "Claude" / "claude_desktop_config.json"
-        vscode_user = home / ".config" / "Code" / "User"
-        zed = home / ".config" / "zed" / "settings.json"
-    cline = (
-        vscode_user
-        / "globalStorage"
-        / "saoudrizwan.claude-dev"
-        / "settings"
-        / "cline_mcp_settings.json"
-    )
-    return [
-        ClientSpec("claude", "Claude Desktop", claude, "mcpServers"),
-        ClientSpec("cursor", "Cursor", home / ".cursor" / "mcp.json", "mcpServers"),
-        # Agy (Google Antigravity) — unified MCP config shared by its CLI and IDE.
-        ClientSpec(
-            "agy",
-            "Agy (Antigravity)",
-            home / ".gemini" / "config" / "mcp_config.json",
-            "mcpServers",
-        ),
-        ClientSpec(
-            "windsurf", "Windsurf", home / ".codeium" / "windsurf" / "mcp_config.json", "mcpServers"
-        ),
-        ClientSpec("claude-code", "Claude Code", home / ".claude.json", "mcpServers"),
-        ClientSpec("cline", "Cline", cline, "mcpServers"),
-        ClientSpec("vscode", "VS Code", vscode_user / "mcp.json", "vscode"),
-        ClientSpec("zed", "Zed", zed, "zed"),
-    ]
-
-
-def agent_config_paths() -> dict[str, Path]:
-    """Back-compat view: ``{client_key: config_path}`` for all known clients."""
-    return {s.key: s.path for s in client_specs()}
-
-
-def detected_clients() -> list[ClientSpec]:
-    """The subset of :func:`client_specs` whose config file actually exists."""
-    return [s for s in client_specs() if s.path.is_file()]
-
-
-def is_injected(spec: ClientSpec, name: str = "db-conn-mcp") -> bool:
-    """Whether ``name`` is already registered under ``spec``'s container key."""
-    try:
-        data = json.loads(spec.path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return False
-    container = data.get(_CONTAINER_KEY[spec.fmt])
-    return isinstance(container, dict) and name in container
 
 
 def parse_client_selection(raw: str, count: int) -> list[int]:
@@ -552,6 +457,44 @@ def cmd_check(config_arg: str | None = None, name: str | None = None) -> int:
     return 0 if all_ok else 2
 
 
+#: CLI icons per finding status (the MCP tool returns the raw status strings).
+_DOCTOR_ICONS = {"ok": "✅", "warn": "⚠️", "fail": "❌", "skipped": "⏭"}
+
+#: ASCII stand-ins for streams that cannot encode the icons (e.g. a redirected
+#: Windows stdout, which falls back to cp1252). A diagnostic command must never be
+#: the thing that crashes.
+_DOCTOR_ASCII = {"ok": "[ok]", "warn": "[warn]", "fail": "[FAIL]", "skipped": "[skip]"}
+
+
+def _status_markers() -> dict[str, str]:
+    """Return the icons, or the ASCII fallbacks when stdout cannot encode them."""
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        "".join(_DOCTOR_ICONS.values()).encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return _DOCTOR_ASCII
+    return _DOCTOR_ICONS
+
+
+def cmd_doctor(config_arg: str | None = None, offline: bool = False) -> int:
+    """Run every diagnostic and print one line per finding.
+
+    Exit code 0 only if no finding is a ``fail`` (warnings and skips don't fail
+    the run — per issue #12).
+    """
+    path = _existing_config(config_arg)
+    findings = asyncio.run(doctor.run_checks(path, offline=offline))
+    markers = _status_markers()
+    for entry in findings:
+        print(f"{markers[entry['status']]}  {entry['check']}: {entry['detail']}")
+    failed = sum(1 for entry in findings if entry["status"] == "fail")
+    if failed:
+        print(f"\n{failed} problem(s) found.")
+        return 2
+    print("\nNo blocking problems found.")
+    return 0
+
+
 def cmd_remove(config_arg: str | None, name: str) -> int:
     """Remove a database connection by name."""
     path = _existing_config(config_arg)
@@ -612,6 +555,7 @@ _COMMANDS = {
     "add": lambda a: cmd_add(a.config),
     "clients": lambda a: cmd_clients(a.config, remove=a.remove),
     "check": lambda a: cmd_check(a.config, a.name),
+    "doctor": lambda a: cmd_doctor(a.config, offline=a.offline),
     "remove": lambda a: cmd_remove(a.config, a.name),
     "reset": lambda a: cmd_reset(a.config),
     "yolo": lambda a: cmd_yolo(a.config, a.name, a.state),

@@ -10,7 +10,8 @@ import json
 
 import pytest
 
-from db_conn_mcp import cli, config
+from db_conn_mcp import cli, clients, config
+from db_conn_mcp import cli as cli_module
 
 
 def _scripted_input(answers):
@@ -319,7 +320,9 @@ def test_detected_clients_only_returns_existing(tmp_path, monkeypatch):
     present = cli.ClientSpec("a", "A", tmp_path / "a.json", "mcpServers")
     missing = cli.ClientSpec("b", "B", tmp_path / "b.json", "mcpServers")
     (tmp_path / "a.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(cli, "client_specs", lambda: [present, missing])
+    # detected_clients lives in clients.py, so its client_specs lookup binds there;
+    # cli.detected_clients is the same function, re-exported for back-compat.
+    monkeypatch.setattr(clients, "client_specs", lambda: [present, missing])
     assert [s.key for s in cli.detected_clients()] == ["a"]
 
 
@@ -733,3 +736,139 @@ def test_cmd_check_prints_active_port(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "a: OK (active_port=15432)" in out
+
+
+def test_injected_command_reads_mcpservers_entry(tmp_path):
+    from db_conn_mcp.clients import ClientSpec, injected_command
+
+    cfg = tmp_path / "c.json"
+    cfg.write_text(
+        json.dumps({"mcpServers": {"db-conn-mcp": {"command": "/x/db-conn-mcp", "args": []}}}),
+        encoding="utf-8",
+    )
+    spec = ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
+    assert injected_command(spec) == "/x/db-conn-mcp"
+
+
+def test_injected_command_none_when_absent(tmp_path):
+    from db_conn_mcp.clients import ClientSpec, injected_command
+
+    cfg = tmp_path / "c.json"
+    cfg.write_text("{}", encoding="utf-8")
+    spec = ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
+    assert injected_command(spec) is None
+
+
+def test_injected_command_reads_zed_nested_path(tmp_path):
+    from db_conn_mcp.clients import ClientSpec, injected_command
+
+    cfg = tmp_path / "settings.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "context_servers": {
+                    "db-conn-mcp": {
+                        "source": "custom",
+                        "command": {"path": "/x/db-conn-mcp", "args": []},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    spec = ClientSpec("zed", "Zed", cfg, "zed")
+    assert injected_command(spec) == "/x/db-conn-mcp"
+
+
+def test_injected_command_none_for_non_dict_entry(tmp_path):
+    from db_conn_mcp.clients import ClientSpec, injected_command
+
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"mcpServers": {"db-conn-mcp": "not-a-dict"}}), encoding="utf-8")
+    spec = ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
+    assert injected_command(spec) is None
+
+
+def test_doctor_exit_zero_when_no_fail(monkeypatch, capsys):
+    async def fake_run_checks(path, *, offline=False):
+        return [
+            {"check": "pypi_latest", "status": "ok", "detail": "fresh", "suggested_action": "none"},
+            {
+                "check": "secrets_exposure",
+                "status": "warn",
+                "detail": "loose",
+                "suggested_action": "fix_permissions",
+            },
+            {
+                "check": "process_staleness",
+                "status": "skipped",
+                "detail": "no psutil",
+                "suggested_action": "none",
+            },
+        ]
+
+    monkeypatch.setattr(cli_module.doctor, "run_checks", fake_run_checks)
+    monkeypatch.setattr(cli_module, "_existing_config", lambda arg: None)
+    assert cli_module.cmd_doctor() == 0
+    out = capsys.readouterr().out
+    assert "pypi_latest" in out and "secrets_exposure" in out
+
+
+def test_doctor_exit_two_on_fail(monkeypatch, capsys):
+    async def fake_run_checks(path, *, offline=False):
+        return [
+            {
+                "check": "connectivity",
+                "status": "fail",
+                "detail": "db: unreachable",
+                "suggested_action": "none",
+            }
+        ]
+
+    monkeypatch.setattr(cli_module.doctor, "run_checks", fake_run_checks)
+    monkeypatch.setattr(cli_module, "_existing_config", lambda arg: None)
+    assert cli_module.cmd_doctor() == 2
+
+
+def test_doctor_offline_flag_parses():
+    args = cli_module.build_parser().parse_args(["doctor", "--offline"])
+    assert args.command == "doctor"
+    assert args.offline is True
+
+
+class _FakeStream:
+    """Minimal stdout stand-in that only carries an encoding."""
+
+    def __init__(self, encoding):
+        self.encoding = encoding
+
+
+def test_doctor_markers_use_icons_on_utf8(monkeypatch):
+    monkeypatch.setattr(cli_module.sys, "stdout", _FakeStream("utf-8"))
+    assert cli_module._status_markers() == cli_module._DOCTOR_ICONS
+
+
+def test_doctor_markers_fall_back_to_ascii_on_cp1252(monkeypatch):
+    """A Windows cp1252 stream must get ASCII markers, not a UnicodeEncodeError."""
+    monkeypatch.setattr(cli_module.sys, "stdout", _FakeStream("cp1252"))
+    assert cli_module._status_markers() == cli_module._DOCTOR_ASCII
+
+
+def test_doctor_prints_without_crashing_on_cp1252(monkeypatch, capsys):
+    async def fake_run_checks(path, *, offline=False):
+        return [
+            {
+                "check": "connectivity",
+                "status": "skipped",
+                "detail": "nothing to probe",
+                "suggested_action": "none",
+            }
+        ]
+
+    monkeypatch.setattr(cli_module.doctor, "run_checks", fake_run_checks)
+    monkeypatch.setattr(cli_module, "_existing_config", lambda arg: None)
+    monkeypatch.setattr(cli_module, "_status_markers", lambda: cli_module._DOCTOR_ASCII)
+    assert cli_module.cmd_doctor() == 0
+    out = capsys.readouterr().out
+    assert "connectivity" in out
+    assert out.isascii()

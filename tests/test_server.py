@@ -18,6 +18,7 @@ from db_conn_mcp import handlers as handlers_mod
 from db_conn_mcp import server
 from db_conn_mcp.handlers import Handlers
 from db_conn_mcp.safety import WriteRejected
+from db_conn_mcp.server import build_server
 
 CONFIG = {
     "connections": [
@@ -334,14 +335,18 @@ async def test_write_without_consent_rejected(cfg_path, monkeypatch):
     _patch_dialect(monkeypatch, dialect)
     h = Handlers(cfg_path)
     with pytest.raises(WriteRejected, match="user_consent"):
-        await h.execute_write_query("dev", "DELETE FROM users", user_consent=False)
+        await h.execute_write_query(
+            "dev", "DELETE FROM users", user_consent=False, dry_run=False, skip_dry_run=True
+        )
 
 
 async def test_write_with_consent_runs_writable(cfg_path, monkeypatch):
     dialect = FakeDialect(exec_result={"rows_affected": 2})
     _patch_dialect(monkeypatch, dialect)
     h = Handlers(cfg_path)
-    result = await h.execute_write_query("dev", "DELETE FROM users", user_consent=True)
+    result = await h.execute_write_query(
+        "dev", "DELETE FROM users", user_consent=True, dry_run=False, skip_dry_run=True
+    )
     assert dialect.connected_read_only is False
     assert result == {"rows_affected": 2}
 
@@ -350,7 +355,9 @@ async def test_write_yolo_runs_without_consent(cfg_path, monkeypatch):
     dialect = FakeDialect(exec_result={"rows_affected": 1})
     _patch_dialect(monkeypatch, dialect)
     h = Handlers(cfg_path)
-    result = await h.execute_write_query("trusted", "DELETE FROM x", user_consent=False)
+    result = await h.execute_write_query(
+        "trusted", "DELETE FROM x", user_consent=False, dry_run=False, skip_dry_run=True
+    )
     assert dialect.connected_read_only is False
     assert result == {"rows_affected": 1}
 
@@ -425,7 +432,9 @@ async def test_write_query_passes_params(cfg_path, monkeypatch):
     dialect = FakeDialect(exec_result={"rows_affected": 1})
     _patch_dialect(monkeypatch, dialect)
     h = Handlers(cfg_path)
-    await h.execute_write_query("dev", "UPDATE t SET x = $1", ["v"], user_consent=True)
+    await h.execute_write_query(
+        "dev", "UPDATE t SET x = $1", ["v"], user_consent=True, dry_run=False, skip_dry_run=True
+    )
     assert dialect.exec_calls[0]["params"] == ["v"]
 
 
@@ -624,10 +633,15 @@ async def test_show_activity_handler_defaults_sanitized(cfg_path, monkeypatch):
     assert result["activity"][0]["pid"] == 1
 
 
-def test_build_server_smoke(cfg_path):
-    # The FastMCP app builds and exposes the 22 tools + 2 prompts without error.
+async def test_build_server_smoke(cfg_path):
+    # The FastMCP app builds without error; the assertions below enforce the
+    # advertised surface — 23 tools + 2 prompts — so a lost registration fails here.
     app = server.build_server(cfg_path)
     assert app is not None
+    tools = await app.list_tools()
+    prompts = await app.list_prompts()
+    assert len(tools) == 23
+    assert len(prompts) == 2
 
 
 # ---- _dsn_with_port (pure, issue #10) ------------------------------------------
@@ -866,7 +880,34 @@ async def test_hard_failure_on_fallback_port_names_the_port(tunnel_cfg_path, mon
         await h.list_tables("tunnel")
     assert exc.value.diag["category"] == "AUTH_FAILED"
     assert "fallback port 5433" in exc.value.diag["cause"]
+    # The same fact structurally, so callers never have to parse the prose.
+    assert exc.value.diag["failed_port"] == 5433
     assert "SECRET" not in str(exc.value) and "tunnelhost.invalid" not in str(exc.value)
+
+
+async def test_check_database_reports_failed_port_for_a_fallback_auth_failure(
+    tunnel_cfg_path, monkeypatch
+):
+    """Auth rejected by a probed fallback: the row says which port rejected us."""
+    dialect = PortFakeDialect(refuse_ports={5432}, auth_fail_ports={5433})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    row = {r["database"]: r for r in await h.check_database()}["tunnel"]
+    assert row["status"] == "UNREACHABLE"
+    assert row["category"] == "AUTH_FAILED"
+    assert row["failed_port"] == 5433
+
+
+async def test_check_database_omits_failed_port_when_the_primary_rejected(
+    tunnel_cfg_path, monkeypatch
+):
+    """Auth rejected by the primary: no failed_port, so the doctor may probe identity."""
+    dialect = PortFakeDialect(auth_fail_ports={5432})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    row = {r["database"]: r for r in await h.check_database()}["tunnel"]
+    assert row["category"] == "AUTH_FAILED"
+    assert "failed_port" not in row
 
 
 async def test_duplicate_fallback_ports_are_dialed_once(tmp_path, monkeypatch):
@@ -889,3 +930,31 @@ async def test_duplicate_fallback_ports_are_dialed_once(tmp_path, monkeypatch):
     with pytest.raises(handlers_mod.ConnectionFailedError):
         await h.list_tables("dup")
     assert dialect.dialed == [5432, 5433]
+
+
+# ---- the agent-facing write tool contract (dry-run first) ------------------------
+
+
+async def test_execute_write_query_tool_defaults_to_dry_run(tmp_path):
+    cfg = {"connections": [{"name": "db", "dsn": "postgresql://u:p@h:5432/db", "mode": "write"}]}
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    app = build_server(config_path=path)
+    tools = await app.list_tools()
+    tool = next(t for t in tools if t.name == "execute_write_query")
+    props = tool.inputSchema["properties"]
+    assert props["dry_run"]["default"] is True
+    assert props["skip_dry_run"]["default"] is False
+
+
+# ---- the doctor tool is registered on the app ------------------------------------
+
+
+async def test_doctor_tool_registered(tmp_path):
+    cfg = {"connections": [{"name": "db", "dsn": "postgresql://u:p@h:5432/db", "mode": "read"}]}
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    app = build_server(config_path=path)
+    tools = await app.list_tools()
+    tool = next(t for t in tools if t.name == "doctor")
+    assert tool.inputSchema["properties"]["offline"]["default"] is False

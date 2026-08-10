@@ -1,0 +1,110 @@
+"""Dry-run-first enforcement in Handlers: grants recorded, required, consumed."""
+
+import json
+
+import pytest
+
+from db_conn_mcp import handlers as handlers_mod
+from db_conn_mcp.handlers import DRY_RUN_GRANT_TTL_SECONDS, Handlers
+from db_conn_mcp.safety import WriteRejected
+
+
+class _FakeDb:
+    async def close(self):
+        pass
+
+
+class _FakeDialect:
+    """Records committed SQL; never touches a real database."""
+
+    def __init__(self):
+        self.committed: list[str] = []
+        self.dry_runs: list[str] = []
+
+    async def connect(self, dsn, *, read_only):
+        return _FakeDb()
+
+    async def execute(self, db, sql, params=None, timeout_ms=None):
+        self.committed.append(sql)
+        return {"rows_affected": 1}
+
+    async def execute_dry_run(self, db, sql, params=None, timeout_ms=None):
+        self.dry_runs.append(sql)
+        return {"rows_affected": 1, "dry_run": True, "rolled_back": True}
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    cfg = {
+        "connections": [
+            {"name": "db", "dsn": "postgresql://u:p@h:5432/db", "mode": "write"},
+            {"name": "ydb", "dsn": "postgresql://u:p@h:5433/db", "mode": "write", "yolo": True},
+        ]
+    }
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    fake = _FakeDialect()
+    monkeypatch.setattr(handlers_mod, "dialect_for", lambda dsn: fake)
+    return Handlers(path), fake
+
+
+async def test_bare_call_dry_runs_and_commits_nothing(env):
+    h, fake = env
+    result = await h.execute_write_query("db", "DELETE FROM t")
+    assert result["rolled_back"] is True
+    assert fake.committed == []
+    assert fake.dry_runs == ["DELETE FROM t"]
+
+
+async def test_commit_without_prior_dry_run_rejected(env):
+    h, fake = env
+    with pytest.raises(WriteRejected, match="dry_run"):
+        await h.execute_write_query("db", "DELETE FROM t", user_consent=True, dry_run=False)
+    assert fake.committed == []
+
+
+async def test_commit_after_dry_run_succeeds_and_consumes_grant(env):
+    h, fake = env
+    await h.execute_write_query("db", "DELETE FROM t")
+    result = await h.execute_write_query("db", "DELETE FROM t", user_consent=True, dry_run=False)
+    assert result == {"rows_affected": 1}
+    assert fake.committed == ["DELETE FROM t"]
+    # Grant consumed: an identical second commit needs a fresh dry-run.
+    with pytest.raises(WriteRejected, match="dry_run"):
+        await h.execute_write_query("db", "DELETE FROM t", user_consent=True, dry_run=False)
+
+
+async def test_changed_sql_or_params_does_not_match_grant(env):
+    h, fake = env
+    await h.execute_write_query("db", "DELETE FROM t WHERE id = $1", params=[1])
+    with pytest.raises(WriteRejected, match="dry_run"):
+        await h.execute_write_query(
+            "db", "DELETE FROM t WHERE id = $1", params=[2], user_consent=True, dry_run=False
+        )
+
+
+async def test_expired_grant_rejected(env, monkeypatch):
+    h, fake = env
+    await h.execute_write_query("db", "DELETE FROM t")
+    key = next(iter(h._dry_run_grants))
+    h._dry_run_grants[key] -= DRY_RUN_GRANT_TTL_SECONDS + 1
+    with pytest.raises(WriteRejected, match="dry_run"):
+        await h.execute_write_query("db", "DELETE FROM t", user_consent=True, dry_run=False)
+
+
+async def test_skip_dry_run_with_consent_commits_directly(env):
+    h, fake = env
+    result = await h.execute_write_query(
+        "db", "DELETE FROM t", user_consent=True, dry_run=False, skip_dry_run=True
+    )
+    assert result == {"rows_affected": 1}
+    assert fake.committed == ["DELETE FROM t"]
+
+
+async def test_yolo_db_still_requires_dry_run_before_commit(env):
+    h, fake = env
+    with pytest.raises(WriteRejected, match="dry_run"):
+        await h.execute_write_query("ydb", "DELETE FROM t", dry_run=False)
+    await h.execute_write_query("ydb", "DELETE FROM t")  # dry-run records grant
+    result = await h.execute_write_query("ydb", "DELETE FROM t", dry_run=False)
+    assert result == {"rows_affected": 1}  # yolo waives consent, not the preview

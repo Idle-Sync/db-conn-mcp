@@ -1,4 +1,4 @@
-"""The MCP server: 22 tools + 2 prompts, plus transport wiring (FastMCP).
+"""The MCP server: 23 tools + 2 prompts, plus transport wiring (FastMCP).
 
 Knows nothing about PostgreSQL. It wires the pure/abstract layers together: the
 :class:`~db_conn_mcp.handlers.Handlers` service (which uses ``config``, the dialect
@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
+from . import doctor as doctor_mod
 from .config import resolve_path
 from .handlers import Handlers
 
@@ -61,10 +62,10 @@ If they don't want to install anything, fall back to get_database_schema(format=
 
 
 def build_server(config_path: Path | str | None = None) -> FastMCP:
-    """Construct the FastMCP app with all 22 tools and 2 prompts."""
+    """Construct the FastMCP app with all 23 tools and 2 prompts."""
     resolved = resolve_path(str(config_path) if config_path else None)
     handlers = Handlers(resolved)
-    app = FastMCP("db-conn-mcp")  # 22 tools + 2 prompts registered below
+    app = FastMCP("db-conn-mcp")  # 23 tools + 2 prompts registered below
 
     # ---- Exploration tools ---------------------------------------------------
     @app.tool()
@@ -170,23 +171,35 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
         sql: str,
         params: list[Any] | None = None,
         user_consent: bool = False,
-        dry_run: bool = False,
+        dry_run: bool = True,
+        skip_dry_run: bool = False,
         timeout_ms: int | None = None,
     ) -> dict:
         """Run an INSERT/UPDATE/DELETE/DDL statement on a write-mode database.
 
-        SAFETY: Only allowed if the database is mode=write. Unless the database has
-        yolo enabled, you MUST first read the target table and its schema, then show
-        the user the EXACT SQL you intend to run and ask for explicit permission. Only
-        call again with user_consent=true if the user clearly says yes.
+        SAFETY — the server enforces this flow; you cannot skip it silently:
+        1. Call with dry_run=true (the default): the statement executes inside a
+           transaction and is ALWAYS rolled back, returning the rows_affected it
+           WOULD have had. This records a preview grant for this exact statement.
+        2. Show the user the exact SQL and the dry-run result; ask for permission
+           (not needed if the database has yolo enabled).
+        3. Call again with dry_run=false (and user_consent=true unless yolo) to
+           commit. Commits without a prior dry-run of the identical statement are
+           REJECTED. The preview grant expires 10 minutes after the dry-run and is
+           consumed by the commit it authorizes, so running the same statement twice
+           means previewing it twice. Pass skip_dry_run=true ONLY if the user
+           explicitly asked to skip the preview.
 
-        BEST PRACTICE: before asking for consent, call this with dry_run=true — the
-        statement executes inside a transaction and is ALWAYS rolled back, returning
-        the rows_affected it WOULD have had. Show that to the user with the SQL.
         Pass values via `params` ($1/$2/... placeholders), not pasted into the SQL.
         """
         return await handlers.execute_write_query(
-            database, sql, params, user_consent, dry_run, timeout_ms
+            database,
+            sql,
+            params,
+            user_consent=user_consent,
+            dry_run=dry_run,
+            skip_dry_run=skip_dry_run,
+            timeout_ms=timeout_ms,
         )
 
     @app.tool()
@@ -301,6 +314,24 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
         live re-probe for tunneled connections.
         """
         return await handlers.check_database(database)
+
+    @app.tool()
+    async def doctor(offline: bool = False) -> list[dict]:
+        """Diagnose the whole setup, not just connectivity — use when something is
+        misbehaving and check_database alone doesn't explain why.
+
+        Runs every diagnostic: stale running server processes, newer PyPI release,
+        connections.json key typos/types, secrets exposure (permissions, git),
+        MCP client entries pointing at dead paths, and per-database connectivity
+        with a credential-free fallback-port identity probe. Returns findings as
+        {check, status: ok|warn|fail|skipped, detail, suggested_action} where
+        suggested_action is machine-actionable: reconnect_client, upgrade_package,
+        swap_primary_port, fix_permissions, fix_config, repair_client_config, or
+        none. Fix what you can; report the rest to the user verbatim. Output is
+        sanitized — never contains DSNs, hosts, or credentials. offline=true skips
+        the PyPI lookup.
+        """
+        return await doctor_mod.run_checks(handlers.config_path, offline=offline)
 
     # ---- Prompts -------------------------------------------------------------
     @app.prompt()

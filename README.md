@@ -16,7 +16,7 @@ It does one thing well: let an agent **safely explore and query** a database you
 
 - **Read stays read.** A `read` database runs every query in a native read-only transaction, *and* the read tool only accepts a single read-only statement (`SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`) — so an agent can't slip in a write or a `SET … READ WRITE` to flip the session. For a hard, privilege-level guarantee that holds no matter what, point the DSN at a **read-only database role** (see [Use a read-only role](#use-a-read-only-role-strongest-guarantee)).
 - **No secret leaks.** DSNs/passwords are never logged or returned by any tool. Connection failures come back as **sanitized diagnostics** (a category + fix), never a raw traceback with your host and credentials in it.
-- **Tiered write safety.** Writes are gated server-side: `mode` (hard, native) → `yolo` (per-database trust) → `user_consent` (explicit per-operation approval).
+- **Tiered write safety.** Writes are gated server-side: `mode` (hard, native) → **dry-run first** (a commit is refused unless that exact statement was previewed) → `yolo` (per-database trust) → `user_consent` (explicit per-operation approval).
 - **Zero-friction setup.** An interactive wizard registers your database and injects the server into your AI client's config for you — across 8 popular clients, each in its own format.
 
 ---
@@ -106,7 +106,7 @@ The single source of truth is **`connections.json`**, resolved in this order (fi
 | `name` | yes | Unique identifier the agent uses to pick a database. |
 | `dsn`  | yes | Connection string. **Secret** — never shown by any tool. |
 | `mode` | yes | `read` or `write`. An absolute, native security boundary. |
-| `yolo` | no (default `false`) | If `true`, skip the per-write consent prompt for this database. |
+| `yolo` | no (default `false`) | If `true`, skip the per-write consent prompt for this database. The dry-run preview still applies. |
 | `fallback_ports` | no | Extra ports to probe, in order, when the primary port refuses or times out. See below. |
 
 - **`fallback_ports`** *(optional)* — extra ports probed **in order** when the
@@ -128,13 +128,14 @@ the server never adds the key to a file that doesn't have it.
 
 ## The security model
 
-Writes pass through three gates, **in order**:
+Writes pass through four gates, **in order**:
 
-1. **`mode` (hard, native).** If the database isn't `"mode": "write"`, the write is rejected — and the connection is opened read-only at the PostgreSQL session level regardless, so it's blocked twice over. `yolo` and `user_consent` can **never** make a `read` database writable.
-2. **`yolo` (persisted trust).** On a `write` database with `yolo: true`, writes proceed without prompting.
-3. **`user_consent` (per-operation).** Otherwise the agent must first read the schema, show you the exact SQL, get your "yes", and re-call with `user_consent=true`.
+1. **`mode` (hard, native).** If the database isn't `"mode": "write"`, the write is rejected — and the connection is opened read-only at the PostgreSQL session level regardless, so it's blocked twice over. Nothing — not `yolo`, not `user_consent`, not `skip_dry_run` — can **ever** make a `read` database writable.
+2. **Dry-run first (server-enforced).** `execute_write_query` defaults to `dry_run=true`. A commit is **rejected** unless the identical statement was dry-run first. The one escape hatch is `skip_dry_run=true`, which the agent passes to *attest* that you explicitly asked to skip the preview — the server can't verify that claim, so it's the same trust model as `user_consent` (and, like it, useless on a `read` database). `yolo` does **not** waive this stage.
+3. **`yolo` (persisted trust).** On a `write` database with `yolo: true`, the previewed write commits without prompting.
+4. **`user_consent` (per-operation).** Otherwise the agent must first read the schema, show you the exact SQL, get your "yes", and re-call with `user_consent=true`.
 
-**Dry-run first:** `execute_write_query(dry_run=true)` executes the statement in a transaction and **always rolls back**, returning the rows it *would* have affected. Nothing commits, so only the `mode` gate applies — the intended flow is dry-run → show the user the SQL **and its real impact** → then ask consent for the real write. (A dry-run does still execute server-side until rollback: brief locks, sequence advancement, trigger side effects.)
+**What the dry-run does:** it executes the statement in a transaction and **always rolls back**, returning the rows it *would* have affected — so only the `mode` gate applies, nothing commits, and you see the real impact before saying yes. The resulting permission to commit is scoped to that exact statement (same database, SQL, and params), **expires after 10 minutes**, and is **consumed** by the commit it authorizes — running the same statement twice means previewing it twice. (A dry-run does still execute server-side until rollback: brief locks, sequence advancement, trigger side effects.)
 
 Reads always run inside a native read-only transaction, **and** `execute_read_query` accepts only a single read-only statement (`SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`). That allowlist is what stops an agent from sending `SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE` to flip the session, or piggy-backing a `; DELETE …` onto a read — there's no SQL parsing involved, just a leading-keyword check plus the driver's single-command protocol.
 
@@ -156,7 +157,7 @@ This is the recommended setup for any database that holds data you care about.
 
 ## MCP tools
 
-The server exposes **22 tools** and **2 prompts**:
+The server exposes **23 tools** and **2 prompts**:
 
 | Tool | Kind | Description |
 |------|------|-------------|
@@ -170,7 +171,7 @@ The server exposes **22 tools** and **2 prompts**:
 | `search_value` | search | Find **where** a value appears across tables (fuzzy); returns table/column hits + samples. Pass `tables=[…]` to scope it. |
 | `get_object_definition` | explore | Faithful SQL definition of a **view / function / trigger / sequence / index** by name (native `pg_get_*def`; overloads and all schemas returned). |
 | `execute_read_query` | execute | Run a single read-only statement (`SELECT`/`WITH`/…) inside a read-only transaction. Optional `params` (**real bind parameters** via `$1`/`$2` — no quoting pitfalls) and `timeout_ms`. |
-| `execute_write_query` | execute | Run a mutation — gated by the safety model above. Also takes `params`/`timeout_ms`, and **`dry_run=true`**: execute in a transaction, report would-be `rows_affected`, always ROLL BACK — show the user real impact *before* consenting to the real write. |
+| `execute_write_query` | execute | Run a mutation — gated by the safety model above. **Defaults to `dry_run=true`**: execute in a transaction, report would-be `rows_affected`, always ROLL BACK — show the user real impact *before* consenting to the real write. Committing (`dry_run=false`) requires a prior preview of the identical statement, which expires after 10 minutes and is consumed by its commit; pass `skip_dry_run=true` only when the user explicitly asks to skip the preview. Also takes `params`/`timeout_ms`. |
 | `explain_query` | execute | `EXPLAIN` (optionally `ANALYZE`) a validated read-only query — confirm index usage without any write access. |
 | `cancel_query` | execute | Cancel the statement in a given backend `pid` (native `pg_cancel_backend`); the session survives. Find pids via `show_activity`. |
 | `open_query_cursor` | cursor | Open a server-side cursor over a read-only query for **large result sets**; returns a `cursor_id`. Max 5 open; 15-min idle auto-reap. |
@@ -181,7 +182,8 @@ The server exposes **22 tools** and **2 prompts**:
 | `table_stats` | insight | Approximate row counts + disk/index sizes per table, largest first (statistics only, no scans). |
 | `show_activity` | insight | Sanitized `pg_stat_activity`: pid, state, wait events, query age — **no user names, client addresses, or query text** (text is opt-in and truncated). |
 | `set_yolo_mode` | config | Enable/disable `yolo` for one database (persisted). |
-| `check_database` | doctor | Test one database (or all) → `OK` or a sanitized diagnostic; reports `active_port` when a fallback port answered. |
+| `check_database` | doctor | Test one database (or all) → `OK` or a sanitized diagnostic; reports `active_port` when a fallback port answered, and `failed_port` on an `UNREACHABLE` row when the failure that ended the probe chain (auth, TLS, DB-not-found, …) came from a probed fallback port rather than the primary. |
+| `doctor` | doctor | Diagnose the **whole setup**, not just connectivity: stale running server processes, a newer PyPI release, `connections.json` key typos/wrong types, secrets exposure (file permissions, git), MCP client entries pointing at dead paths, and per-database connectivity with a credential-free fallback-port identity probe. Returns `{check, status, detail, suggested_action}` rows; `offline=true` skips the PyPI lookup. |
 
 **Prompts:**
 - `troubleshoot_connection` — a discoverable, full connection-gotchas checklist (host/port, firewall, `sslmode`, Docker `localhost`, db-name case, pool limits, …).
@@ -203,12 +205,15 @@ The server exposes **22 tools** and **2 prompts**:
 | `db-conn-mcp clients` | Inject the server into detected MCP clients. |
 | `db-conn-mcp clients --remove` | Uninject the server from chosen clients. |
 | `db-conn-mcp check [name]` | Probe connectivity (exit `0` all-OK, `2` if any unreachable). |
+| `db-conn-mcp doctor` | Diagnose the **whole setup** — stale processes, a newer release, config-schema typos, secrets exposure, client entries, connectivity (exit `0` if nothing failed, `2` if any check fails). `--offline` skips **only** the PyPI version lookup; the database probes still run. |
 | `db-conn-mcp remove <name>` | Remove one connection. |
 | `db-conn-mcp reset` | Remove **all** connections (delete `connections.json`) — fresh slate. |
 | `db-conn-mcp yolo <name> on\|off` | Toggle `yolo` for one database. |
 | `db-conn-mcp -v` / `--version` | Print the installed version and the exact build commit, then exit. |
 
 `--config <path>` works before or after any subcommand.
+
+> **Optional dependency:** the doctor's `process_staleness` check needs [`psutil`](https://pypi.org/project/psutil/) to inspect running processes. It is **not** required — without it that one check reports `skipped` and every other check runs normally. To enable it, install the `doctor` extra — `pip install "db-conn-mcp[doctor]"` (or `pipx install "db-conn-mcp[doctor]"`) — or, for an install you already have via pipx, `pipx inject db-conn-mcp psutil`.
 
 ---
 
@@ -255,7 +260,7 @@ ruff check . && ruff format --check .
 pytest -q
 ```
 
-`pyproject.toml` is the single source of dependency truth. The codebase is split into single-purpose layers (`config`, `models`, `dialects/`, `safety`, `diagnostics`, `handlers`, `server`, `cli`); only the dialect layer knows a specific database exists. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md), [`docs/PRD.md`](./docs/PRD.md), and [`docs/PLAN.md`](./docs/PLAN.md).
+`pyproject.toml` is the single source of dependency truth. The codebase is split into single-purpose layers (`config`, `models`, `dialects/`, `safety`, `diagnostics`, `doctor`, `clients`, `handlers`, `server`, `cli`); only the dialect layer knows a specific database exists. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md), [`docs/PRD.md`](./docs/PRD.md), and [`docs/PLAN.md`](./docs/PLAN.md).
 
 ---
 

@@ -35,7 +35,7 @@ When assisting the user with the `db-conn-mcp` project, please strictly adhere t
 ## 6. Security & Safety
 - **Never log DSNs** or passwords to the console. Connection diagnostics must be **sanitized** — describe the *category* of failure and how to fix it, never echo the DSN, host, user, or password.
 - Treat the `mode` attribute in `connections.json` as an absolute security boundary. If `mode` is `read`, the AI must not be able to bypass it.
-- Writes are gated server-side in this order: `mode` (hard, native) → `yolo` (per-database persisted trust) → `user_consent` (explicit per-operation approval). `yolo` and `user_consent` only relax the *prompt* on a DB that is already `write`; they can NEVER make a `read` DB writable.
+- Writes are gated server-side in this order: `mode` (hard, native) → `dry_run`-first (server-enforced preview: a commit is rejected unless the identical statement was dry-run first, or the user explicitly asked to skip via `skip_dry_run`) → `yolo` (per-database persisted trust) → `user_consent` (explicit per-operation approval). `yolo` and `user_consent` only relax the *prompt* on a DB that is already `write`; neither they nor `skip_dry_run` can EVER make a `read` DB writable, and `yolo` cannot skip the dry-run preview.
 
 ## 7. Living Documentation (Always Keep Docs Updated)
 - **ALWAYS, ALWAYS, ALWAYS** keep the docs in sync with decisions. The moment a design, scope, or architecture decision is made or accepted, update the relevant docs in the SAME change — never defer it:
@@ -51,7 +51,7 @@ When assisting the user with the `db-conn-mcp` project, please strictly adhere t
 ## 9. Environment & Sanitation
 - **Always work inside a project-local virtual environment** (`.venv`): `python -m venv .venv`, activate it, and install there. NEVER install dependencies into the global/system Python. `.venv` is git-ignored.
 - **Install from `pyproject.toml`** (the single source of truth — see Rule 4): `pip install -e .`. Do not hand-maintain a `requirements.txt`.
-- **Input sanitation:** validate and safely quote any identifier (database/table/column names) before placing it into catalog/introspection queries — never naive string concatenation. Route user-supplied *values* through driver parameterization. (Raw SQL in `execute_read_query`/`execute_write_query` is intentional and governed by the `mode` → `yolo` → `user_consent` gate.)
+- **Input sanitation:** validate and safely quote any identifier (database/table/column names) before placing it into catalog/introspection queries — never naive string concatenation. Route user-supplied *values* through driver parameterization. (Raw SQL in `execute_read_query`/`execute_write_query` is intentional and governed by the `mode` → `dry_run`-first → `yolo` → `user_consent` gate.)
 - **Secrets sanitation:** never commit `connections.json` or `.env` (both git-ignored); never print or log DSNs, hosts, or credentials; keep all error/diagnostic output sanitized (see Rule 6).
 
 ## 10. One Concern per Tool (Separate Tools for Separate Things)
