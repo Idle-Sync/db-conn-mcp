@@ -452,9 +452,11 @@ class Handlers:
         ``dry_run=True`` (the default) executes inside a transaction that is always
         ROLLED BACK and records a grant for this exact statement. A commit
         (``dry_run=False``) requires an unexpired grant for the identical
-        (database, sql, params) — consumed on success — unless ``skip_dry_run=True``
-        attests the user explicitly asked to skip the preview. Neither yolo nor
-        consent can bypass the preview stage; nothing can bypass ``mode``.
+        (database, sql, params); the commit ATTEMPT consumes it, whether it
+        succeeds or raises, so a failed commit needs a fresh preview before it may
+        be retried. ``skip_dry_run=True`` attests the user explicitly asked to skip
+        the preview. Neither yolo nor consent can bypass the preview stage; nothing
+        can bypass ``mode``.
         """
         conn = config.get(self._load(), database)
         self._sweep_grants()
@@ -474,9 +476,12 @@ class Handlers:
                 result = await dialect.execute_dry_run(db, sql, params, timeout_ms)
                 self._dry_run_grants[key] = time.monotonic()
                 return result
-            result = await dialect.execute(db, sql, params, timeout_ms)
-            self._dry_run_grants.pop(key, None)  # consumed — re-preview to run again
-            return result
+            # One preview authorizes exactly ONE commit attempt. Consuming the grant
+            # BEFORE the attempt means a failed commit — which may still have applied
+            # server-side — forces a fresh preview instead of a blind, double-applying
+            # retry.
+            self._dry_run_grants.pop(key, None)
+            return await dialect.execute(db, sql, params, timeout_ms)
         finally:
             await db.close()
 
