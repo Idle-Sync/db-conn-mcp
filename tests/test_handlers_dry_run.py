@@ -20,11 +20,14 @@ class _FakeDialect:
     def __init__(self):
         self.committed: list[str] = []
         self.dry_runs: list[str] = []
+        self.raise_on_execute: Exception | None = None
 
     async def connect(self, dsn, *, read_only):
         return _FakeDb()
 
     async def execute(self, db, sql, params=None, timeout_ms=None):
+        if self.raise_on_execute is not None:
+            raise self.raise_on_execute
         self.committed.append(sql)
         return {"rows_affected": 1}
 
@@ -72,6 +75,29 @@ async def test_commit_after_dry_run_succeeds_and_consumes_grant(env):
     # Grant consumed: an identical second commit needs a fresh dry-run.
     with pytest.raises(WriteRejected, match="dry_run"):
         await h.execute_write_query("db", "DELETE FROM t", user_consent=True, dry_run=False)
+
+
+async def test_failed_commit_also_consumes_the_grant(env):
+    """A raising commit may still have applied server-side — no blind retry on a live grant."""
+    h, fake = env
+    sql = "UPDATE t SET n = n + 1"
+    await h.execute_write_query("db", sql)
+    fake.raise_on_execute = RuntimeError("connection dropped during COMMIT")
+    with pytest.raises(RuntimeError):
+        await h.execute_write_query("db", sql, user_consent=True, dry_run=False)
+
+    # The attempt consumed the grant: retrying the identical statement is rejected.
+    fake.raise_on_execute = None
+    with pytest.raises(WriteRejected, match="dry_run"):
+        await h.execute_write_query("db", sql, user_consent=True, dry_run=False)
+    assert fake.committed == []
+
+    # A fresh preview re-authorizes exactly one more attempt.
+    await h.execute_write_query("db", sql)
+    assert await h.execute_write_query("db", sql, user_consent=True, dry_run=False) == {
+        "rows_affected": 1
+    }
+    assert fake.committed == [sql]
 
 
 async def test_changed_sql_or_params_does_not_match_grant(env):

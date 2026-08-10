@@ -171,13 +171,13 @@ flowchart TD
     P -- no --> G{unexpired grant for this exact<br/>statement, or skip_dry_run == true?}
     G -- no --> R0[❌ REJECT:<br/>'Preview it first with dry_run=true.<br/>Pass skip_dry_run=true ONLY if the<br/>user explicitly asked to skip it']
     G -- yes --> C{db.yolo == true?}
-    C -- yes --> RUN[✅ commit write SQL<br/>grant consumed]
+    C -- yes --> RUN[✅ commit write SQL<br/>grant consumed by the attempt<br/>success or failure]
     C -- no --> D{user_consent == true?}
     D -- yes --> RUN
     D -- no --> R2[❌ REJECT:<br/>'Read the table & schema, show the<br/>exact SQL to the user, get a yes,<br/>then call again with user_consent=true']
 ```
 
-The dry-run grant is process-local state in `Handlers` (`_dry_run_grants`, TTL 600s, consumed on commit) — precedent: `_active_ports`.
+The dry-run grant is process-local state in `Handlers` (`_dry_run_grants`, TTL 600s, consumed by the commit attempt — popped *before* `dialect.execute`, so a raising commit consumes it too) — precedent: `_active_ports`.
 
 The intended agent choreography for a non-yolo write:
 
@@ -207,14 +207,14 @@ sequenceDiagram
     Note over Agent,DB: 3. Re-call to commit — grant + consent
     Agent->>Server: execute_write_query(db="dev", sql="UPDATE users SET …", dry_run=false, user_consent=true)
     Server->>PG: connect(read_only=false) → execute(sql)
-    DB-->>Agent: rows affected (grant consumed)
+    DB-->>Agent: rows affected (grant consumed by the attempt)
 ```
 
 Skipping step 2 is not a matter of etiquette: a commit with no matching unexpired grant is **rejected by the server** unless `skip_dry_run=true` attests the user explicitly asked to skip the preview.
 
 `mode` is the **hard boundary** (native, unbypassable). Everything after it — the dry-run stage, `yolo`, `user_consent` — only decides *how much ceremony* a write needs on a DB that is *already* `write`; none of them, nor `skip_dry_run`, can ever make a `read` DB writable. And the two relaxations are scoped: `yolo` waives only the consent prompt (never the preview), `skip_dry_run` waives only the preview (never consent).
 
-**Dry-run writes** (`dry_run=true`, the default): the statement executes inside a transaction that is **always rolled back**, returning the `rows_affected` it *would* have had, and records a grant keyed on the exact `(database, sql, params)`. Because nothing commits, only the `mode` gate applies — no yolo or consent needed — which is exactly what lets the agent show the user the real impact *before* asking for consent to the real write. The grant expires after 10 minutes and is **consumed** by the commit it authorizes, so running the same statement twice means previewing it twice. Caveat (documented on the tool): a dry-run still executes server-side until the rollback, so it briefly takes locks, advances sequences, and fires triggers.
+**Dry-run writes** (`dry_run=true`, the default): the statement executes inside a transaction that is **always rolled back**, returning the `rows_affected` it *would* have had, and records a grant keyed on the exact `(database, sql, params)`. Because nothing commits, only the `mode` gate applies — no yolo or consent needed — which is exactly what lets the agent show the user the real impact *before* asking for consent to the real write. The grant expires after 10 minutes and is **consumed by the commit attempt** it authorizes — success *or* exception, because an ambiguous failure (statement timeout, connection dropped during COMMIT) may still have applied the write, and a blind retry on a live grant would double-apply it. Running the same statement twice means previewing it twice. Caveat (documented on the tool): a dry-run still executes server-side until the rollback, so it briefly takes locks, advances sequences, and fires triggers.
 
 ---
 

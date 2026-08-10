@@ -186,9 +186,11 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
         3. Call again with dry_run=false (and user_consent=true unless yolo) to
            commit. Commits without a prior dry-run of the identical statement are
            REJECTED. The preview grant expires 10 minutes after the dry-run and is
-           consumed by the commit it authorizes, so running the same statement twice
-           means previewing it twice. Pass skip_dry_run=true ONLY if the user
-           explicitly asked to skip the preview.
+           consumed by the commit ATTEMPT it authorizes — including a commit that
+           FAILS, which may still have applied server-side, so you MUST dry-run
+           again before retrying. Running the same statement twice means previewing
+           it twice. Pass skip_dry_run=true ONLY if the user explicitly asked to
+           skip the preview.
 
         Pass values via `params` ($1/$2/... placeholders), not pasted into the SQL.
         """
@@ -331,7 +333,10 @@ def build_server(config_path: Path | str | None = None) -> FastMCP:
         sanitized — never contains DSNs, hosts, or credentials. offline=true skips
         the PyPI lookup.
         """
-        return await doctor_mod.run_checks(handlers.config_path, offline=offline)
+        # Existence is re-evaluated per call (like the CLI): the config file can be
+        # deleted after startup, and run_checks() reads None as "no configuration".
+        path = handlers.config_path
+        return await doctor_mod.run_checks(path if path.is_file() else None, offline=offline)
 
     # ---- Prompts -------------------------------------------------------------
     @app.prompt()

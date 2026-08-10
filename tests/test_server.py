@@ -14,6 +14,7 @@ from pathlib import Path
 import asyncpg
 import pytest
 
+from db_conn_mcp import clients as clients_mod
 from db_conn_mcp import handlers as handlers_mod
 from db_conn_mcp import server
 from db_conn_mcp.handlers import Handlers
@@ -958,3 +959,28 @@ async def test_doctor_tool_registered(tmp_path):
     tools = await app.list_tools()
     tool = next(t for t in tools if t.name == "doctor")
     assert tool.inputSchema["properties"]["offline"]["default"] is False
+
+
+async def test_doctor_tool_reports_no_config_when_the_file_is_deleted_after_startup(
+    tmp_path, monkeypatch
+):
+    """A config removed after the server started is "no configuration", not "unreadable".
+
+    build_server resolves an existing path once, so the tool must re-check existence per
+    call (as the CLI does) — otherwise the config checks emit a misleading hard `fail`.
+    """
+    cfg = {
+        "connections": [{"name": "db", "dsn": "postgresql://u:SECRET@h:5432/db", "mode": "read"}]
+    }
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    app = build_server(config_path=path)
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [])  # ignore real client files
+    path.unlink()
+
+    _content, structured = await app.call_tool("doctor", {"offline": True})
+    findings = {f["check"]: f for f in structured["result"]}
+    for check in ("config_schema", "secrets_exposure", "connectivity"):
+        assert findings[check]["status"] == "skipped", findings[check]
+        assert "no configuration found" in findings[check]["detail"]
+    assert not any(f["status"] == "fail" for f in structured["result"])
