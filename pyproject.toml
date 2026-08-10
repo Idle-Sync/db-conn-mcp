@@ -37,6 +37,9 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "build>=1.2.0",
 ]
+# Enables the doctor's `process_staleness` check; the check degrades to
+# `skipped` when it is absent, so it stays out of the hard dependencies.
+doctor = ["psutil>=5.9.0"]
 
 [project.scripts]
 db-conn-mcp = "db_conn_mcp.cli:main"

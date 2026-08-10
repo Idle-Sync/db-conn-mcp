@@ -84,7 +84,7 @@ To provide the best Agent Experience (AgentX), the server exposes **23 tools + 2
 - **Core Library:** Official `mcp` Python SDK (`pip install mcp`).
 - **Database Drivers (v1):** `asyncpg` for PostgreSQL. Future dialects bring their own driver (e.g. `aiomysql`, `aiosqlite`) behind the `Dialect` seam.
 - **Validation:** `pydantic` for the `connections.json` models.
-- **Optional:** `psutil` — used only by the doctor's `process_staleness` check. Deliberately *not* a hard dependency: when it is absent that single check reports `skipped` and everything else runs unchanged (`pipx inject db-conn-mcp psutil` to enable it).
+- **Optional:** `psutil` — used only by the doctor's `process_staleness` check. Deliberately *not* a hard dependency: when it is absent that single check reports `skipped` and everything else runs unchanged (enable it with the `doctor` extra — `pip install "db-conn-mcp[doctor]"` — or `pipx inject db-conn-mcp psutil` on an existing pipx install).
 
 ### `connections.json` schema
 ```json

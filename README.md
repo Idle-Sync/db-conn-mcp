@@ -213,7 +213,7 @@ The server exposes **23 tools** and **2 prompts**:
 
 `--config <path>` works before or after any subcommand.
 
-> **Optional dependency:** the doctor's `process_staleness` check needs [`psutil`](https://pypi.org/project/psutil/) to inspect running processes. It is **not** required — without it that one check reports `skipped` and every other check runs normally. To enable it: `pipx inject db-conn-mcp psutil` (or `pip install psutil` into the same environment).
+> **Optional dependency:** the doctor's `process_staleness` check needs [`psutil`](https://pypi.org/project/psutil/) to inspect running processes. It is **not** required — without it that one check reports `skipped` and every other check runs normally. To enable it, install the `doctor` extra — `pip install "db-conn-mcp[doctor]"` (or `pipx install "db-conn-mcp[doctor]"`) — or, for an install you already have via pipx, `pipx inject db-conn-mcp psutil`.
 
 ---
 

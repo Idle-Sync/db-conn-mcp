@@ -633,10 +633,15 @@ async def test_show_activity_handler_defaults_sanitized(cfg_path, monkeypatch):
     assert result["activity"][0]["pid"] == 1
 
 
-def test_build_server_smoke(cfg_path):
-    # The FastMCP app builds and exposes the 23 tools + 2 prompts without error.
+async def test_build_server_smoke(cfg_path):
+    # The FastMCP app builds without error; the assertions below enforce the
+    # advertised surface — 23 tools + 2 prompts — so a lost registration fails here.
     app = server.build_server(cfg_path)
     assert app is not None
+    tools = await app.list_tools()
+    prompts = await app.list_prompts()
+    assert len(tools) == 23
+    assert len(prompts) == 2
 
 
 # ---- _dsn_with_port (pure, issue #10) ------------------------------------------
