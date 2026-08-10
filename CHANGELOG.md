@@ -6,8 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Eve
 that alters observable behaviour carries a **Breaking / Behaviour changes** section — read
 that first when upgrading, since it is the part that can bite.
 
-Releases before 0.5.3 predate this file; see the
-[GitHub releases](https://github.com/Idle-Sync/db-conn-mcp/releases) for those.
+Entries for 0.5.2 and earlier were backfilled from each release's own notes, written at
+the time of that release.
 
 ## [Unreleased]
 
@@ -102,6 +102,201 @@ Infrastructure only. No tool was added, removed or changed — still 23 tools an
   "connections.json exists but could not be read" instead of the intended skip, "no
   configuration found — run `db-conn-mcp setup`".
 
+## [0.5.2] — 2026-08-10
+
+Closes #12. Two features: whole-setup diagnostics, and making the write preview mandatory.
+
+### Breaking / Behaviour changes
+
+- **`execute_write_query` now defaults to `dry_run=true`, and the preview is enforced rather
+  than advisory.** A commit (`dry_run=false`) is **rejected** unless the identical statement was
+  dry-run first. A bare call therefore previews instead of committing — an agent that used to
+  call the tool and have it write will now get a preview back.
+
+  The grant fingerprints database + SQL + params with a 10-minute TTL. `skip_dry_run=true`
+  exists solely for an agent to attest the user explicitly asked to skip the preview.
+
+  Gate order is now `mode` → dry-run-first → `yolo` → `user_consent`. **`yolo` cannot skip the
+  preview**, and nothing can ever make a `read` database writable.
+
+### Added
+
+- **`doctor`** — whole-setup diagnostics, not just connectivity. One engine (`doctor.py`), two
+  surfaces: `db-conn-mcp doctor [--offline]` (exit 0 only if nothing fails, 2 otherwise) and a
+  `doctor` MCP tool returning `{check, status, detail, suggested_action}` so an agent can
+  self-diagnose mid-session. **23 tools** total.
+
+  Six checks, each drawn from a real failure during the 0.5.0 → 0.5.1 upgrade: running server
+  processes older than the installed package (psutil optional, and it reports its own host
+  process when stale); a cache-bypassed PyPI version check; per-database connectivity plus a
+  **credential-free** listener probe of fallback ports, catching "a different local Postgres
+  answered my port"; config-schema typos with did-you-mean hints; secrets exposure (POSIX file
+  mode, git-committability); and injected client entries whose command path no longer exists.
+
+  The engine never raises — a crashing check degrades to a `fail` naming only the exception
+  type. A poisoned-DSN sweep test asserts no DSN, host, user or password can reach any finding,
+  including via pydantic validation errors (Rule 6).
+- `check_database` UNREACHABLE results now report `failed_port`.
+
+### Changed
+
+- MCP-client helpers moved from `cli.py` into a new `clients.py` (re-exported for
+  compatibility), unlocking reuse without a circular import.
+
+## [0.5.1] — 2026-08-06
+
+### Added
+
+- **`fallback_ports`** (#10) — tunnel-friendly connections. A database behind an SSH tunnel does
+  not always land on the same local port; a connection can now declare where else to look:
+
+  ```json
+  { "name": "aws-aurora-db", "dsn": "postgresql://…@localhost:5432/mydb",
+    "fallback_ports": [5433, 15432], "mode": "read" }
+  ```
+
+  Probed **only** on refused/timeout, in order, first answer wins — auth, TLS, DNS and
+  database errors fail immediately, so a wrong-credentials error is never masked by
+  port-hopping. Bounded: listed ports only, no scanning, 5s cap per fallback probe. The winning
+  port is remembered for the process lifetime and surfaced as `active_port` in
+  `list_databases`, `check_database` and `db-conn-mcp check`.
+
+  Fully backward compatible: existing config files parse unchanged, and the server never writes
+  the key into a file that lacks it.
+- Automated releases — pushing a `vX.Y.Z` tag builds, publishes to PyPI and the MCP Registry,
+  and creates the GitHub Release.
+- README gained an Upgrade section covering pip/pipx/uv/uvx.
+
+## [0.5.0] — 2026-08-06
+
+Tool surface grows **12 → 22** (issue #8, PR #9), from months of field use.
+
+### Added
+
+- **Bind parameters** — optional `params` on both query tools, passed to the driver as real
+  `$1`/`$2` bind args. Values never touch the SQL string.
+- **Dry-run writes** — `execute_write_query(dry_run=true)` executes in a transaction, reports
+  would-be `rows_affected`, and always rolls back. Opt-in here; made mandatory in 0.5.2.
+  Documented caveat: a dry-run still executes server-side until rollback, so brief locks,
+  sequence advancement and trigger side effects are real.
+- **Per-call timeouts** — optional `timeout_ms` on both query tools.
+- **Server-side cursors** — `open_query_cursor` / `fetch_rows` / `close_cursor` for result sets
+  too large for one response. Bounded: max 5 open, 15-minute idle reaping, auto-close on drain.
+- **`get_object_definition`** — faithful definitions for views, functions/procedures (all
+  overloads), triggers, sequences and indexes via Postgres' own `pg_get_*def`.
+- **`cancel_query`** — cancel a stuck statement by pid via `pg_cancel_backend()`.
+- **Operational insight tools**, all read-only: `diff_schemas`, `check_sequences`,
+  `table_stats`, `show_activity` (sanitized — no user names or client addresses; query text
+  opt-in and truncated) and `explain_query`.
+
+### Fixed
+
+- Pinned `mcp>=1.0.0,<2.0.0` — SDK 2.0 removed `mcp.server.fastmcp` and broke fresh installs.
+
+## [0.4.1] — 2026-06-30
+
+### Added
+
+- **`format="sql"` on `get_database_schema`** — a self-contained, runnable DDL script (schemas,
+  sequences, tables, PK/FK/UNIQUE/CHECK, indexes, trigger functions, triggers) assembled from
+  native `pg_get_*def`. No external tools required.
+- **`dump_schema_faithful`** — byte-faithful `pg_dump --schema-only`. Requires the `pg_dump`
+  binary; returns `pg_dump_not_found` with per-OS install guidance when absent. The DSN goes
+  via `PG*` env vars, never argv, and all error text is sanitized.
+- **`faithful_schema_export` prompt** — guides choosing between the two exports.
+
+## [0.4.0] — 2026-06-30
+
+### Added
+
+- **`get_database_schema`** — the entire schema (all tables, columns, types, keys) in one call,
+  with optional `output_dir` writing `{database}_schema_{UTC}.json`.
+- `db-conn-mcp -v` also reports the exact build commit, so you can tell which commit is
+  installed on any device.
+
+### Fixed
+
+- Silent hang when the stdio server was run directly in a terminal.
+
+## [0.3.0] — 2026-06-03
+
+### Added
+
+- **`db-conn-mcp reset`** — removes all connections by deleting `connections.json` after a
+  confirmation. A separate command from `remove <name>` (Rule 10, one concern per tool).
+
+## [0.2.1] — 2026-06-03
+
+### Added
+
+- `db-conn-mcp -v` / `--version` — prints the installed version and exits, for verifying which
+  version `uvx`/`pipx` resolved.
+
+## [0.2.0] — 2026-06-03
+
+### Added
+
+- **`find_columns(database, pattern)`** — fuzzy, case-insensitive search for columns **by
+  name** across all tables.
+- **`search_value(database, value, tables?, limit_per_column?)`** — fuzzy search for **where a
+  value appears** in the data. Bounded by a statement timeout and per-column limit, with
+  partial results flagged `truncated`.
+
+  Two tools rather than one with a switch, per Rule 10. Both read-only, with safely-quoted
+  identifiers and parameterized values. **10 tools** total.
+
+## [0.1.2] — 2026-06-03
+
+### Security
+
+- **`execute_read_query` could write to a `read`-mode database.** The transaction could be
+  flipped to read-write from within the read path — working exploit:
+  `SET TRANSACTION READ WRITE; <write>`.
+
+  The read tool now validates that the SQL is a **single read-only statement**
+  (`SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`) before any connection opens, and relies on
+  asyncpg's single-command execution for the read path. The docs now also recommend a read-only
+  database role as the privilege-level boundary.
+
+  Reported and fixed by @axonova-bot (#1, #2). Verified against a live PostgreSQL.
+
+## [0.1.1] — 2026-06-03
+
+### Added
+
+- Published to PyPI and listed on the official MCP Registry
+  (`io.github.Idle-Sync/db-conn-mcp`) — `server.json` metadata, the PyPI ownership marker, and
+  a tokenless OIDC publish job.
+
+No functional changes versus 0.1.0.
+
+## [0.1.0] — 2026-06-03
+
+First release — a dead-simple, self-hosted MCP server for safely querying databases with AI
+agents.
+
+### Added
+
+- PostgreSQL support behind a `Dialect` seam, so MySQL/SQLite are a one-file addition later.
+- **Native read-only safety**: `read` databases are enforced read-only by Postgres itself;
+  writes gated `mode` → `yolo` → `user_consent`.
+- **Sanitized diagnostics**: connection errors return a category and a fix, never the DSN or
+  credentials.
+- **8 MCP tools** plus a `troubleshoot_connection` prompt; `stdio` and `http` (SSE) transports.
+- Setup and management CLI — `setup`, `status`, `add`, `clients`, `check`, `remove`, `yolo` —
+  with auto-injection into 8 MCP clients.
+
 [Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.4...HEAD
 [0.5.4]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.1.2...v0.2.0
+[0.1.2]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/Idle-Sync/db-conn-mcp/releases/tag/v0.1.0
