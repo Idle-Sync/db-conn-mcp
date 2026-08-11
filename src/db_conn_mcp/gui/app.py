@@ -147,7 +147,13 @@ def create_app(token: str, config_arg: str | None = None) -> Starlette:
     # browser tabs cannot race spawns. A verification's wall clock is its own
     # timeout (~20-30s) plus a couple of seconds of client cleanup; the routes
     # just await the engine — do not wrap them in a shorter HTTP timeout.
-    lock = asyncio.Lock()
+    verify_lock = asyncio.Lock()
+
+    # A SECOND lock, deliberately not the verification one: it makes each
+    # load-mutate-save of connections.json indivisible. Sharing verify_lock would
+    # park every config edit behind a ~30s subprocess, so a user who hit Verify
+    # would find the whole editor frozen. The two guard unrelated resources.
+    config_lock = asyncio.Lock()
 
     async def index(request: Request) -> FileResponse:
         """Serve the dashboard page itself (still behind the guard)."""
@@ -189,7 +195,7 @@ def create_app(token: str, config_arg: str | None = None) -> Starlette:
         spec = next((s for s in clients_mod.detected_clients() if s.key == key), None)
         if spec is None:
             return JSONResponse({"error": "unknown or undetected client"}, status_code=404)
-        async with lock:
+        async with verify_lock:
             result = await verify_client(spec)
         return JSONResponse(result)
 
@@ -204,7 +210,7 @@ def create_app(token: str, config_arg: str | None = None) -> Starlette:
         except config_mod.ConfigError:
             return _no_config()
         command, args = server_launch(path)
-        async with lock:
+        async with verify_lock:
             result = await verify_http(command, args)
         return JSONResponse(result)
 
@@ -223,25 +229,37 @@ def create_app(token: str, config_arg: str | None = None) -> Starlette:
             return None
 
     async def list_databases(request: Request) -> JSONResponse:
-        """List the configured connections — ``public_view`` only, never a DSN."""
+        """List the configured connections — ``public_view`` only, never a DSN.
+
+        Deliberately outside ``config_lock``: this only reads, and ``config.save``
+        replaces the file atomically, so a reader never observes a partial write.
+        """
         cfg = _load_or_empty(_config_path_for_writes())
         if cfg is None:
             return _no_config()
         return JSONResponse([c.public_view() for c in cfg.connections])
 
     async def add_database(request: Request) -> JSONResponse:
-        """Append one connection. This is the only route a DSN may enter by."""
-        path = _config_path_for_writes()
-        cfg = _load_or_empty(path)
-        if cfg is None:
-            return _no_config()
+        """Append one connection. This is the only route a DSN may enter by.
+
+        The body is read *before* the config is loaded: an ``await`` between the
+        load and the save would let a second request load the same file, and the
+        later save would drop the earlier request's connection despite its 201.
+        """
         parsed = _parse_connection(await _body(request))
         if not isinstance(parsed, Connection):
             return _invalid_connection(parsed)
-        if any(c.name == parsed.name for c in cfg.connections):
-            return JSONResponse({"error": "a connection with that name exists"}, status_code=409)
-        cfg.connections.append(parsed)
-        config_mod.save(cfg, path)
+        path = _config_path_for_writes()
+        async with config_lock:
+            cfg = _load_or_empty(path)
+            if cfg is None:
+                return _no_config()
+            if any(c.name == parsed.name for c in cfg.connections):
+                return JSONResponse(
+                    {"error": "a connection with that name exists"}, status_code=409
+                )
+            cfg.connections.append(parsed)
+            config_mod.save(cfg, path)
         return JSONResponse(parsed.public_view(), status_code=201)
 
     async def edit_database(request: Request) -> JSONResponse:
@@ -251,43 +269,49 @@ def create_app(token: str, config_arg: str | None = None) -> Starlette:
         how an edit form can submit without ever re-sending the DSN it never saw.
         """
         name = request.path_params["name"]
-        path = _config_path_for_writes()
-        cfg = _load_or_empty(path)
-        if cfg is None:
-            return _no_config()
-        existing = next((c for c in cfg.connections if c.name == name), None)
-        if existing is None:
-            return _no_such_connection()
-        body = await _body(request)
+        body = await _body(request)  # before the load — see add_database
         if not isinstance(body, dict):
             return _invalid_connection([])
-        merged = existing.model_dump()
-        for field in ("mode", "yolo", "fallback_ports", "dsn"):
-            if field in body and body[field] not in (None, ""):
-                merged[field] = body[field]
-        parsed = _parse_connection(merged)
-        if not isinstance(parsed, Connection):
-            return _invalid_connection(parsed)
-        cfg.connections[cfg.connections.index(existing)] = parsed
-        config_mod.save(cfg, path)
+        path = _config_path_for_writes()
+        async with config_lock:
+            cfg = _load_or_empty(path)
+            if cfg is None:
+                return _no_config()
+            existing = next((c for c in cfg.connections if c.name == name), None)
+            if existing is None:
+                return _no_such_connection()
+            merged = existing.model_dump()
+            for field in ("mode", "yolo", "fallback_ports", "dsn"):
+                if field in body and body[field] not in (None, ""):
+                    merged[field] = body[field]
+            parsed = _parse_connection(merged)
+            if not isinstance(parsed, Connection):
+                return _invalid_connection(parsed)
+            cfg.connections[cfg.connections.index(existing)] = parsed
+            config_mod.save(cfg, path)
         return JSONResponse(parsed.public_view())
 
     async def delete_database(request: Request) -> JSONResponse:
         """Drop one connection by name (and with it, its stored DSN)."""
         name = request.path_params["name"]
         path = _config_path_for_writes()
-        cfg = _load_or_empty(path)
-        if cfg is None:
-            return _no_config()
-        remaining = [c for c in cfg.connections if c.name != name]
-        if len(remaining) == len(cfg.connections):
-            return _no_such_connection()
-        cfg.connections = remaining
-        config_mod.save(cfg, path)
+        async with config_lock:
+            cfg = _load_or_empty(path)
+            if cfg is None:
+                return _no_config()
+            remaining = [c for c in cfg.connections if c.name != name]
+            if len(remaining) == len(cfg.connections):
+                return _no_such_connection()
+            cfg.connections = remaining
+            config_mod.save(cfg, path)
         return JSONResponse({"removed": name})
 
     async def check_database_route(request: Request) -> JSONResponse:
-        """Probe one connection; the handler's rows are already sanitized."""
+        """Probe one connection; the handler's rows are already sanitized.
+
+        Also outside ``config_lock``: this only reads, and a probe can take tens of
+        seconds — holding the write lock across it would freeze the editor.
+        """
         name = request.path_params["name"]
         path = _config_path_for_writes()
         cfg = _load_or_empty(path) if path.is_file() else None

@@ -1,7 +1,10 @@
 """The GUI web app: guard middleware, summary, and (later tasks) the full API."""
 
+import asyncio
+import json
 from pathlib import Path
 
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
@@ -11,6 +14,7 @@ from db_conn_mcp.gui.app import GUI_PORT, TOKEN_HEADER, create_app
 TOKEN = "test-token-abcdef"
 HOST = f"127.0.0.1:{GUI_PORT}"
 SECRET_DSN = "postgresql://user:hunter2-secret@db.internal:5432/prod"
+OTHER_DSN = "postgresql://user:other-secret@db.internal:5432/other"
 
 
 @pytest.fixture()
@@ -400,3 +404,136 @@ def test_unsupported_dsn_scheme_is_a_sanitized_400(cfg_client):
     assert r.status_code == 400
     assert r.json() == {"error": "invalid connection", "fields": ["dsn"]}
     assert "hunter2-secret" not in r.text
+
+
+# ---- Task 6 review round 1: concurrency and the no-clobber guarantee ----
+
+
+def _async_client(cfg: Path) -> httpx.AsyncClient:
+    """A real ASGI client — TestClient serializes, so it cannot overlap requests."""
+    app = create_app(TOKEN, config_arg=str(cfg))
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=f"http://{HOST}")
+
+
+def _stored_names(cfg: Path) -> list[str]:
+    return sorted(c["name"] for c in json.loads(cfg.read_text(encoding="utf-8"))["connections"])
+
+
+async def test_concurrent_adds_do_not_lose_a_connection(tmp_path):
+    """Two overlapping POSTs must both persist.
+
+    The read-modify-write span (load the file, mutate, save it) has to be
+    indivisible. When it was not, both requests loaded the same empty config and
+    the second save overwrote the first — a 201 whose DSN silently vanished.
+    """
+    cfg = tmp_path / "connections.json"
+    async with _async_client(cfg) as client:
+        first, second = await asyncio.gather(
+            client.post(
+                "/api/databases",
+                json={"name": "a", "dsn": SECRET_DSN, "mode": "read"},
+                headers=_hdr(),
+            ),
+            client.post(
+                "/api/databases",
+                json={"name": "b", "dsn": OTHER_DSN, "mode": "read"},
+                headers=_hdr(),
+            ),
+        )
+    assert [first.status_code, second.status_code] == [201, 201]
+    assert _stored_names(cfg) == ["a", "b"]
+
+
+async def test_concurrent_duplicate_adds_leave_exactly_one(tmp_path):
+    """The duplicate guard must survive overlap: one 201, one 409, one row."""
+    cfg = tmp_path / "connections.json"
+    payload = {"name": "same", "dsn": SECRET_DSN, "mode": "read"}
+    async with _async_client(cfg) as client:
+        results = await asyncio.gather(
+            client.post("/api/databases", json=payload, headers=_hdr()),
+            client.post("/api/databases", json=payload, headers=_hdr()),
+        )
+    assert sorted(r.status_code for r in results) == [201, 409]
+    assert _stored_names(cfg) == ["same"]
+
+
+async def test_concurrent_edits_do_not_lose_a_sibling(tmp_path):
+    """An overlapping PATCH of two rows must not roll the other one back."""
+    cfg = tmp_path / "connections.json"
+    async with _async_client(cfg) as client:
+        for name in ("a", "b"):
+            r = await client.post(
+                "/api/databases",
+                json={"name": name, "dsn": SECRET_DSN, "mode": "read"},
+                headers=_hdr(),
+            )
+            assert r.status_code == 201
+        results = await asyncio.gather(
+            client.patch("/api/databases/a", json={"mode": "write"}, headers=_hdr()),
+            client.patch("/api/databases/b", json={"yolo": True}, headers=_hdr()),
+        )
+        assert [r.status_code for r in results] == [200, 200]
+        listing = (await client.get("/api/databases", headers=_hdr())).json()
+    by_name = {row["name"]: row for row in listing}
+    assert by_name["a"]["mode"] == "write"
+    assert by_name["b"]["yolo"] is True
+
+
+async def test_concurrent_delete_and_add_keep_both_effects(tmp_path):
+    """A delete overlapping an add must not resurrect the deleted row."""
+    cfg = tmp_path / "connections.json"
+    async with _async_client(cfg) as client:
+        await client.post(
+            "/api/databases",
+            json={"name": "old", "dsn": SECRET_DSN, "mode": "read"},
+            headers=_hdr(),
+        )
+        results = await asyncio.gather(
+            client.delete("/api/databases/old", headers=_hdr()),
+            client.post(
+                "/api/databases",
+                json={"name": "new", "dsn": OTHER_DSN, "mode": "read"},
+                headers=_hdr(),
+            ),
+        )
+    assert [r.status_code for r in results] == [200, 201]
+    assert _stored_names(cfg) == ["new"]
+
+
+#: Valid JSON that ``config.load`` still refuses: names must be unique.
+_DUPLICATE_NAMES = json.dumps(
+    {
+        "connections": [
+            {"name": "dup", "dsn": SECRET_DSN, "mode": "read"},
+            {"name": "dup", "dsn": OTHER_DSN, "mode": "write"},
+        ]
+    },
+    indent=2,
+)
+_NOT_JSON = '{"connections": [ this is not json'
+
+
+@pytest.mark.parametrize("broken", [_DUPLICATE_NAMES, _NOT_JSON], ids=["duplicate", "not-json"])
+def test_an_unloadable_config_is_never_overwritten(cfg_client, broken):
+    """A config file that exists but will not load must be left byte-identical.
+
+    Treating "cannot load" as "empty" would make the very next save wipe every
+    connection the user had. Every route reports the fixed 409 instead, and the
+    file on disk is untouched.
+    """
+    client, cfg = cfg_client
+    cfg.write_text(broken, encoding="utf-8")
+    before = cfg.read_bytes()
+    add = {"name": "new", "dsn": OTHER_DSN, "mode": "read"}
+    responses = [
+        client.get("/api/databases", headers=_hdr()),
+        client.post("/api/databases", json=add, headers=_hdr()),
+        client.patch("/api/databases/dup", json={"mode": "write"}, headers=_hdr()),
+        client.delete("/api/databases/dup", headers=_hdr()),
+        client.post("/api/databases/dup/check", headers=_hdr()),
+    ]
+    for r in responses:
+        assert r.status_code == 409, r.request.url
+        assert r.json() == {"error": "no configuration found"}
+        assert "hunter2-secret" not in r.text
+    assert cfg.read_bytes() == before
