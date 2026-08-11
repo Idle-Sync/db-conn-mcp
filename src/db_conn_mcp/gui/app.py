@@ -26,6 +26,7 @@ from .. import __version__
 from .. import clients as clients_mod
 from .. import config as config_mod
 from ..dialects.registry import dialect_for
+from ..doctor import run_checks
 from ..handlers import Handlers
 from ..models import Config, Connection
 from ..verify import verify_client, verify_http
@@ -391,11 +392,28 @@ def create_app(token: str, config_arg: str | None = None) -> Starlette:
             clients_mod.write_config(spec, clients_mod.remove_entry(data, spec.fmt, "db-conn-mcp"))
         return JSONResponse({"removed": spec.key})
 
+    async def doctor_route(request: Request) -> JSONResponse:
+        """Run the doctor checks and return its findings verbatim (Rule 6: already sanitized).
+
+        Deliberately outside both locks: doctor only probes and reports, it writes
+        nothing, so there is no shared state here for either lock to protect.
+        """
+        body = await _body(request)
+        if not isinstance(body, dict):
+            body = {}
+        try:
+            path = config_mod.resolve_path(config_arg)
+        except config_mod.ConfigError:
+            path = None
+        findings = await run_checks(path, offline=bool(body.get("offline", False)))
+        return JSONResponse(findings)
+
     routes = [
         Route("/", index),
         Route("/api/summary", summary),
         Route("/api/verify/client/{key}", verify_client_route, methods=["POST"]),
         Route("/api/verify/http", verify_http_route, methods=["POST"]),
+        Route("/api/doctor", doctor_route, methods=["POST"]),
         # Two Routes share /api/databases with disjoint methods: Starlette keeps
         # scanning past a path match whose method does not fit (Match.PARTIAL).
         Route("/api/databases", list_databases, methods=["GET"]),

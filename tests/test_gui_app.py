@@ -597,3 +597,16 @@ def test_an_unloadable_config_is_never_overwritten(cfg_client, broken):
         assert r.json() == {"error": "no configuration found"}
         assert "hunter2-secret" not in r.text
     assert cfg.read_bytes() == before
+
+
+def test_doctor_endpoint_returns_findings(cfg_client, monkeypatch):
+    from db_conn_mcp.gui import app as gui_app
+
+    async def fake_run_checks(config_path, *, offline=False):
+        return [{"check": "x", "status": "ok", "detail": "d", "suggested_action": "none"}]
+
+    monkeypatch.setattr(gui_app, "run_checks", fake_run_checks)
+    client, _ = cfg_client
+    r = client.post("/api/doctor", json={"offline": True}, headers=_hdr())
+    assert r.status_code == 200
+    assert r.json()[0]["status"] == "ok"
