@@ -646,6 +646,15 @@ async def test_build_server_smoke(cfg_path):
     assert len(prompts) == 2
 
 
+async def test_build_server_advertises_our_own_version(cfg_path):
+    """serverInfo must carry db-conn-mcp's version, not the MCP SDK's default."""
+    from db_conn_mcp import __version__
+
+    app = server.build_server(cfg_path)
+    options = app._mcp_server.create_initialization_options()
+    assert options.server_version == __version__
+
+
 # ---- the untrusted-data guard, end to end through call_tool ---------------------
 
 

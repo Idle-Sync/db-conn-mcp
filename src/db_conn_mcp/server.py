@@ -16,6 +16,7 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ContentBlock
 
+from . import __version__
 from . import doctor as doctor_mod
 from .config import resolve_path
 from .guard import UNTRUSTED_DATA_POLICY, guard_content_blocks
@@ -94,6 +95,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
     # initialize response — the durable half of the prompt-injection defence, since a
     # client reading only structuredContent never sees the per-response text guard.
     app = GuardedFastMCP("db-conn-mcp", instructions=UNTRUSTED_DATA_POLICY)
+    # FastMCP takes no `version`, and the low-level server then advertises the *SDK's*
+    # version in the initialize response's serverInfo. Stamp our own instead, so a
+    # client (and the live verification engine in `verify.py`) can tell which build of
+    # db-conn-mcp it is actually talking to.
+    app._mcp_server.version = __version__
 
     # ---- Exploration tools ---------------------------------------------------
     @app.tool()

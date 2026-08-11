@@ -11,7 +11,14 @@ the time of that release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Breaking / Behaviour changes
+
+- **The server now reports its own version to your MCP client.** During the initialize
+  handshake, `serverInfo.version` used to be the version of the underlying MCP SDK (e.g.
+  `1.27.2`) because the SDK fills that in when a server does not supply one. It is now the
+  db-conn-mcp version (e.g. `0.5.6`). If you script against that field, expect our version
+  there from now on — and it finally lets a client tell which build of db-conn-mcp it is
+  talking to.
 
 ## [0.5.6] — 2026-08-11
 
