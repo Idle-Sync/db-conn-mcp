@@ -7,6 +7,9 @@ import pytest
 from db_conn_mcp.clients import (
     ClientConfigError,
     ClientSpec,
+    config_readable,
+    injected_command,
+    is_injected,
     read_config,
     write_config,
 )
@@ -62,3 +65,34 @@ def test_read_config_raises_on_unparseable_toml(tmp_path):
     spec.path.write_text("this is not = = toml", encoding="utf-8")
     with pytest.raises(ClientConfigError):
         read_config(spec)
+
+
+def test_read_config_toml_error_never_echoes_file_contents(tmp_path):
+    """Rule 6, TOML edge: tomlkit's ParseError quotes the offending key — we must not."""
+    spec = ClientSpec("codex", "Codex", tmp_path / "config.toml", "codex")
+    spec.path.write_text("my token hunter2 = 1\n", encoding="utf-8")
+    with pytest.raises(ClientConfigError) as excinfo:
+        read_config(spec)
+    assert "hunter2" not in str(excinfo.value)
+
+
+def test_is_injected_returns_false_for_unparseable_config(tmp_path):
+    """Non-raising contract preserved: unreadable means 'cannot prove injected'."""
+    spec = _json_spec(tmp_path)
+    spec.path.write_text("{ not json", encoding="utf-8")
+    assert is_injected(spec) is False
+
+
+def test_injected_command_returns_none_for_unparseable_config(tmp_path):
+    spec = _json_spec(tmp_path)
+    spec.path.write_text("{ not json", encoding="utf-8")
+    assert injected_command(spec) is None
+
+
+def test_config_readable_reports_parse_state(tmp_path):
+    spec = _json_spec(tmp_path)
+    assert config_readable(spec) is True  # absent is fine — we would create it
+    spec.path.write_text("{ not json", encoding="utf-8")
+    assert config_readable(spec) is False
+    spec.path.write_text("{}", encoding="utf-8")
+    assert config_readable(spec) is True

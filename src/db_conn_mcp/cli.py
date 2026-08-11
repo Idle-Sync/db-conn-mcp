@@ -16,7 +16,6 @@ Only the connection *name* is ever echoed — never the DSN (Rule 6).
 
 import argparse
 import asyncio
-import json
 import re
 import shutil
 import sys
@@ -25,13 +24,17 @@ from typing import Literal
 
 from . import __commit__, __version__, config, doctor, server
 from .clients import (
+    ClientConfigError,
     ClientSpec,
     agent_config_paths,  # noqa: F401  re-exported for back-compat; unused in this module
     client_specs,
+    config_readable,
     detected_clients,
     inject_entry,
     is_injected,
+    read_config,
     remove_entry,
+    write_config,
 )
 from .dialects.registry import dialect_for
 from .handlers import Handlers
@@ -222,7 +225,10 @@ def _choose_injection_targets() -> list[ClientSpec]:
 
     print("\nDetected MCP client config(s):")
     for i, spec in enumerate(detected, 1):
-        marker = " [already injected]" if is_injected(spec) else ""
+        if not config_readable(spec):
+            marker = " [config unreadable — fix by hand]"
+        else:
+            marker = " [already injected]" if is_injected(spec) else ""
         print(f"  {i}. {spec.label} [{spec.fmt}]{marker}: {spec.path}")
     raw = input("Inject db-conn-mcp into which? (e.g. 1,3 or 'all'; Enter to skip): ")
     chosen = [detected[i] for i in parse_client_selection(raw, len(detected))]
@@ -232,13 +238,19 @@ def _choose_injection_targets() -> list[ClientSpec]:
 
 
 def _inject_into_client(spec: ClientSpec, command: str, args: list[str]) -> None:
-    """Read-merge-write a server entry into one client's config, in its own format."""
+    """Read-merge-write a server entry into one client's config, in its own format.
+
+    A config that exists but does not parse is left untouched: overwriting it would
+    destroy the user's other servers, comments and settings.
+    """
     try:
-        existing = json.loads(spec.path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        existing = {}
+        existing = read_config(spec)
+    except ClientConfigError as exc:
+        print(f"  Skipped {spec.label}: {exc}")
+        print("    Fix that file by hand, then re-run `db-conn-mcp clients`.")
+        return
     updated = inject_entry(existing, spec.fmt, "db-conn-mcp", command, args)
-    spec.path.write_text(json.dumps(updated, indent=2) + "\n", encoding="utf-8")
+    write_config(spec, updated)
     print(f"  Updated {spec.label} config.")
 
 
@@ -317,7 +329,11 @@ def _print_status(path: Path) -> None:
     if not detected:
         print("  (none detected)")
     for spec in detected:
-        print(f"  - {spec.label}: {'injected' if is_injected(spec) else 'not injected'}")
+        if not config_readable(spec):
+            state = "config unreadable"
+        else:
+            state = "injected" if is_injected(spec) else "not injected"
+        print(f"  - {spec.label}: {state}")
 
 
 # ---- Command handlers --------------------------------------------------------
@@ -424,11 +440,12 @@ def _uninject_interactive() -> int:
 def _uninject_from_client(spec: ClientSpec) -> None:
     """Remove the db-conn-mcp entry from one client's config, preserving the rest."""
     try:
-        existing = json.loads(spec.path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        existing = read_config(spec)
+    except ClientConfigError as exc:
+        print(f"  Skipped {spec.label}: {exc}")
         return
     remove_entry(existing, spec.fmt, "db-conn-mcp")
-    spec.path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    write_config(spec, existing)
     print(f"  Removed from {spec.label} config.")
 
 

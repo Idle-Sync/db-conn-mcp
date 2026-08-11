@@ -872,3 +872,33 @@ def test_doctor_prints_without_crashing_on_cp1252(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "connectivity" in out
     assert out.isascii()
+
+
+def test_inject_refuses_to_clobber_unparseable_config(tmp_path, capsys):
+    """The whole point of the no-clobber rule: a broken file survives untouched."""
+    cfg = tmp_path / "broken.json"
+    original = '{ "mcpServers": { "other": '  # truncated on purpose
+    cfg.write_text(original, encoding="utf-8")
+    spec = cli.ClientSpec("broken", "Broken Client", cfg, "mcpServers")
+    cli._inject_into_client(spec, "db-conn-mcp", ["--config", "x"])
+    assert cfg.read_text(encoding="utf-8") == original
+    out = capsys.readouterr().out
+    assert "Broken Client" in out
+    assert "other" not in out  # Rule 6: the file's contents are never echoed
+
+
+def test_uninject_refuses_to_clobber_unparseable_config(tmp_path, capsys):
+    cfg = tmp_path / "broken.json"
+    original = "{ not json at all"
+    cfg.write_text(original, encoding="utf-8")
+    spec = cli.ClientSpec("broken", "Broken Client", cfg, "mcpServers")
+    cli._uninject_from_client(spec)
+    assert cfg.read_text(encoding="utf-8") == original
+
+
+def test_detected_clients_still_lists_a_broken_config(tmp_path, monkeypatch):
+    """Discovery is 'the file exists', not 'the file parses' — hiding it hides the fix."""
+    broken = cli.ClientSpec("b", "B", tmp_path / "b.json", "mcpServers")
+    (tmp_path / "b.json").write_text("{ not json", encoding="utf-8")
+    monkeypatch.setattr(clients, "client_specs", lambda: [broken])
+    assert [s.key for s in cli.detected_clients()] == ["b"]

@@ -196,11 +196,27 @@ def detected_clients() -> list[ClientSpec]:
     return [s for s in client_specs() if s.path.is_file()]
 
 
-def is_injected(spec: ClientSpec, name: str = "db-conn-mcp") -> bool:
-    """Whether ``name`` is already registered under ``spec``'s container key."""
+def config_readable(spec: ClientSpec) -> bool:
+    """Whether this client's config can be safely read-merge-written.
+
+    True when the file is absent (we would create it) or parses. False when it
+    exists but does not — the case where writing would destroy user content.
+    """
     try:
-        data = json.loads(spec.path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        read_config(spec)
+    except ClientConfigError:
+        return False
+    return True
+
+
+def is_injected(spec: ClientSpec, name: str = "db-conn-mcp") -> bool:
+    """Whether ``name`` is already registered under ``spec``'s container key.
+
+    Never raises: an unreadable config means we cannot *prove* it is injected.
+    """
+    try:
+        data = read_config(spec)
+    except ClientConfigError:
         return False
     container = data.get(_CONTAINER_KEY[spec.fmt])
     return isinstance(container, dict) and name in container
@@ -209,8 +225,8 @@ def is_injected(spec: ClientSpec, name: str = "db-conn-mcp") -> bool:
 def injected_command(spec: ClientSpec, name: str = "db-conn-mcp") -> str | None:
     """Return the command path of an injected entry, or None if absent/unreadable."""
     try:
-        data = json.loads(spec.path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        data = read_config(spec)
+    except ClientConfigError:
         return None
     container = data.get(_CONTAINER_KEY[spec.fmt])
     if not isinstance(container, dict) or name not in container:

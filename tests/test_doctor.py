@@ -233,6 +233,19 @@ def test_client_paths_skips_a_detected_client_without_the_entry(tmp_path, monkey
     assert "no detected MCP client" in f["detail"]
 
 
+def test_client_paths_survives_an_unparseable_client_config(tmp_path, monkeypatch):
+    """doctor reads clients only through is_injected/injected_command, which swallow
+    ClientConfigError — so a broken config must never surface as a crashed check
+    (a traceback would print the parser's cause, echoing the file's contents)."""
+    cfg = tmp_path / "client.json"
+    cfg.write_text('{ "mcpServers": { "secret-token-abc123": ', encoding="utf-8")
+    spec = clients_mod.ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [spec])
+    (f,) = check_client_paths(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "ok"
+    assert "secret-token-abc123" not in f["detail"]
+
+
 def test_client_paths_ok_when_nothing_injected(monkeypatch):
     monkeypatch.setattr(clients_mod, "detected_clients", lambda: [])
     (f,) = check_client_paths(CheckContext(config_path=None, offline=True))
