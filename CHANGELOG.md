@@ -11,7 +11,29 @@ the time of that release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Codex is now a setup target.** `db-conn-mcp setup` and `db-conn-mcp clients` detect
+  `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) and write a `[mcp_servers.db-conn-mcp]`
+  entry, bringing the auto-injection list to nine clients. One entry covers the ChatGPT
+  desktop app, the Codex CLI and the IDE extension, which share that file. Your comments,
+  formatting and other MCP servers in that file are preserved. The entry carries an explicit
+  `startup_timeout_sec = 30`, because Codex's 10s default can be tight for Python startup on
+  a cold disk.
+
+### Breaking / Behaviour changes
+
+- **A client config file that exists but does not parse is no longer overwritten.** Previously,
+  if `setup` or `clients` could not read a client's config, it treated the file as empty and
+  wrote a fresh one — silently discarding whatever was in there, including your other MCP
+  servers. It now skips that client, tells you which file it could not parse, and leaves the
+  file untouched. The client still appears in the list, marked `config unreadable`, so you can
+  fix it by hand and re-run. This affects all nine clients, not just Codex.
+
+### Changed
+
+- Adds one dependency, **`tomlkit`** (pure Python, no transitive dependencies). Codex's config
+  is TOML, and the standard library has a TOML *reader* but no writer at any Python version.
 
 ## [0.5.5] — 2026-08-10
 

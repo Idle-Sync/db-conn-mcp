@@ -4,10 +4,11 @@ Two responsibilities, no DB knowledge:
   * ``db-conn-mcp [--transport stdio|http] [--config PATH]`` — launch the server.
   * ``db-conn-mcp setup`` — interactive wizard to register the first DB and
     (optionally) inject the server into detected MCP client configs. Each client
-    carries its own config path and entry format (``mcpServers`` for Claude
-    Desktop/Cursor/Agy/Windsurf/Claude Code/Cline, ``servers`` for VS Code,
-    ``context_servers`` for Zed) via :class:`db_conn_mcp.clients.ClientSpec` —
-    those helpers live in ``clients.py`` and are re-imported here.
+    carries its own config path, entry format and file syntax (``mcpServers`` for
+    Claude Desktop/Cursor/Agy/Windsurf/Claude Code/Cline, ``servers`` for VS Code,
+    ``context_servers`` for Zed, ``mcp_servers`` in TOML for Codex) via
+    :class:`db_conn_mcp.clients.ClientSpec` — those helpers live in ``clients.py``
+    and are re-imported here.
 
 The wizard's *logic* (path resolution, DB registration, config injection) lives in
 pure helpers so it stays testable; the interactive loop is a thin shell over them.

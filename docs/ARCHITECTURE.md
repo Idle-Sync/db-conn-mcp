@@ -32,7 +32,7 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 | Module | Responsibility | Knows about Postgres? |
 |---|---|---|
 | `cli.py` | Parse args (`--config`, `--transport`); run server or a management subcommand (`setup`/`status`/`add`/`clients`/`remove`/`yolo`); drive the interactive wizard | No |
-| `clients.py` | Known MCP clients: `ClientSpec` (config path + entry format) and the pure inject/remove/detect helpers. Shared by `cli.py` and the doctor | No |
+| `clients.py` | Known MCP clients: `ClientSpec` (config path + entry format + file syntax), the per-syntax `Codec` + `read_config`/`write_config` seam, and the pure inject/remove/detect helpers. Shared by `cli.py` and the doctor | No |
 | `config.py` | Resolve, load, validate, **and save** `connections.json` | No |
 | `models.py` | Pydantic types: `Connection{name, dsn, mode, yolo}`, `Config` | No |
 | `dialects/base.py` | The `Dialect` ABC — the extensibility contract | No |
@@ -117,6 +117,14 @@ Resulting `connections.json`:
 ```
 
 **Config resolution order** (first match wins): `--config <path>` → `./connections.json` → `~/.db-conn-mcp/connections.json`.
+
+### Client injection (`clients.py`) — three axes, one seam
+
+The second half of the wizard writes this server into whichever MCP clients the machine already has. Known clients differ on **three independent axes**, and a `ClientSpec`'s `fmt` names the combination: the **container key** the entry lives under (`mcpServers` for Claude Desktop/Cursor/Agy/Windsurf/Claude Code/Cline, `servers` for VS Code, `context_servers` for Zed, `mcp_servers` for Codex), the **entry shape** `_build_entry` produces (flat `command` + `args`; VS Code's extra `type: "stdio"`; Zed's nested `command: {path, args}`; Codex's `startup_timeout_sec`), and the **file syntax** — nine clients, but not nine JSON files: Codex's `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) is TOML.
+
+Syntax is isolated behind a frozen `Codec` (`loads` / `dumps` / `empty`, plus the parse errors to catch), one per format in `_CODEC`. Every caller reaches a config through `read_config(spec)` and `write_config(spec, data)`, so nothing above that seam knows whether it is holding JSON or TOML, and adding a client in a new syntax is one `Codec` rather than a branch in each caller. The TOML codec is `tomlkit`, which round-trips comments and layout — a hand-maintained `config.toml` survives a read-merge-write intact.
+
+`read_config` draws the one distinction the safety of this flow rests on: an **absent** file yields a fresh empty document (creating it is the point), while a file that **exists and does not parse** raises `ClientConfigError`. Injection and removal then skip that client — naming its path and the failure category only, never the file's contents (Rule 6) — rather than writing a clean config over content they could not understand, which would silently discard the user's other MCP servers. The client still appears in the CLI's listings, marked unreadable, so it can be repaired by hand and the command re-run.
 
 ---
 

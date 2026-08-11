@@ -4,7 +4,7 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/Idle-Sync/db-conn-mcp?style=social)](https://github.com/Idle-Sync/db-conn-mcp/stargazers)
 
-A dead-simple, self-hosted **Model Context Protocol (MCP) server for querying your databases** with AI agents (Claude, Cursor, Windsurf, VS Code, Zed, and more).
+A dead-simple, self-hosted **Model Context Protocol (MCP) server for querying your databases** with AI agents (Claude, Cursor, Windsurf, VS Code, Zed, Codex, and more).
 
 It does one thing well: let an agent **safely explore and query** a database you point it at — with security delegated to the simplest possible primitives (a static JSON file and your database's own read-only transactions), not custom auth servers or fragile SQL parsing.
 
@@ -234,7 +234,7 @@ The server exposes **23 tools** and **2 prompts**:
 
 `db-conn-mcp setup` (or `db-conn-mcp clients`) auto-detects and writes the right config for:
 
-**Claude Desktop · Cursor · Windsurf · Agy (Antigravity) · Claude Code · Cline · VS Code · Zed**
+**Claude Desktop · Cursor · Windsurf · Agy (Antigravity) · Claude Code · Cline · VS Code · Zed · Codex**
 
 Prefer to wire it manually? Use the absolute path the wizard would (so the client can find it regardless of PATH). For a `mcpServers`-style client (Claude Desktop, Cursor, Windsurf, …):
 
@@ -251,7 +251,16 @@ Prefer to wire it manually? Use the absolute path the wizard would (so the clien
 
 > If `db-conn-mcp` isn't on the client's PATH (e.g. a project-venv install), use the interpreter form instead: `"command": "/abs/path/to/python", "args": ["-m", "db_conn_mcp", "--config", "…"]`. The `setup`/`clients` commands figure this out for you automatically.
 
-VS Code (`servers` key, `"type": "stdio"`) and Zed (`context_servers`, nested `command`) use different shapes — the wizard handles those too.
+VS Code (`servers` key, `"type": "stdio"`) and Zed (`context_servers`, nested `command`) use different shapes — the wizard handles those too. Codex is different again: its config is **TOML**, at `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`), under `[mcp_servers.db-conn-mcp]`. One entry covers the ChatGPT desktop app, the Codex CLI and the IDE extension, which share that file.
+
+```toml
+[mcp_servers.db-conn-mcp]
+command = 'C:\Users\you\.local\bin\db-conn-mcp.exe'
+args = ["--config", 'C:\Users\you\.db-conn-mcp\connections.json']
+startup_timeout_sec = 30
+```
+
+> Writing that by hand on Windows? Use TOML **literal** strings (single quotes). In a basic `"…"` string a backslash starts an escape — `\U` is an error and `\t` silently becomes a tab. The wizard handles this for you.
 
 ---
 
