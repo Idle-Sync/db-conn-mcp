@@ -51,7 +51,7 @@ class _Guard(BaseHTTPMiddleware):
 
     def __init__(self, app, token: str) -> None:
         super().__init__(app)
-        self._token = token
+        self._token = token.encode("utf-8", "surrogateescape")
 
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -60,7 +60,11 @@ class _Guard(BaseHTTPMiddleware):
         if request.headers.get("host", "") not in _ALLOWED_HOSTS:
             return _forbidden()
         supplied = request.headers.get(TOKEN_HEADER) or request.query_params.get("token") or ""
-        if not hmac.compare_digest(supplied, self._token):
+        # Compared as bytes: compare_digest raises TypeError on non-ASCII *str*, and a
+        # crash inside the security boundary would escape to ServerErrorMiddleware —
+        # a 500 with no CSP and a traceback on the terminal. surrogateescape keeps any
+        # undecodable byte sequence comparable instead of raising a second time.
+        if not hmac.compare_digest(supplied.encode("utf-8", "surrogateescape"), self._token):
             return _forbidden()
         response = await call_next(request)
         response.headers["content-security-policy"] = _CSP
@@ -68,7 +72,14 @@ class _Guard(BaseHTTPMiddleware):
 
 
 def create_app(token: str, config_arg: str | None = None) -> Starlette:
-    """Build the GUI app. ``config_arg`` is the CLI's --config passthrough."""
+    """Build the GUI app. ``config_arg`` is the CLI's --config passthrough.
+
+    Raises :class:`ValueError` on an empty token: an empty credential compares equal
+    to a request that supplies none, so such an app would serve everything to anyone.
+    The boundary refuses to be built unarmed rather than trusting its caller.
+    """
+    if not token:
+        raise ValueError("A non-empty GUI token is required.")
 
     async def index(request: Request) -> FileResponse:
         """Serve the dashboard page itself (still behind the guard)."""
