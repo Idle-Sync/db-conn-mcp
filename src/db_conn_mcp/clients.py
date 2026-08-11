@@ -276,3 +276,29 @@ def injected_command(spec: ClientSpec, name: str = "db-conn-mcp") -> str | None:
         command = entry.get("command")
         return command.get("path") if isinstance(command, dict) else None
     return entry.get("command")
+
+
+def injected_launch(spec: ClientSpec, name: str = "db-conn-mcp") -> tuple[str, list[str]] | None:
+    """Return the full ``(command, args)`` of an injected entry, or None.
+
+    Like :func:`injected_command` but including the entry's args, which carry the
+    ``--config`` path a verification spawn needs. Never raises.
+    """
+    try:
+        data = read_config(spec)
+    except ClientConfigError:
+        return None
+    container = data.get(_CONTAINER_KEY[spec.fmt])
+    if not isinstance(container, dict) or name not in container:
+        return None
+    entry = container[name]
+    if not isinstance(entry, dict):
+        return None
+    if spec.fmt == "zed":
+        command = entry.get("command")
+        if not isinstance(command, dict) or not isinstance(command.get("path"), str):
+            return None
+        return command["path"], list(command.get("args") or [])
+    if not isinstance(entry.get("command"), str):
+        return None
+    return entry["command"], list(entry.get("args") or [])
