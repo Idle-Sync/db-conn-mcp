@@ -432,7 +432,10 @@ def _uninject_interactive() -> int:
             print(f"  - {spec.label} [{spec.fmt}]: {spec.path}")
     injected = [s for s in detected if is_injected(s)]
     if not injected:
-        print("db-conn-mcp is not injected into any detected MCP client.")
+        # Only hedge when there is something we could not check: an unreadable config may
+        # well hold an entry, so claiming "any detected client" would overclaim.
+        scope = "any client it could check" if unreadable else "any detected MCP client"
+        print(f"db-conn-mcp is not injected into {scope}.")
         return 0
     print("Clients with db-conn-mcp injected:")
     for i, spec in enumerate(injected, 1):

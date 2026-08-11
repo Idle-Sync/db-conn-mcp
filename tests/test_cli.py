@@ -567,13 +567,16 @@ def test_cmd_clients_remove_uninjects(tmp_path, monkeypatch):
     assert "keep" in data["mcpServers"]
 
 
-def test_cmd_clients_remove_when_none_injected(tmp_path, monkeypatch):
+def test_cmd_clients_remove_when_none_injected(tmp_path, monkeypatch, capsys):
+    """Every config parsed, so the plain sentence stands — no hedging for the common case."""
     client_cfg = tmp_path / "claude.json"
     client_cfg.write_text("{}", encoding="utf-8")
     fake = cli.ClientSpec("claude", "Claude Desktop", client_cfg, "mcpServers")
     monkeypatch.setattr(cli, "detected_clients", lambda: [fake])
     rc = cli.cmd_clients(remove=True)
     assert rc == 0  # clean no-op
+    out = capsys.readouterr().out
+    assert out.strip() == "db-conn-mcp is not injected into any detected MCP client."
 
 
 # ---- check (doctor) ----------------------------------------------------------
@@ -943,8 +946,10 @@ def test_uninject_flags_an_unreadable_config_when_nothing_injected(tmp_path, mon
     out = capsys.readouterr().out
     assert "Broken Client" in out
     assert str(cfg) in out
-    # The bare "nothing injected" line must not be the whole story.
-    assert out.strip() != "db-conn-mcp is not injected into any detected MCP client."
+    # The bare "nothing injected" line must not be the whole story — and, with a file we
+    # could not read, it must not claim more than it checked.
+    assert "db-conn-mcp is not injected into any client it could check." in out
+    assert "any detected MCP client" not in out
     assert cfg.read_text(encoding="utf-8") == original  # byte-identical
 
 
