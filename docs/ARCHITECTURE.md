@@ -32,7 +32,7 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 | Module | Responsibility | Knows about Postgres? |
 |---|---|---|
 | `cli.py` | Parse args (`--config`, `--transport`); run server or a management subcommand (`setup`/`status`/`add`/`clients`/`remove`/`yolo`); drive the interactive wizard | No |
-| `clients.py` | Known MCP clients: `ClientSpec` (config path + entry format) and the pure inject/remove/detect helpers. Shared by `cli.py` and the doctor | No |
+| `clients.py` | Known MCP clients: `ClientSpec` (config path + entry format + file syntax), the per-syntax `Codec` + `read_config`/`write_config` seam, and the pure inject/remove/detect helpers. Shared by `cli.py` and the doctor | No |
 | `config.py` | Resolve, load, validate, **and save** `connections.json` | No |
 | `models.py` | Pydantic types: `Connection{name, dsn, mode, yolo}`, `Config` | No |
 | `dialects/base.py` | The `Dialect` ABC — the extensibility contract | No |
@@ -117,6 +117,14 @@ Resulting `connections.json`:
 ```
 
 **Config resolution order** (first match wins): `--config <path>` → `./connections.json` → `~/.db-conn-mcp/connections.json`.
+
+### Client injection (`clients.py`) — three axes, one seam
+
+The second half of the wizard writes this server into whichever MCP clients the machine already has. Known clients differ on **three independent axes**, and a `ClientSpec`'s `fmt` names the combination: the **container key** the entry lives under (`mcpServers` for Claude Desktop/Cursor/Agy/Windsurf/Claude Code/Cline, `servers` for VS Code, `context_servers` for Zed, `mcp_servers` for Codex), the **entry shape** `_build_entry` produces (flat `command` + `args`; VS Code's extra `type: "stdio"`; Zed's nested `command: {path, args}`; Codex's `startup_timeout_sec`), and the **file syntax** — nine clients, but not nine JSON files: Codex's `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) is TOML.
+
+Syntax is isolated behind a frozen `Codec` (a user-facing `name` — `"JSON"`, `"TOML"` — plus `loads` / `dumps` / `empty` and the parse errors to catch), one per format in `_CODEC`. Every caller reaches a config through `read_config(spec)` and `write_config(spec, data)`, so nothing above that seam knows whether it is holding JSON or TOML, and adding a client in a new syntax is one `Codec` rather than a branch in each caller. The TOML codec is `tomlkit`, which round-trips comments and layout — a hand-maintained `config.toml` survives a read-merge-write intact.
+
+`read_config` draws the one distinction the safety of this flow rests on: an **absent** file yields a fresh empty document (creating it is the point), while a file that **exists and does not parse — or parses to something that is not a mapping** — raises `ClientConfigError`. Injection and removal then skip that client — naming its path and the failure category (the codec's `name`, so "not valid JSON", never an internal token) only, never the file's contents (Rule 6) — rather than writing a clean config over content they could not understand, which would silently discard the user's other MCP servers. Every raise is `from None`: a parser's exception quotes the offending source text, so keeping it as `__cause__` would print the file's contents in any traceback. The client still appears in the CLI's listings, marked unreadable, and `doctor` raises a `client_paths` warning for it, so it can be repaired by hand and the command re-run.
 
 ---
 
@@ -340,7 +348,7 @@ class Finding(TypedDict):
 | `pypi_latest` | Is a newer release published? (cache-bypassed lookup) | `warn` + `upgrade_package`, quoting the `--no-cache-dir` command |
 | `config_schema` | Unknown keys / wrong value types in `connections.json`? | `warn` with a did-you-mean hint, or `fail` on an invalid value |
 | `secrets_exposure` | Is the plaintext-DSN config world-readable or un-ignored in git? | `warn` (mode bits) / `fail` (committable) |
-| `client_paths` | Does each injected client entry still point at a real command? | `warn` + `repair_client_config` |
+| `client_paths` | Does each injected client entry still point at a real command — and can each detected client's config be parsed at all? | `warn` + `repair_client_config` |
 | `connectivity` | Is each configured database reachable? | `fail` with the sanitized cause, plus `port_identity` findings (see below) |
 
 **Two seams the engine reuses rather than reimplements.** `clients.py` was extracted out of `cli.py` so the `client_paths` check can ask "which clients exist, and what command did we inject?" without importing `cli.py` — which already imports `doctor`, so that would be a circular import. And the port-identity probe is a new `Dialect.probe_listener(host, port)` method, so *how you tell a Postgres from something else on a port* stays inside the dialect: the Postgres implementation opens a TCP connection, writes the 8-byte `SSLRequest`, and reads the single `S`/`N` status byte. **No credentials are ever sent**, and the probe reports only a boolean — the host never reaches a finding.

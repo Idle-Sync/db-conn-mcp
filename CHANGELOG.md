@@ -11,7 +11,49 @@ the time of that release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Codex is now a setup target.** `db-conn-mcp setup` and `db-conn-mcp clients` detect
+  `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) and write a `[mcp_servers.db-conn-mcp]`
+  entry, bringing the auto-injection list to nine clients. One entry covers the ChatGPT
+  desktop app, the Codex CLI and the IDE extension, which share that file. Your comments,
+  formatting and other MCP servers in that file are preserved. The entry carries an explicit
+  `startup_timeout_sec = 30`, because Codex's 10s default can be tight for Python startup on
+  a cold disk.
+
+- **`doctor` now flags a client config it cannot read.** A detected MCP client whose config
+  file does not parse gets a `client_paths` warning (`repair_client_config`) telling you to fix
+  that file by hand and re-run `db-conn-mcp clients`. Previously `clients` and `status` both
+  showed the problem while `doctor` — the one command whose whole job is diagnostics — stayed
+  silent about it. The finding names the client and the path, never the file's contents.
+
+### Fixed
+
+- **A client config that is not valid UTF-8 no longer crashes `db-conn-mcp status`.** Reading a
+  client's config used to guard against a bad-JSON or an I/O error but not against undecodable
+  bytes, so a config saved in a non-UTF-8 encoding took the whole command down with a traceback.
+  Such a file is now treated like any other unreadable config: the client is listed as
+  `config unreadable` and left untouched. `doctor` and the injection commands were affected the
+  same way.
+
+### Breaking / Behaviour changes
+
+- **A client config file that exists but does not parse is no longer overwritten.** Previously,
+  if `setup` or `clients` could not read a client's config, it treated the file as empty and
+  wrote a fresh one — silently discarding whatever was in there, including your other MCP
+  servers. It now skips that client, tells you which file it could not parse, and leaves the
+  file untouched. The client still appears in every listing — `setup`, `status` and
+  `clients --remove` — marked `config unreadable`, so you can fix it by hand and re-run.
+  `clients --remove` reports it without offering it as a removal target (uninjecting means
+  rewriting the file, which is exactly what we refuse to do), so it no longer answers a broken
+  config with a bare "not injected into any detected MCP client". "Could not read" covers a
+  syntax error, an unreadable file, and a file whose top level is not an object. This affects
+  all nine clients, not just Codex.
+
+### Changed
+
+- Adds one dependency, **`tomlkit`** (pure Python, no transitive dependencies). Codex's config
+  is TOML, and the standard library has a TOML *reader* but no writer at any Python version.
 
 ## [0.5.5] — 2026-08-10
 
