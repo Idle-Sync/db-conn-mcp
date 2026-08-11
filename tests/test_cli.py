@@ -300,6 +300,7 @@ def test_client_specs_cover_expected(monkeypatch):
         "cline",
         "vscode",
         "zed",
+        "codex",
     } <= keys
 
 

@@ -1,18 +1,30 @@
 """The codec seam: syntax-aware read/write behind one format-agnostic interface."""
 
 import json
+import tomllib
 
 import pytest
+import tomlkit
 
 from db_conn_mcp.clients import (
     ClientConfigError,
     ClientSpec,
+    _build_entry,
+    client_specs,
     config_readable,
+    inject_entry,
     injected_command,
     is_injected,
     read_config,
+    remove_entry,
     write_config,
 )
+
+#: A path that breaks naive TOML basic-string formatting twice over:
+#: ``\U`` opens a Unicode escape (loud failure), ``\t`` becomes a TAB (silent
+#: corruption). Every serialization test uses it deliberately.
+NASTY_PATH = r"C:\Users\dj\.local\bin\db-conn-mcp.exe"
+NASTY_ARG = r"C:\Users\dj\testing\connections.json"
 
 
 def _json_spec(tmp_path):
@@ -96,3 +108,115 @@ def test_config_readable_reports_parse_state(tmp_path):
     assert config_readable(spec) is False
     spec.path.write_text("{}", encoding="utf-8")
     assert config_readable(spec) is True
+
+
+def _codex_spec(tmp_path):
+    return ClientSpec("codex", "Codex", tmp_path / "config.toml", "codex")
+
+
+def test_codex_spec_is_registered(monkeypatch):
+    by_key = {s.key: s for s in client_specs()}
+    assert by_key["codex"].fmt == "codex"
+    assert by_key["codex"].path.name == "config.toml"
+
+
+def test_codex_path_defaults_to_dot_codex(tmp_path, monkeypatch):
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr("db_conn_mcp.clients.Path.home", lambda: tmp_path)
+    by_key = {s.key: s for s in client_specs()}
+    assert by_key["codex"].path == tmp_path / ".codex" / "config.toml"
+
+
+def test_codex_home_env_var_overrides(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "elsewhere"))
+    by_key = {s.key: s for s in client_specs()}
+    assert by_key["codex"].path == tmp_path / "elsewhere" / "config.toml"
+
+
+def test_empty_codex_home_is_ignored(tmp_path, monkeypatch):
+    """An exported-but-blank CODEX_HOME must not resolve to './config.toml'."""
+    monkeypatch.setenv("CODEX_HOME", "")
+    monkeypatch.setattr("db_conn_mcp.clients.Path.home", lambda: tmp_path)
+    by_key = {s.key: s for s in client_specs()}
+    assert by_key["codex"].path == tmp_path / ".codex" / "config.toml"
+
+
+def test_codex_entry_shape():
+    entry = _build_entry("codex", NASTY_PATH, ["--config", NASTY_ARG])
+    assert entry == {
+        "command": NASTY_PATH,
+        "args": ["--config", NASTY_ARG],
+        "startup_timeout_sec": 30,
+    }
+    assert "transport" not in entry  # stdio is implied by `command`
+
+
+def test_codex_uses_mcp_servers_container():
+    out = inject_entry(tomlkit.document(), "codex", "db-conn-mcp", "cmd", [])
+    assert "mcp_servers" in out
+
+
+def test_windows_path_roundtrips_through_stdlib_tomllib(tmp_path):
+    """The escape bug, pinned by an *independent* oracle.
+
+    Checking tomlkit against tomlkit would prove nothing about backslashes, so the
+    written bytes are re-parsed with stdlib tomllib.
+    """
+    spec = _codex_spec(tmp_path)
+    write_config(
+        spec,
+        inject_entry(
+            read_config(spec), "codex", "db-conn-mcp", NASTY_PATH, ["--config", NASTY_ARG]
+        ),
+    )
+    written = spec.path.read_text(encoding="utf-8")
+    parsed = tomllib.loads(written)["mcp_servers"]["db-conn-mcp"]
+    assert parsed["command"] == NASTY_PATH
+    assert parsed["args"] == ["--config", NASTY_ARG]
+    assert parsed["startup_timeout_sec"] == 30
+    assert "\t" not in parsed["command"]  # \t must not have become a real TAB
+
+
+def test_inject_preserves_comments_and_other_servers(tmp_path):
+    spec = _codex_spec(tmp_path)
+    spec.path.write_text(
+        "# My Codex config -- hand maintained.\n"
+        'model = "gpt-5"\n'
+        "\n"
+        "[mcp_servers.other]\n"
+        'command = "other-server"  # keep me\n',
+        encoding="utf-8",
+    )
+    write_config(spec, inject_entry(read_config(spec), "codex", "db-conn-mcp", NASTY_PATH, []))
+    after = spec.path.read_text(encoding="utf-8")
+    assert "# My Codex config -- hand maintained." in after
+    assert "# keep me" in after
+    assert tomllib.loads(after)["mcp_servers"]["other"]["command"] == "other-server"
+    assert tomllib.loads(after)["model"] == "gpt-5"
+
+
+def test_uninject_preserves_comments_and_other_servers(tmp_path):
+    spec = _codex_spec(tmp_path)
+    spec.path.write_text(
+        "# My Codex config -- hand maintained.\n"
+        "\n"
+        "[mcp_servers.other]\n"
+        'command = "other-server"  # keep me\n',
+        encoding="utf-8",
+    )
+    write_config(spec, inject_entry(read_config(spec), "codex", "db-conn-mcp", NASTY_PATH, []))
+    write_config(spec, remove_entry(read_config(spec), "codex", "db-conn-mcp"))
+    after = spec.path.read_text(encoding="utf-8")
+    assert "# My Codex config -- hand maintained." in after
+    assert "# keep me" in after
+    parsed = tomllib.loads(after)
+    assert "db-conn-mcp" not in parsed["mcp_servers"]
+    assert parsed["mcp_servers"]["other"]["command"] == "other-server"
+
+
+def test_is_injected_and_injected_command_work_for_codex(tmp_path):
+    spec = _codex_spec(tmp_path)
+    assert is_injected(spec) is False
+    write_config(spec, inject_entry(read_config(spec), "codex", "db-conn-mcp", NASTY_PATH, []))
+    assert is_injected(spec) is True
+    assert injected_command(spec) == NASTY_PATH

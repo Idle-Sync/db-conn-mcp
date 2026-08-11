@@ -18,6 +18,12 @@ import tomlkit
 #: axes on which known clients differ. Values are NOT all JSON: ``codex`` is TOML.
 ClientFormat = Literal["mcpServers", "vscode", "zed", "codex"]
 
+#: Codex's own default is 10s, which Python interpreter startup plus imports can
+#: approach on a cold Windows disk. The resulting failure surfaces to the user as a
+#: Codex timeout rather than as anything naming this server, so the entry carries a
+#: deliberate, roomier value.
+CODEX_STARTUP_TIMEOUT_SECONDS = 30
+
 
 @dataclass(frozen=True)
 class ClientSpec:
@@ -34,6 +40,7 @@ _CONTAINER_KEY: dict[ClientFormat, str] = {
     "mcpServers": "mcpServers",
     "vscode": "servers",
     "zed": "context_servers",
+    "codex": "mcp_servers",
 }
 
 
@@ -123,6 +130,13 @@ def _build_entry(fmt: ClientFormat, command: str, args: list[str]) -> dict:
         return {"type": "stdio", "command": command, "args": args}
     if fmt == "zed":
         return {"source": "custom", "command": {"path": command, "args": args}}
+    if fmt == "codex":
+        # No `transport` key: Codex infers stdio from `command`, HTTP from `url`.
+        return {
+            "command": command,
+            "args": args,
+            "startup_timeout_sec": CODEX_STARTUP_TIMEOUT_SECONDS,
+        }
     return {"command": command, "args": args}  # mcpServers (Claude/Cursor/Windsurf/...)
 
 
@@ -166,6 +180,10 @@ def client_specs() -> list[ClientSpec]:
         / "settings"
         / "cline_mcp_settings.json"
     )
+    # CODEX_HOME relocates Codex's whole state directory; an exported-but-empty value
+    # is not a relocation. This is the first client whose path is env-var-aware.
+    codex_home = os.environ.get("CODEX_HOME") or None
+    codex = (Path(codex_home) if codex_home else home / ".codex") / "config.toml"
     return [
         ClientSpec("claude", "Claude Desktop", claude, "mcpServers"),
         ClientSpec("cursor", "Cursor", home / ".cursor" / "mcp.json", "mcpServers"),
@@ -183,6 +201,9 @@ def client_specs() -> list[ClientSpec]:
         ClientSpec("cline", "Cline", cline, "mcpServers"),
         ClientSpec("vscode", "VS Code", vscode_user / "mcp.json", "vscode"),
         ClientSpec("zed", "Zed", zed, "zed"),
+        # Codex — TOML, not JSON. One entry covers the ChatGPT desktop app, the Codex
+        # CLI and the IDE extension, which share this file.
+        ClientSpec("codex", "Codex", codex, "codex"),
     ]
 
 
