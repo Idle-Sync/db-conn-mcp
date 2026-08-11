@@ -11,6 +11,13 @@ the time of that release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.5.6] — 2026-08-11
+
+Codex joins the setup targets, and no client config you have is overwritten any more when it
+cannot be read. Still 23 tools and 2 prompts — nothing about querying your databases changed.
+
 ### Added
 
 - **Codex is now a setup target.** `db-conn-mcp setup` and `db-conn-mcp clients` detect
@@ -355,7 +362,8 @@ agents.
 - Setup and management CLI — `setup`, `status`, `add`, `clients`, `check`, `remove`, `yolo` —
   with auto-injection into 8 MCP clients.
 
-[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.6...HEAD
+[0.5.6]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.2...v0.5.3
