@@ -6,13 +6,17 @@ Extracted from ``cli.py`` so ``doctor.py`` can reuse it without a circular impor
 import json
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-#: How an MCP client stores server entries. Each value maps to a container key +
-#: entry shape in :func:`inject_entry`.
-ClientFormat = Literal["mcpServers", "vscode", "zed"]
+import tomlkit
+
+#: How an MCP client stores server entries. Each value maps to a container key, an
+#: entry shape (:func:`_build_entry`) and a file syntax (:data:`_CODEC`) — the three
+#: axes on which known clients differ. Values are NOT all JSON: ``codex`` is TOML.
+ClientFormat = Literal["mcpServers", "vscode", "zed", "codex"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,86 @@ _CONTAINER_KEY: dict[ClientFormat, str] = {
     "vscode": "servers",
     "zed": "context_servers",
 }
+
+
+class ClientConfigError(Exception):
+    """A client config file exists but could not be read or parsed.
+
+    Raised instead of returning an empty document, so a read-merge-write can never
+    silently overwrite a file whose contents we failed to understand. Messages name
+    the client and its path only — never the file's contents (Rule 6).
+    """
+
+
+@dataclass(frozen=True)
+class Codec:
+    """Text <-> mapping for one config-file syntax."""
+
+    loads: Callable[[str], dict]
+    dumps: Callable[[dict], str]
+    empty: Callable[[], dict]
+    #: Parse failures to catch. Kept explicit so the callers' ``except`` stays narrow.
+    errors: tuple[type[Exception], ...]
+
+
+def _json_dumps(data: dict) -> str:
+    """Serialize to JSON in exactly today's shape (indent=2, trailing newline)."""
+    return json.dumps(data, indent=2) + "\n"
+
+
+_JSON_CODEC = Codec(
+    loads=json.loads,
+    dumps=_json_dumps,
+    empty=dict,
+    errors=(json.JSONDecodeError,),
+)
+
+#: tomlkit round-trips comments and layout, so a hand-maintained config.toml
+#: survives a read-merge-write intact.
+_TOML_CODEC = Codec(
+    loads=tomlkit.parse,
+    dumps=tomlkit.dumps,
+    empty=tomlkit.document,
+    errors=(tomlkit.exceptions.TOMLKitError,),
+)
+
+#: Which syntax each format is written in.
+_CODEC: dict[ClientFormat, Codec] = {
+    "mcpServers": _JSON_CODEC,
+    "vscode": _JSON_CODEC,
+    "zed": _JSON_CODEC,
+    "codex": _TOML_CODEC,
+}
+
+
+def read_config(spec: ClientSpec) -> dict:
+    """Parse a client's config file into a mutable mapping.
+
+    An **absent** file yields a fresh empty document — creating it is the point. A
+    file that exists but cannot be read or parsed raises :class:`ClientConfigError`,
+    so callers refuse to write rather than clobbering something they did not
+    understand.
+    """
+    codec = _CODEC[spec.fmt]
+    try:
+        text = spec.path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return codec.empty()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ClientConfigError(
+            f"{spec.label}: {spec.path} could not be read ({type(exc).__name__})"
+        ) from exc
+    try:
+        return codec.loads(text)
+    except codec.errors as exc:
+        raise ClientConfigError(
+            f"{spec.label}: {spec.path} is not valid {spec.fmt} config ({type(exc).__name__})"
+        ) from exc
+
+
+def write_config(spec: ClientSpec, data: dict) -> None:
+    """Serialize ``data`` back to the client's config file in its own syntax."""
+    spec.path.write_text(_CODEC[spec.fmt].dumps(data), encoding="utf-8")
 
 
 def _build_entry(fmt: ClientFormat, command: str, args: list[str]) -> dict:
