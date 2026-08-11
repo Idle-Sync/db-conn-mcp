@@ -1,5 +1,7 @@
 """The GUI web app: guard middleware, summary, and (later tasks) the full API."""
 
+from pathlib import Path
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -90,3 +92,74 @@ def test_forbidden_body_discloses_nothing(client):
     """The 403 body is a fixed token — never a reason, path, or credential echo."""
     r = client.get("/api/summary", headers={"host": "evil.example:31415"})
     assert r.json() == {"error": "forbidden"}
+
+
+def test_verify_client_endpoint_calls_engine(client, monkeypatch):
+    from db_conn_mcp.gui import app as gui_app
+
+    async def fake_verify_client(spec, timeout=20.0):
+        return {"verdict": "answers", "detail": "ok", "command": "x", "args": []}
+
+    monkeypatch.setattr(gui_app, "verify_client", fake_verify_client)
+    r = client.post("/api/verify/client/claude", headers={TOKEN_HEADER: TOKEN})
+    # 'claude' may not be detected on CI; unknown key must 404, detected key 200.
+    assert r.status_code in (200, 404)
+
+
+def test_verify_client_returns_the_engine_result(client, monkeypatch):
+    """Pin the 200 path deterministically: a detected client's result is the body."""
+    from db_conn_mcp import clients as clients_mod
+    from db_conn_mcp.clients import ClientSpec
+    from db_conn_mcp.gui import app as gui_app
+
+    spec = ClientSpec(key="fake", label="Fake", path=Path("nowhere.json"), fmt="mcpServers")
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [spec])
+    payload = {"verdict": "answers", "detail": "ok", "command": "x", "args": []}
+
+    async def fake_verify_client(target, timeout=20.0):
+        assert target is spec
+        return payload
+
+    monkeypatch.setattr(gui_app, "verify_client", fake_verify_client)
+    r = client.post("/api/verify/client/fake", headers={TOKEN_HEADER: TOKEN})
+    assert r.status_code == 200
+    assert r.json() == payload
+
+
+def test_verify_unknown_client_404(client):
+    r = client.post("/api/verify/client/nope", headers={TOKEN_HEADER: TOKEN})
+    assert r.status_code == 404
+    assert r.json() == {"error": "unknown or undetected client"}
+
+
+def test_verify_is_post_only(client):
+    assert client.get("/api/verify/http", headers={TOKEN_HEADER: TOKEN}).status_code == 405
+
+
+def test_verify_http_without_a_config_is_409(client, monkeypatch):
+    """No config means nothing to launch — a fixed 409, never a path echo (Rule 6)."""
+    from db_conn_mcp import config
+
+    def boom(explicit=None):
+        raise config.ConfigError("none")
+
+    monkeypatch.setattr(config, "resolve_path", boom)
+    r = client.post("/api/verify/http", headers={TOKEN_HEADER: TOKEN})
+    assert r.status_code == 409
+    assert r.json() == {"error": "no configuration found"}
+
+
+def test_verify_http_calls_engine(client, monkeypatch, tmp_path):
+    from db_conn_mcp import config
+    from db_conn_mcp.gui import app as gui_app
+
+    monkeypatch.setattr(config, "resolve_path", lambda explicit=None: tmp_path / "connections.json")
+    payload = {"verdict": "answers", "detail": "ok", "command": "x", "args": []}
+
+    async def fake_verify_http(command, args, port=8000, timeout=30.0):
+        return payload
+
+    monkeypatch.setattr(gui_app, "verify_http", fake_verify_http)
+    r = client.post("/api/verify/http", headers={TOKEN_HEADER: TOKEN})
+    assert r.status_code == 200
+    assert r.json() == payload
