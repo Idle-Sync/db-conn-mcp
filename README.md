@@ -196,7 +196,7 @@ The server exposes **23 tools** and **2 prompts**:
 | `show_activity` | insight | Sanitized `pg_stat_activity`: pid, state, wait events, query age — **no user names, client addresses, or query text** (text is opt-in and truncated). |
 | `set_yolo_mode` | config | Enable/disable `yolo` for one database (persisted). |
 | `check_database` | doctor | Test one database (or all) → `OK` or a sanitized diagnostic; reports `active_port` when a fallback port answered, and `failed_port` on an `UNREACHABLE` row when the failure that ended the probe chain (auth, TLS, DB-not-found, …) came from a probed fallback port rather than the primary. |
-| `doctor` | doctor | Diagnose the **whole setup**, not just connectivity: stale running server processes, a newer PyPI release, `connections.json` key typos/wrong types, secrets exposure (file permissions, git), MCP client entries pointing at dead paths, and per-database connectivity with a credential-free fallback-port identity probe. Returns `{check, status, detail, suggested_action}` rows; `offline=true` skips the PyPI lookup. |
+| `doctor` | doctor | Diagnose the **whole setup**, not just connectivity: stale running server processes, a newer PyPI release, `connections.json` key typos/wrong types, secrets exposure (file permissions, git), MCP client entries pointing at dead paths (and client config files that no longer parse), and per-database connectivity with a credential-free fallback-port identity probe. Returns `{check, status, detail, suggested_action}` rows; `offline=true` skips the PyPI lookup. |
 
 **Prompts:**
 - `troubleshoot_connection` — a discoverable, full connection-gotchas checklist (host/port, firewall, `sslmode`, Docker `localhost`, db-name case, pool limits, …).

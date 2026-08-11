@@ -21,6 +21,12 @@ the time of that release.
   `startup_timeout_sec = 30`, because Codex's 10s default can be tight for Python startup on
   a cold disk.
 
+- **`doctor` now flags a client config it cannot read.** A detected MCP client whose config
+  file does not parse gets a `client_paths` warning (`repair_client_config`) telling you to fix
+  that file by hand and re-run `db-conn-mcp clients`. Previously `clients` and `status` both
+  showed the problem while `doctor` — the one command whose whole job is diagnostics — stayed
+  silent about it. The finding names the client and the path, never the file's contents.
+
 ### Fixed
 
 - **A client config that is not valid UTF-8 no longer crashes `db-conn-mcp status`.** Reading a

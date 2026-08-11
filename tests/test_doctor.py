@@ -233,16 +233,29 @@ def test_client_paths_skips_a_detected_client_without_the_entry(tmp_path, monkey
     assert "no detected MCP client" in f["detail"]
 
 
-def test_client_paths_survives_an_unparseable_client_config(tmp_path, monkeypatch):
-    """doctor reads clients only through is_injected/injected_command, which swallow
-    ClientConfigError — so a broken config must never surface as a crashed check
-    (a traceback would print the parser's cause, echoing the file's contents)."""
+def test_client_paths_warns_on_an_unparseable_client_config(tmp_path, monkeypatch):
+    """The one command whose job is diagnostics must not stay silent about a config
+    that `clients` and `status` both flag. The detail names the client and path only —
+    a traceback or an echoed body would leak whatever the file holds."""
     cfg = tmp_path / "client.json"
     cfg.write_text('{ "mcpServers": { "secret-token-abc123": ', encoding="utf-8")
     spec = clients_mod.ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
     monkeypatch.setattr(clients_mod, "detected_clients", lambda: [spec])
     (f,) = check_client_paths(CheckContext(config_path=None, offline=True))
-    assert f["status"] == "ok"
+    assert f["status"] == "warn"
+    assert f["suggested_action"] == "repair_client_config"
+    assert "Claude Desktop" in f["detail"]
+    assert "secret-token-abc123" not in f["detail"]
+
+
+def test_client_paths_warns_on_a_non_mapping_client_config(tmp_path, monkeypatch):
+    """Valid JSON with an array at the top level is unusable the same way."""
+    cfg = tmp_path / "client.json"
+    cfg.write_text('["secret-token-abc123"]', encoding="utf-8")
+    spec = clients_mod.ClientSpec("claude", "Claude Desktop", cfg, "mcpServers")
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [spec])
+    (f,) = check_client_paths(CheckContext(config_path=None, offline=True))
+    assert f["status"] == "warn"
     assert "secret-token-abc123" not in f["detail"]
 
 

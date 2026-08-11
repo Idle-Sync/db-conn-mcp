@@ -344,10 +344,26 @@ def check_secrets_exposure(ctx: CheckContext) -> list[Finding]:
 
 
 def check_client_paths(ctx: CheckContext) -> list[Finding]:
-    """Use case 6: injected client entries whose command path no longer exists."""
+    """Use case 6: injected client entries whose command path no longer exists.
+
+    Also reports a detected client whose config cannot be parsed at all: injection
+    silently skips such a file, and every other command flags it, so the diagnostics
+    command must too. Findings name the client label and path — never the contents.
+    """
     name = "client_paths"
     findings: list[Finding] = []
     for spec in clients.detected_clients():
+        if not clients.config_readable(spec):
+            findings.append(
+                finding(
+                    name,
+                    "warn",
+                    f"{spec.label}: {spec.path} could not be parsed, so db-conn-mcp will "
+                    "not touch it — fix that file by hand, then run `db-conn-mcp clients`",
+                    "repair_client_config",
+                )
+            )
+            continue
         if not clients.is_injected(spec):
             continue
         command = clients.injected_command(spec)
