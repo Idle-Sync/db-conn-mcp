@@ -421,7 +421,16 @@ def cmd_clients(config_arg: str | None = None, remove: bool = False) -> int:
 
 def _uninject_interactive() -> int:
     """List clients that currently have db-conn-mcp and remove it from the chosen ones."""
-    injected = [s for s in detected_clients() if is_injected(s)]
+    detected = detected_clients()
+    # Reported but never numbered: db-conn-mcp may well be in a config we could not parse,
+    # yet rewriting that file would destroy it. is_injected is False for those, so the
+    # numbered list below stays exactly the clients we can safely rewrite.
+    unreadable = [s for s in detected if not config_readable(s)]
+    if unreadable:
+        print("Not checked — config unreadable, fix by hand then re-run:")
+        for spec in unreadable:
+            print(f"  - {spec.label} [{spec.fmt}]: {spec.path}")
+    injected = [s for s in detected if is_injected(s)]
     if not injected:
         print("db-conn-mcp is not injected into any detected MCP client.")
         return 0

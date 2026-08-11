@@ -932,6 +932,57 @@ def test_injection_menu_marks_an_unreadable_config(tmp_path, monkeypatch, capsys
     assert "secret-token-abc123" not in out  # Rule 6
 
 
+def test_uninject_flags_an_unreadable_config_when_nothing_injected(tmp_path, monkeypatch, capsys):
+    """`clients --remove` must not claim a clean slate when a config could not be read."""
+    cfg = tmp_path / "broken.json"
+    original = '{ "mcpServers": { "other": '  # truncated on purpose
+    cfg.write_text(original, encoding="utf-8")
+    spec = cli.ClientSpec("broken", "Broken Client", cfg, "mcpServers")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [spec])
+    assert cli.cmd_clients(remove=True) == 0
+    out = capsys.readouterr().out
+    assert "Broken Client" in out
+    assert str(cfg) in out
+    # The bare "nothing injected" line must not be the whole story.
+    assert out.strip() != "db-conn-mcp is not injected into any detected MCP client."
+    assert cfg.read_text(encoding="utf-8") == original  # byte-identical
+
+
+def test_uninject_numbering_skips_an_unreadable_config(tmp_path, monkeypatch, capsys):
+    """The unreadable client is flagged but unselectable, so '1' still means the injected one."""
+    broken = tmp_path / "broken.json"
+    broken_original = "{ not json at all"
+    broken.write_text(broken_original, encoding="utf-8")
+    good = tmp_path / "good.json"
+    good.write_text(
+        json.dumps({"mcpServers": {"db-conn-mcp": {"command": "x"}, "keep": {}}}), encoding="utf-8"
+    )
+    specs = [
+        cli.ClientSpec("broken", "Broken Client", broken, "mcpServers"),
+        cli.ClientSpec("claude", "Claude Desktop", good, "mcpServers"),
+    ]
+    monkeypatch.setattr(cli, "detected_clients", lambda: specs)
+    monkeypatch.setattr(builtins, "input", _scripted_input(["1"]))
+    assert cli.cmd_clients(remove=True) == 0
+    out = capsys.readouterr().out
+    assert "Broken Client" in out  # flagged...
+    assert "1. Claude Desktop" in out  # ...but never numbered
+    data = json.loads(good.read_text(encoding="utf-8"))
+    assert "db-conn-mcp" not in data["mcpServers"]  # '1' removed from the injected client
+    assert "keep" in data["mcpServers"]
+    assert broken.read_text(encoding="utf-8") == broken_original  # untouched
+
+
+def test_uninject_never_echoes_the_broken_config_contents(tmp_path, monkeypatch, capsys):
+    """Rule 6: the notice names the client and the path only."""
+    cfg = tmp_path / "array.json"
+    cfg.write_text('["secret-token-abc123"]', encoding="utf-8")  # valid JSON, wrong shape
+    spec = cli.ClientSpec("broken", "Broken Client", cfg, "mcpServers")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [spec])
+    assert cli.cmd_clients(remove=True) == 0
+    assert "secret-token-abc123" not in capsys.readouterr().out
+
+
 def test_status_marks_an_unreadable_config(tmp_path, monkeypatch, capsys):
     cfg = tmp_path / "broken.json"
     cfg.write_text('{ "mcpServers": { "secret-token-abc123": ', encoding="utf-8")

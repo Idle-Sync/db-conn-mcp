@@ -42,9 +42,13 @@ the time of that release.
   if `setup` or `clients` could not read a client's config, it treated the file as empty and
   wrote a fresh one — silently discarding whatever was in there, including your other MCP
   servers. It now skips that client, tells you which file it could not parse, and leaves the
-  file untouched. The client still appears in the list, marked `config unreadable`, so you can
-  fix it by hand and re-run. "Could not read" covers a syntax error, an unreadable file, and a
-  file whose top level is not an object. This affects all nine clients, not just Codex.
+  file untouched. The client still appears in every listing — `setup`, `status` and
+  `clients --remove` — marked `config unreadable`, so you can fix it by hand and re-run.
+  `clients --remove` reports it without offering it as a removal target (uninjecting means
+  rewriting the file, which is exactly what we refuse to do), so it no longer answers a broken
+  config with a bare "not injected into any detected MCP client". "Could not read" covers a
+  syntax error, an unreadable file, and a file whose top level is not an object. This affects
+  all nine clients, not just Codex.
 
 ### Changed
 
