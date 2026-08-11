@@ -21,6 +21,15 @@ the time of that release.
   `startup_timeout_sec = 30`, because Codex's 10s default can be tight for Python startup on
   a cold disk.
 
+### Fixed
+
+- **A client config that is not valid UTF-8 no longer crashes `db-conn-mcp status`.** Reading a
+  client's config used to guard against a bad-JSON or an I/O error but not against undecodable
+  bytes, so a config saved in a non-UTF-8 encoding took the whole command down with a traceback.
+  Such a file is now treated like any other unreadable config: the client is listed as
+  `config unreadable` and left untouched. `doctor` and the injection commands were affected the
+  same way.
+
 ### Breaking / Behaviour changes
 
 - **A client config file that exists but does not parse is no longer overwritten.** Previously,
@@ -28,7 +37,8 @@ the time of that release.
   wrote a fresh one — silently discarding whatever was in there, including your other MCP
   servers. It now skips that client, tells you which file it could not parse, and leaves the
   file untouched. The client still appears in the list, marked `config unreadable`, so you can
-  fix it by hand and re-run. This affects all nine clients, not just Codex.
+  fix it by hand and re-run. "Could not read" covers a syntax error, an unreadable file, and a
+  file whose top level is not an object. This affects all nine clients, not just Codex.
 
 ### Changed
 

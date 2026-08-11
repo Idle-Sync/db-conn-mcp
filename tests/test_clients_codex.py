@@ -1,7 +1,8 @@
-"""The codec seam: syntax-aware read/write behind one format-agnostic interface."""
+"""The codec seam (syntax-aware read/write behind one interface) plus Codex's spec."""
 
 import json
 import tomllib
+import traceback
 
 import pytest
 import tomlkit
@@ -88,6 +89,61 @@ def test_read_config_toml_error_never_echoes_file_contents(tmp_path):
     assert "hunter2" not in str(excinfo.value)
 
 
+def test_parse_error_names_the_file_syntax_not_the_container_key(tmp_path):
+    """Rule 6 wants the *category* of failure: 'JSON'/'TOML', not the internal fmt token."""
+    spec = _json_spec(tmp_path)
+    spec.path.write_text("{ not json", encoding="utf-8")
+    with pytest.raises(ClientConfigError) as excinfo:
+        read_config(spec)
+    assert "JSON" in str(excinfo.value)
+    assert "mcpServers" not in str(excinfo.value)
+
+    toml_spec = ClientSpec("codex", "Codex", tmp_path / "config.toml", "codex")
+    toml_spec.path.write_text("this is not = = toml", encoding="utf-8")
+    with pytest.raises(ClientConfigError) as excinfo:
+        read_config(toml_spec)
+    assert "TOML" in str(excinfo.value)
+
+
+def test_parse_error_detaches_its_cause_so_tracebacks_cannot_leak(tmp_path):
+    """tomlkit's ParseError quotes the offending raw key, so it must not ride along
+    as ``__cause__`` — a printed traceback would render the file's contents."""
+    spec = ClientSpec("codex", "Codex", tmp_path / "config.toml", "codex")
+    spec.path.write_text("api_key sk-secret-abc123 = 1\n", encoding="utf-8")
+    with pytest.raises(ClientConfigError) as excinfo:
+        read_config(spec)
+    exc = excinfo.value
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__ is True
+    formatted = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    assert "sk-secret-abc123" not in str(exc)
+    assert "sk-secret-abc123" not in formatted
+
+
+@pytest.mark.parametrize("body", ["[1, 2]", "null", '"just a string"', "42"])
+def test_read_config_rejects_a_non_mapping_top_level(tmp_path, body):
+    """Valid JSON is not enough: read_config promises a mutable *mapping*."""
+    spec = _json_spec(tmp_path)
+    spec.path.write_text(body, encoding="utf-8")
+    with pytest.raises(ClientConfigError):
+        read_config(spec)
+    assert config_readable(spec) is False
+    assert is_injected(spec) is False  # never raises, even on a valid-but-wrong document
+    assert injected_command(spec) is None
+
+
+def test_undecodable_bytes_are_an_unreadable_config_not_a_crash(tmp_path):
+    """UnicodeDecodeError is a ValueError, so the old ``(JSONDecodeError, OSError)``
+    guard missed it and a non-UTF-8 client config took `status` down."""
+    spec = _json_spec(tmp_path)
+    spec.path.write_bytes(b'{"mcpServers": {"\xff\xfe": {}}}')
+    with pytest.raises(ClientConfigError):
+        read_config(spec)
+    assert config_readable(spec) is False
+    assert is_injected(spec) is False
+    assert injected_command(spec) is None
+
+
 def test_is_injected_returns_false_for_unparseable_config(tmp_path):
     """Non-raising contract preserved: unreadable means 'cannot prove injected'."""
     spec = _json_spec(tmp_path)
@@ -114,7 +170,7 @@ def _codex_spec(tmp_path):
     return ClientSpec("codex", "Codex", tmp_path / "config.toml", "codex")
 
 
-def test_codex_spec_is_registered(monkeypatch):
+def test_codex_spec_is_registered():
     by_key = {s.key: s for s in client_specs()}
     assert by_key["codex"].fmt == "codex"
     assert by_key["codex"].path.name == "config.toml"

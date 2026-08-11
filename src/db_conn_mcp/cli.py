@@ -442,6 +442,8 @@ def _uninject_from_client(spec: ClientSpec) -> None:
     """Remove the db-conn-mcp entry from one client's config, preserving the rest."""
     try:
         existing = read_config(spec)
+    # Unreachable from `clients --remove`, which only offers configs that parsed
+    # (is_injected is False for the rest). Kept as the guard for any other caller.
     except ClientConfigError as exc:
         print(f"  Skipped {spec.label}: {exc}")
         return

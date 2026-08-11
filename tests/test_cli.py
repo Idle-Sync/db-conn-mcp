@@ -897,9 +897,49 @@ def test_uninject_refuses_to_clobber_unparseable_config(tmp_path, capsys):
     assert cfg.read_text(encoding="utf-8") == original
 
 
+def test_inject_refuses_to_clobber_a_non_mapping_top_level(tmp_path, capsys):
+    """Valid JSON, wrong shape: a top-level array is still someone's file, not ours."""
+    cfg = tmp_path / "array.json"
+    original = '["secret-token-abc123"]'
+    cfg.write_text(original, encoding="utf-8")
+    spec = cli.ClientSpec("broken", "Broken Client", cfg, "mcpServers")
+    cli._inject_into_client(spec, "db-conn-mcp", ["--config", "x"])
+    assert cfg.read_text(encoding="utf-8") == original
+    out = capsys.readouterr().out
+    assert "Broken Client" in out
+    assert "secret-token-abc123" not in out  # Rule 6
+
+
 def test_detected_clients_still_lists_a_broken_config(tmp_path, monkeypatch):
     """Discovery is 'the file exists', not 'the file parses' — hiding it hides the fix."""
     broken = cli.ClientSpec("b", "B", tmp_path / "b.json", "mcpServers")
     (tmp_path / "b.json").write_text("{ not json", encoding="utf-8")
     monkeypatch.setattr(clients, "client_specs", lambda: [broken])
     assert [s.key for s in cli.detected_clients()] == ["b"]
+
+
+def test_injection_menu_marks_an_unreadable_config(tmp_path, monkeypatch, capsys):
+    """The listing must show the broken client so the user can go fix it (CHANGELOG promise)."""
+    cfg = tmp_path / "broken.json"
+    cfg.write_text('{ "mcpServers": { "secret-token-abc123": ', encoding="utf-8")
+    spec = cli.ClientSpec("broken", "Broken Client", cfg, "mcpServers")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [spec])
+    monkeypatch.setattr(builtins, "input", _scripted_input([""]))
+    assert cli._choose_injection_targets() == []
+    out = capsys.readouterr().out
+    assert "Broken Client" in out
+    assert "config unreadable" in out
+    assert "secret-token-abc123" not in out  # Rule 6
+
+
+def test_status_marks_an_unreadable_config(tmp_path, monkeypatch, capsys):
+    cfg = tmp_path / "broken.json"
+    cfg.write_text('{ "mcpServers": { "secret-token-abc123": ', encoding="utf-8")
+    spec = cli.ClientSpec("broken", "Broken Client", cfg, "mcpServers")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [spec])
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "mydb", "postgresql://h/a", "read")
+    cli._print_status(config.repo_config_path())
+    out = capsys.readouterr().out
+    assert "Broken Client: config unreadable" in out
+    assert "secret-token-abc123" not in out  # Rule 6

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 import tomlkit
+from tomlkit.exceptions import TOMLKitError
 
 #: How an MCP client stores server entries. Each value maps to a container key, an
 #: entry shape (:func:`_build_entry`) and a file syntax (:data:`_CODEC`) — the three
@@ -22,7 +23,7 @@ ClientFormat = Literal["mcpServers", "vscode", "zed", "codex"]
 #: approach on a cold Windows disk. The resulting failure surfaces to the user as a
 #: Codex timeout rather than as anything naming this server, so the entry carries a
 #: deliberate, roomier value.
-CODEX_STARTUP_TIMEOUT_SECONDS = 30
+CODEX_STARTUP_TIMEOUT_SECONDS: int = 30
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ _CONTAINER_KEY: dict[ClientFormat, str] = {
 
 
 class ClientConfigError(Exception):
-    """A client config file exists but could not be read or parsed.
+    """A client config file exists but could not be read, parsed, or used as a mapping.
 
     Raised instead of returning an empty document, so a read-merge-write can never
     silently overwrite a file whose contents we failed to understand. Messages name
@@ -57,6 +58,9 @@ class ClientConfigError(Exception):
 class Codec:
     """Text <-> mapping for one config-file syntax."""
 
+    #: The syntax as a user would name it ("JSON", "TOML") — diagnostics say this,
+    #: never the internal :data:`ClientFormat` token (Rule 6: name the category).
+    name: str
     loads: Callable[[str], dict]
     dumps: Callable[[dict], str]
     empty: Callable[[], dict]
@@ -70,6 +74,7 @@ def _json_dumps(data: dict) -> str:
 
 
 _JSON_CODEC = Codec(
+    name="JSON",
     loads=json.loads,
     dumps=_json_dumps,
     empty=dict,
@@ -79,10 +84,11 @@ _JSON_CODEC = Codec(
 #: tomlkit round-trips comments and layout, so a hand-maintained config.toml
 #: survives a read-merge-write intact.
 _TOML_CODEC = Codec(
+    name="TOML",
     loads=tomlkit.parse,
     dumps=tomlkit.dumps,
     empty=tomlkit.document,
-    errors=(tomlkit.exceptions.TOMLKitError,),
+    errors=(TOMLKitError,),
 )
 
 #: Which syntax each format is written in.
@@ -98,9 +104,14 @@ def read_config(spec: ClientSpec) -> dict:
     """Parse a client's config file into a mutable mapping.
 
     An **absent** file yields a fresh empty document — creating it is the point. A
-    file that exists but cannot be read or parsed raises :class:`ClientConfigError`,
-    so callers refuse to write rather than clobbering something they did not
-    understand.
+    file that exists but cannot be read, does not parse, or parses to something other
+    than a mapping raises :class:`ClientConfigError`, so callers refuse to write
+    rather than clobbering something they did not understand.
+
+    Every raise is ``from None``: parser exceptions quote the offending source text
+    (tomlkit's ``ParseError`` names the raw key), so keeping them as ``__cause__``
+    would print the file's contents in any traceback. The exception *type* is the
+    whole of their diagnostic value, and the message carries that.
     """
     codec = _CODEC[spec.fmt]
     try:
@@ -110,13 +121,19 @@ def read_config(spec: ClientSpec) -> dict:
     except (OSError, UnicodeDecodeError) as exc:
         raise ClientConfigError(
             f"{spec.label}: {spec.path} could not be read ({type(exc).__name__})"
-        ) from exc
+        ) from None
     try:
-        return codec.loads(text)
+        data = codec.loads(text)
     except codec.errors as exc:
         raise ClientConfigError(
-            f"{spec.label}: {spec.path} is not valid {spec.fmt} config ({type(exc).__name__})"
-        ) from exc
+            f"{spec.label}: {spec.path} is not valid {codec.name} ({type(exc).__name__})"
+        ) from None
+    if not isinstance(data, dict):
+        raise ClientConfigError(
+            f"{spec.label}: {spec.path} is valid {codec.name} but has no object at the "
+            "top level, so it holds no MCP server entries"
+        )
+    return data
 
 
 def write_config(spec: ClientSpec, data: dict) -> None:
