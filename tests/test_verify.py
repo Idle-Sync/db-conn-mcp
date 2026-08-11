@@ -1,10 +1,13 @@
 """The verification engine: spawn a real server, speak real MCP to it."""
 
 import json
+import socket
 import sys
 
+import pytest
+
 from db_conn_mcp import __version__
-from db_conn_mcp.verify import EXPECTED_TOOL_COUNT, verify_stdio
+from db_conn_mcp.verify import EXPECTED_TOOL_COUNT, verify_http, verify_stdio
 
 
 def _temp_config(tmp_path):
@@ -56,3 +59,34 @@ async def test_verify_client_without_entry_reports_launch_failed(tmp_path):
     result = await verify_client(spec)
     assert result["verdict"] == "launch_failed"
     assert "no db-conn-mcp entry" in result["detail"]
+
+
+def _port_free(port: int) -> bool:
+    with socket.socket() as s:
+        return s.connect_ex(("127.0.0.1", port)) != 0
+
+
+async def test_verify_http_end_to_end(tmp_path):
+    if not _port_free(8000):
+        pytest.skip("port 8000 busy on this machine; HTTP verify would report port_in_use")
+    cfg = _temp_config(tmp_path)
+    result = await verify_http(
+        sys.executable, ["-m", "db_conn_mcp", "--config", str(cfg)], timeout=60.0
+    )
+    assert result["verdict"] == "answers", result["detail"]
+    assert result["tool_count"] == EXPECTED_TOOL_COUNT
+
+
+async def test_verify_http_reports_port_in_use(tmp_path):
+    cfg = _temp_config(tmp_path)
+    blocker = socket.socket()
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    busy_port = blocker.getsockname()[1]
+    try:
+        result = await verify_http(
+            sys.executable, ["-m", "db_conn_mcp", "--config", str(cfg)], port=busy_port
+        )
+        assert result["verdict"] == "port_in_use"
+    finally:
+        blocker.close()

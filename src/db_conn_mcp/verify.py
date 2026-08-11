@@ -7,9 +7,12 @@ spawns a separate process; it never answers from this process's own imports.
 """
 
 import asyncio
+import socket
+import subprocess
 from typing import Literal, TypedDict
 
 from mcp import ClientSession, StdioServerParameters
+from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 
 from . import __version__
@@ -119,3 +122,80 @@ async def verify_client(spec: ClientSpec, timeout: float = 20.0) -> VerifyResult
         return result
     command, args = launch
     return await verify_stdio(command, args, timeout=timeout)
+
+
+async def verify_http(
+    command: str, args: list[str], port: int = 8000, timeout: float = 30.0
+) -> VerifyResult:
+    """Spawn ``command args --transport http`` and verify over SSE.
+
+    One global check, not per-client — no client config uses HTTP. The server's
+    HTTP port is not configurable today (FastMCP default 8000), so a busy port is
+    its own distinct outcome rather than a false failure.
+    """
+    result = _base(command, [*args, "--transport", "http"])
+    with socket.socket() as probe:
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            result["verdict"] = "port_in_use"
+            result["detail"] = f"something already listens on 127.0.0.1:{port}"
+            result["suggested_action"] = "stop the other process, then re-run this check"
+            return result
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — command comes from our own config entries
+            [command, *args, "--transport", "http"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        result["verdict"] = "launch_failed"
+        result["detail"] = f"could not start the process ({type(exc).__name__})"
+        result["suggested_action"] = "check the command path"
+        return result
+    try:
+        async with asyncio.timeout(timeout):
+            # Wait for the SSE endpoint to accept connections before handshaking.
+            while True:
+                if proc.poll() is not None:
+                    result["verdict"] = "launch_failed"
+                    result["detail"] = f"process exited early (code {proc.returncode})"
+                    result["suggested_action"] = "run it by hand and watch stderr"
+                    return result
+                with socket.socket() as s:
+                    if s.connect_ex(("127.0.0.1", port)) == 0:
+                        break
+                await asyncio.sleep(0.25)
+            async with (
+                sse_client(f"http://127.0.0.1:{port}/sse") as (read, write),
+                ClientSession(read, write) as session,
+            ):
+                init = await session.initialize()
+                result["server_name"] = init.serverInfo.name
+                result["server_version"] = init.serverInfo.version
+                result["instructions"] = init.instructions
+                result["stale"] = init.serverInfo.version != __version__
+                tools = await session.list_tools()
+                result["tool_count"] = len(tools.tools)
+    except TimeoutError:
+        result["verdict"] = "timeout"
+        result["detail"] = f"no complete SSE conversation within {timeout:.0f}s"
+        result["suggested_action"] = "run the command by hand and watch stderr"
+        return result
+    except Exception as exc:  # noqa: BLE001 — verdicts, not tracebacks (Rule 6)
+        result["verdict"] = "handshake_failed"
+        result["detail"] = f"server started but SSE MCP failed ({type(exc).__name__})"
+        result["suggested_action"] = "the binary may be broken; reinstall"
+        return result
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    if result["tool_count"] != EXPECTED_TOOL_COUNT:
+        result["verdict"] = "wrong_tool_count"
+        result["detail"] = f"expected {EXPECTED_TOOL_COUNT} tools, got {result['tool_count']}"
+        result["suggested_action"] = "upgrade: pipx upgrade db-conn-mcp"
+        return result
+    result["verdict"] = "answers"
+    result["detail"] = "SSE handshake and tools/list answered"
+    return result
