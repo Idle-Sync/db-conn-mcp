@@ -58,6 +58,23 @@ def _no_config() -> JSONResponse:
     return JSONResponse({"error": "no configuration found"}, status_code=409)
 
 
+def _unknown_client() -> JSONResponse:
+    """The fixed 404 for a client key that is not a detected client — no key echo."""
+    return JSONResponse({"error": "unknown or undetected client"}, status_code=404)
+
+
+def _unreadable_client() -> JSONResponse:
+    """The fixed 409 for a client config that will not parse.
+
+    Rule 6: the parse failure is described by category only. The file's contents —
+    which routinely hold API keys for other MCP servers — never reach a response.
+    """
+    return JSONResponse(
+        {"error": "that client's config could not be parsed; fix it by hand"},
+        status_code=409,
+    )
+
+
 def _no_such_connection() -> JSONResponse:
     """The fixed 404 for an unknown connection name — the name is not echoed."""
     return JSONResponse({"error": "no such connection"}, status_code=404)
@@ -194,7 +211,7 @@ def create_app(token: str, config_arg: str | None = None) -> Starlette:
         key = request.path_params["key"]
         spec = next((s for s in clients_mod.detected_clients() if s.key == key), None)
         if spec is None:
-            return JSONResponse({"error": "unknown or undetected client"}, status_code=404)
+            return _unknown_client()
         async with verify_lock:
             result = await verify_client(spec)
         return JSONResponse(result)
@@ -321,6 +338,59 @@ def create_app(token: str, config_arg: str | None = None) -> Starlette:
             return _no_such_connection()
         return JSONResponse(await Handlers(path).check_database(name))
 
+    async def inject_client(request: Request) -> JSONResponse:
+        """Register this server in one detected client's config, wizard-identically.
+
+        Goes through ``clients.inject_entry``/``write_config`` — the same seam the CLI
+        wizard uses — so the GUI is a second front-end, never a second implementation.
+        A config that will not parse is refused rather than clobbered.
+        """
+        # Imported here, not at module scope: ``cli`` imports this module to serve the
+        # GUI, so a top-level import would close the cycle.
+        from ..cli import server_launch
+
+        key = request.path_params["key"]
+        spec = next((s for s in clients_mod.detected_clients() if s.key == key), None)
+        if spec is None:
+            return _unknown_client()
+        if not clients_mod.config_readable(spec):
+            return _unreadable_client()
+        try:
+            path = config_mod.resolve_path(config_arg)
+        except config_mod.ConfigError:
+            return _no_config()
+        command, args = server_launch(path)
+        # A client config is config too: the read-merge-write span takes the same lock
+        # for the same lost-update reason connections.json does. The span is
+        # synchronous, so the lock is defensive rather than load-bearing.
+        async with config_lock:
+            try:
+                data = clients_mod.read_config(spec)
+            except clients_mod.ClientConfigError:
+                # Re-checked under the lock: the file may have gone bad since the
+                # probe above, and the raised text quotes the source (Rule 6).
+                return _unreadable_client()
+            clients_mod.write_config(
+                spec, clients_mod.inject_entry(data, spec.fmt, "db-conn-mcp", command, args)
+            )
+        return JSONResponse({"injected": spec.key})
+
+    async def uninject_client(request: Request) -> JSONResponse:
+        """Drop this server's entry from one detected client's config."""
+        key = request.path_params["key"]
+        spec = next((s for s in clients_mod.detected_clients() if s.key == key), None)
+        if spec is None:
+            return _unknown_client()
+        if not clients_mod.config_readable(spec):
+            return _unreadable_client()
+        async with config_lock:  # see inject_client
+            try:
+                data = clients_mod.read_config(spec)
+            except clients_mod.ClientConfigError:
+                return _unreadable_client()
+            clients_mod.write_config(spec, clients_mod.remove_entry(data, spec.fmt, "db-conn-mcp"))
+        return JSONResponse({"removed": spec.key})
+
     routes = [
         Route("/", index),
         Route("/api/summary", summary),
@@ -333,6 +403,8 @@ def create_app(token: str, config_arg: str | None = None) -> Starlette:
         Route("/api/databases/{name}", edit_database, methods=["PATCH"]),
         Route("/api/databases/{name}", delete_database, methods=["DELETE"]),
         Route("/api/databases/{name}/check", check_database_route, methods=["POST"]),
+        Route("/api/clients/{key}/inject", inject_client, methods=["POST"]),
+        Route("/api/clients/{key}/uninject", uninject_client, methods=["POST"]),
         Mount("/static", app=StaticFiles(directory=str(_static_dir())), name="static"),
     ]
     return Starlette(routes=routes, middleware=[Middleware(_Guard, token=token)])

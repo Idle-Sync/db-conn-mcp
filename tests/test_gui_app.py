@@ -500,6 +500,66 @@ async def test_concurrent_delete_and_add_keep_both_effects(tmp_path):
     assert _stored_names(cfg) == ["new"]
 
 
+# ---- Task 7: the clients API (inject / uninject) ----
+
+
+def test_inject_and_uninject_roundtrip(cfg_client, tmp_path, monkeypatch):
+    import json as jsonlib
+
+    from db_conn_mcp import clients as clients_mod
+    from db_conn_mcp.clients import ClientSpec
+
+    client, cfg = cfg_client
+    cfg.write_text(jsonlib.dumps({"connections": []}), encoding="utf-8")
+    target = ClientSpec("fake", "Fake", tmp_path / "fake.json", "mcpServers")
+    (tmp_path / "fake.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(clients_mod, "client_specs", lambda: [target])
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [target])
+
+    assert client.post("/api/clients/fake/inject", headers=_hdr()).status_code == 200
+    stored = jsonlib.loads((tmp_path / "fake.json").read_text(encoding="utf-8"))
+    assert "db-conn-mcp" in stored["mcpServers"]
+    assert client.post("/api/clients/fake/uninject", headers=_hdr()).status_code == 200
+    stored = jsonlib.loads((tmp_path / "fake.json").read_text(encoding="utf-8"))
+    assert "db-conn-mcp" not in stored["mcpServers"]
+
+
+def test_inject_refuses_unreadable_config(cfg_client, tmp_path, monkeypatch):
+    from db_conn_mcp import clients as clients_mod
+    from db_conn_mcp.clients import ClientSpec
+
+    client, _ = cfg_client
+    broken = ClientSpec("fake", "Fake", tmp_path / "broken.json", "mcpServers")
+    original = "{ not json — secret-token-abc123"
+    (tmp_path / "broken.json").write_text(original, encoding="utf-8")
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [broken])
+    r = client.post("/api/clients/fake/inject", headers=_hdr())
+    assert r.status_code == 409
+    assert (tmp_path / "broken.json").read_text(encoding="utf-8") == original  # no clobber
+    assert "secret-token-abc123" not in r.text  # Rule 6
+
+
+def test_clients_api_is_post_only_and_guarded(cfg_client):
+    """No client config may be rewritten by a GET, or without the token."""
+    client, _ = cfg_client
+    assert client.get("/api/clients/fake/inject", headers=_hdr()).status_code == 405
+    assert client.get("/api/clients/fake/uninject", headers=_hdr()).status_code == 405
+    assert client.post("/api/clients/fake/inject").status_code == 403
+    assert client.post("/api/clients/fake/uninject").status_code == 403
+
+
+def test_unknown_client_is_a_404_that_does_not_echo_the_key(cfg_client, monkeypatch):
+    from db_conn_mcp import clients as clients_mod
+
+    client, _ = cfg_client
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [])
+    for path in ("/api/clients/ghost-key/inject", "/api/clients/ghost-key/uninject"):
+        r = client.post(path, headers=_hdr())
+        assert r.status_code == 404
+        assert r.json() == {"error": "unknown or undetected client"}
+        assert "ghost-key" not in r.text
+
+
 #: Valid JSON that ``config.load`` still refuses: names must be unique.
 _DUPLICATE_NAMES = json.dumps(
     {
