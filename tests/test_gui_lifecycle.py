@@ -68,7 +68,7 @@ def fake_uvicorn(tmp_path, monkeypatch):
         sock.close()
 
 
-def test_both_launchers_disable_the_uvicorn_access_log(fake_uvicorn, capsys):
+def test_both_launchers_disable_the_uvicorn_access_log(fake_uvicorn, capfd):
     """Rule 6: the access log would print ``?token=<SECRET>`` in every request line."""
     assert start_in_thread() is True
     assert run_standalone(open_browser=False, idle_timeout=900.0) == 0
@@ -76,12 +76,25 @@ def test_both_launchers_disable_the_uvicorn_access_log(fake_uvicorn, capsys):
     assert ride_along.access_log is False
     assert standalone.access_log is False
     # The ride-along additionally silences uvicorn entirely: it shares a process
-    # with a stdio MCP server, whose stdout carries the protocol.
+    # with a stdio MCP server, whose stdout carries the protocol. log_config=None
+    # matters on its own — uvicorn's default config runs dictConfig, reconfiguring
+    # logging inside the host process and pointing a handler at stdout.
     assert ride_along.log_level == "critical"
-    assert capsys.readouterr().out == ""
+    assert ride_along.log_config is None
+    assert capfd.readouterr().out == ""
 
 
-def test_start_in_thread_skips_when_port_taken(capsys):
+def test_run_standalone_reports_a_held_port(fake_uvicorn, monkeypatch):
+    """The Task 10 contract: exit code 2 means "someone else already serves it"."""
+    monkeypatch.setattr("db_conn_mcp.gui.app._bind_gui_port", lambda: None)
+    assert run_standalone(open_browser=False) == 2
+    assert fake_uvicorn == []  # no server was configured, let alone started
+
+
+def test_start_in_thread_skips_when_port_taken(tmp_path, monkeypatch, capfd):
+    # Pointed at tmp_path so a regression that writes the token BEFORE winning the
+    # bind fails here instead of silently clobbering the live GUI's real token.
+    monkeypatch.setattr("db_conn_mcp.gui.app.token_path", lambda: tmp_path / "gui-token")
     blocker = socket.socket()
     blocker.bind(("127.0.0.1", GUI_PORT))
     blocker.listen(1)
@@ -89,10 +102,11 @@ def test_start_in_thread_skips_when_port_taken(capsys):
         assert start_in_thread() is False
     finally:
         blocker.close()
-    assert capsys.readouterr().out == ""  # stdout is sacred
+    assert not (tmp_path / "gui-token").exists()  # the loser writes nothing
+    assert capfd.readouterr().out == ""  # stdout is sacred
 
 
-def test_start_in_thread_serves_and_writes_token(tmp_path, monkeypatch, capsys):
+def test_start_in_thread_serves_and_writes_token(tmp_path, monkeypatch, capfd):
     import httpx
 
     monkeypatch.setattr("db_conn_mcp.gui.app.token_path", lambda: tmp_path / "gui-token")
@@ -107,4 +121,4 @@ def test_start_in_thread_serves_and_writes_token(tmp_path, monkeypatch, capsys):
         except httpx.ConnectError:
             time.sleep(0.1)
     assert r.status_code == 200
-    assert capsys.readouterr().out == ""  # nothing on stdout, ever
+    assert capfd.readouterr().out == ""  # nothing on stdout, ever

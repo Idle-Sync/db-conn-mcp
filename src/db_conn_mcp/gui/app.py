@@ -9,6 +9,7 @@ any response by construction (Rule 6).
 
 import asyncio
 import hmac
+import os
 import secrets
 import socket
 import threading
@@ -488,12 +489,18 @@ def _bind_gui_port() -> socket.socket | None:
 def _write_token(token: str) -> None:
     """Persist the session token user-only (0600); the winner of the bind writes it.
 
-    The mode is advisory on Windows — NTFS ignores POSIX bits — but the file lives
-    under the user's profile directory, which is not world-readable there anyway.
+    The mode is passed to the *creation* call rather than chmod'ed afterwards: a
+    write-then-chmod leaves the secret on disk at the umask default (typically
+    0644) for the window in between, readable by every local user. The trailing
+    chmod only tightens a file that already existed. The mode is advisory on
+    Windows — NTFS ignores POSIX bits — but the file lives under the user's
+    profile directory, which is not world-readable there anyway.
     """
     path = token_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(token, encoding="utf-8")
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(token)
     path.chmod(0o600)
 
 
