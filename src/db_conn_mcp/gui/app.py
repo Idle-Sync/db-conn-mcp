@@ -9,10 +9,16 @@ any response by construction (Rule 6).
 
 import asyncio
 import hmac
+import secrets
+import socket
+import threading
+import time
+import webbrowser
 from collections.abc import Awaitable, Callable
 from importlib import resources
 from pathlib import Path
 
+import uvicorn
 from pydantic import ValidationError
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -151,8 +157,38 @@ class _Guard(BaseHTTPMiddleware):
         return response
 
 
-def create_app(token: str, config_arg: str | None = None) -> Starlette:
+class _Touch(BaseHTTPMiddleware):
+    """Report each served request to whoever is watching for idleness.
+
+    Mounted *inside* :class:`_Guard` on purpose: only a request that passed the
+    token check counts as activity, so an unauthenticated poker cannot hold a
+    standalone GUI open past its idle timeout.
+    """
+
+    def __init__(self, app, on_request: Callable[[], None]) -> None:
+        super().__init__(app)
+        self._on_request = on_request
+
+    async def dispatch(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        """Stamp the caller's clock, then serve the request unchanged."""
+        self._on_request()
+        return await call_next(request)
+
+
+def create_app(
+    token: str,
+    config_arg: str | None = None,
+    on_request: Callable[[], None] | None = None,
+) -> Starlette:
     """Build the GUI app. ``config_arg`` is the CLI's --config passthrough.
+
+    ``on_request`` is called once per authenticated request; :func:`run_standalone`
+    uses it to drive its idle-shutdown clock. It is a constructor argument rather
+    than a middleware added afterwards because starlette 1.2 dropped the
+    ``@app.middleware`` decorator, and ``add_middleware`` after construction is a
+    started-app hazard the app has no reason to take.
 
     Raises :class:`ValueError` on an empty token: an empty credential compares equal
     to a request that supplies none, so such an app would serve everything to anyone.
@@ -425,4 +461,99 @@ def create_app(token: str, config_arg: str | None = None) -> Starlette:
         Route("/api/clients/{key}/uninject", uninject_client, methods=["POST"]),
         Mount("/static", app=StaticFiles(directory=str(_static_dir())), name="static"),
     ]
-    return Starlette(routes=routes, middleware=[Middleware(_Guard, token=token)])
+    # Order is outermost-first: the guard runs before anything else sees a request.
+    middleware = [Middleware(_Guard, token=token)]
+    if on_request is not None:
+        middleware.append(Middleware(_Touch, on_request=on_request))
+    return Starlette(routes=routes, middleware=middleware)
+
+
+def _idle_exceeded(last_request: float, now: float, idle_timeout: float) -> bool:
+    """Whether the standalone server has been quiet long enough to exit."""
+    return (now - last_request) > idle_timeout
+
+
+def _bind_gui_port() -> socket.socket | None:
+    """Claim 127.0.0.1:GUI_PORT, or None if anything already holds it."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", GUI_PORT))
+        sock.listen(128)
+    except OSError:
+        sock.close()
+        return None
+    return sock
+
+
+def _write_token(token: str) -> None:
+    """Persist the session token user-only (0600); the winner of the bind writes it.
+
+    The mode is advisory on Windows — NTFS ignores POSIX bits — but the file lives
+    under the user's profile directory, which is not world-readable there anyway.
+    """
+    path = token_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(token, encoding="utf-8")
+    path.chmod(0o600)
+
+
+def start_in_thread(config_arg: str | None = None) -> bool:
+    """Host the GUI from inside a running MCP server, if the port is free.
+
+    Silent by design: a GUI problem must never crash or pollute the MCP server
+    (stdout carries the protocol). Returns True when this process won the port.
+    """
+    try:
+        sock = _bind_gui_port()
+        if sock is None:
+            return False
+        token = secrets.token_urlsafe(32)
+        _write_token(token)
+        app = create_app(token, config_arg=config_arg)
+        # log_config=None keeps uvicorn off stdout (its default access handler
+        # writes there); access_log=False keeps the token out of any log at all,
+        # since the request line carries ``?token=<secret>`` (Rule 6).
+        cfg = uvicorn.Config(app, log_config=None, log_level="critical", access_log=False)
+        server = uvicorn.Server(cfg)
+        thread = threading.Thread(
+            target=server.run, kwargs={"sockets": [sock]}, name="db-conn-mcp-gui", daemon=True
+        )
+        thread.start()
+        return True
+    except Exception:  # noqa: BLE001 — the MCP server must survive any GUI failure
+        return False
+
+
+def run_standalone(
+    config_arg: str | None = None, open_browser: bool = True, idle_timeout: float = 900.0
+) -> int:
+    """Run the GUI in the foreground: stderr logs, idle shutdown, browser opened."""
+    sock = _bind_gui_port()
+    if sock is None:
+        return 2  # caller (cmd_gui) probes and reports; this is the fallback path
+    token = secrets.token_urlsafe(32)
+    _write_token(token)
+    state = {"last_request": time.monotonic()}
+
+    def _touched() -> None:
+        """Reset the idle clock (called by :class:`_Touch` on every real request)."""
+        state["last_request"] = time.monotonic()
+
+    app = create_app(token, config_arg=config_arg, on_request=_touched)
+    # access_log=False again: the URL carries ``?token=<secret>`` and uvicorn's
+    # access log would print the whole request line (Rule 6). The remaining
+    # lifecycle lines go to uvicorn's default handler, which is stderr.
+    cfg = uvicorn.Config(app, log_level="warning", access_log=False)
+    server = uvicorn.Server(cfg)
+
+    def _watchdog() -> None:
+        while not server.should_exit:
+            time.sleep(30)
+            if _idle_exceeded(state["last_request"], time.monotonic(), idle_timeout):
+                server.should_exit = True
+
+    threading.Thread(target=_watchdog, name="db-conn-mcp-gui-idle", daemon=True).start()
+    if open_browser:
+        webbrowser.open(f"http://127.0.0.1:{GUI_PORT}/?token={token}")
+    server.run(sockets=[sock])
+    return 0
