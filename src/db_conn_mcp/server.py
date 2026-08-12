@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ContentBlock
+from mcp.types import ContentBlock, TextContent
 
 from . import __version__
 from . import doctor as doctor_mod
@@ -39,6 +39,13 @@ ToolResult = Sequence[ContentBlock] | tuple[Sequence[ContentBlock], dict[str, An
 VALUE_BEARING_TOOLS = frozenset(
     {"sample_table_rows", "execute_read_query", "fetch_rows", "search_value"}
 )
+
+#: What a value-bearing tool says when its result carries no rows at all. FastMCP turns
+#: a list into one text block PER row, so an empty list becomes ZERO content blocks —
+#: and with the structured channel dropped, the response would say nothing whatsoever:
+#: "this table is empty" and "the call did nothing" would look identical to the agent.
+#: An empty JSON array is what the same result minus its rows parses as.
+EMPTY_VALUE_PAYLOAD = "[]"
 
 
 class GuardedFastMCP(FastMCP):
@@ -79,12 +86,15 @@ class GuardedFastMCP(FastMCP):
         A value-bearing tool answers ``(guarded blocks, None)``: its rows are served on
         the fenced text channel only. Their output schemas are un-declared at build time
         (see :func:`_drop_value_bearing_output_schemas`), which is what lets ``None``
-        through the SDK's output validation.
+        through the SDK's output validation. A result with no blocks at all (a row list
+        that came back empty) is given one saying so — see :data:`EMPTY_VALUE_PAYLOAD`.
         """
         self._reject_unknown_arguments(name, arguments)
         result = await super().call_tool(name, arguments)
         if name in VALUE_BEARING_TOOLS:
             blocks = result[0] if isinstance(result, tuple) else result
+            if not blocks:
+                blocks = [TextContent(type="text", text=EMPTY_VALUE_PAYLOAD)]
             return guard_content_blocks(blocks), None
         if isinstance(result, tuple):
             unstructured, structured = result
@@ -195,11 +205,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
     async def get_table_schema(database: str, table: str, include_indexes: bool = False) -> dict:
         """Get columns, types, and primary/foreign keys for a table.
 
-        Pass include_indexes=true to also get the table's indexes (name, the columns
-        each one covers in order, whether it is unique, and its method — btree, gin,
-        ...). Use it before writing a filter or a JOIN, or when a query is slow and you
-        want to know what is actually indexed. Omitted by default, so the plain answer
-        stays small.
+        Pass include_indexes=true to also get the table's indexes (name, its KEY columns
+        in index order — an INCLUDE payload is not listed — whether it is unique, and its
+        method: btree, gin, ...). Use it before writing a filter or a JOIN, or when a
+        query is slow and you want to know what is actually indexed. Omitted by default,
+        so the plain answer stays small.
         """
         return await handlers.get_table_schema(database, table, include_indexes)
 

@@ -87,11 +87,13 @@ _KEYS_SQL = """
 # _COLUMNS_SQL/_KEYS_SQL do it — bound name plus optional bound schema (Rule 9). Each
 # key column is rendered by Postgres itself via pg_get_indexdef(oid, ordinal, pretty),
 # so an expression index reports its expression rather than a missing name.
+# indnkeyatts, not indnatts: the latter counts INCLUDE payload columns as well, and
+# listing those among the key columns would claim a lookup they cannot serve.
 _INDEXES_SQL = """
     SELECT i.relname AS name,
            ARRAY(
                SELECT pg_get_indexdef(ix.indexrelid, k.ordinal, true)
-               FROM generate_series(1, ix.indnatts) AS k(ordinal)
+               FROM generate_series(1, ix.indnkeyatts) AS k(ordinal)
                ORDER BY k.ordinal
            ) AS columns,
            ix.indisunique AS unique,

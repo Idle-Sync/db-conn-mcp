@@ -1026,6 +1026,54 @@ async def test_value_bearing_tool_reaches_the_client_without_structured_content(
     assert _fenced_payload(result.content[0]) == {"id": 1}
 
 
+async def test_empty_row_result_is_still_one_banner_wrapped_block(cfg_path, monkeypatch):
+    """Zero rows must read as an empty JSON list, not as zero content blocks.
+
+    FastMCP turns a list into one text block PER row, so an empty list would otherwise
+    reach the agent as `content: []` with no structuredContent either — "the table is
+    empty" and "nothing happened" become indistinguishable.
+    """
+
+    class EmptyDialect(FakeDialect):
+        async def sample_rows(self, conn, table, n=10):
+            return []
+
+    _patch_dialect(monkeypatch, EmptyDialect())
+    app = server.build_server(cfg_path)
+
+    content, structured = await app.call_tool(
+        "sample_table_rows", _VALUE_TOOL_ARGS["sample_table_rows"]
+    )
+
+    assert structured is None
+    assert len(content) == 1
+    block = content[0]
+    assert isinstance(block, TextContent)
+    assert block.text.startswith(guard.GUARD_OPEN) and block.text.endswith(guard.GUARD_CLOSE)
+    assert guard.GUARD_NOTICE in block.text
+    assert _fenced_payload(block) == []
+
+
+async def test_asking_for_zero_rows_reaches_the_client_as_an_empty_list(cfg_path, monkeypatch):
+    """The real client path for n=0: one fenced `[]`, never an empty content array."""
+
+    class SlicingDialect(FakeDialect):
+        async def sample_rows(self, conn, table, n=10):
+            return [{"id": 1}][:n]
+
+    _patch_dialect(monkeypatch, SlicingDialect())
+    app = server.build_server(cfg_path)
+
+    result = await _call_over_the_wire(
+        app, "sample_table_rows", {"database": "prod", "table": "users", "n": 0}
+    )
+
+    assert result.isError is False
+    assert result.structuredContent is None
+    assert len(result.content) == 1
+    assert _fenced_payload(result.content[0]) == []
+
+
 async def test_value_bearing_tools_advertise_no_output_schema(cfg_path):
     """Suppressing structuredContent means un-declaring the schema — clients see the truth."""
     app = server.build_server(cfg_path)

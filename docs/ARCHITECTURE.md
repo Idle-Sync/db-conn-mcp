@@ -195,6 +195,8 @@ tool handler ─► FastMCP.call_tool ─► (text blocks, structuredContent)
 - **Delimiter injection is defanged.** A row value containing a marker would otherwise close the fence early and appear to speak from outside it, with the server's authority. `guard.defang_markers` rewrites any marker found in the payload to a bracket-spaced `[NEUTRALIZED MARKER: …]` form — visible (the user still sees the data contained one), and unable to re-form either marker.
 - **Second layer: the standing policy.** `FastMCP(instructions=…)` sends `guard.UNTRUSTED_DATA_POLICY` to the client in the initialize response. This is the durable half, and the only layer covering a client that reads a metadata tool's `structuredContent` alone.
 
+- **A value tool with no rows still says so.** FastMCP converts a list into one text block *per row*, so an empty row list would produce zero content blocks — and with the structured channel dropped, the response would carry nothing at all, leaving "this table is empty" indistinguishable from "the call did nothing". The seam substitutes one block holding `server.EMPTY_VALUE_PAYLOAD` (`[]`), fenced like any other.
+
 **Honest limits.** This is defence-in-depth, not a guarantee: a determined injection can still influence a model. A per-response random nonce in the markers (an unguessable closing delimiter rather than a defanged fixed one) is a possible future hardening; it is deliberately not built, so output stays deterministic.
 
 ---

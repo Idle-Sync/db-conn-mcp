@@ -345,6 +345,61 @@ def test_pypi_newer_version_does_not_scan_processes(monkeypatch):
     assert f["status"] == "warn"
 
 
+def _counting_scan(monkeypatch, scan):
+    """Replace the process scan with one that records how often it ran."""
+    calls: list[int] = []
+
+    def _scan():
+        calls.append(1)
+        return scan
+
+    monkeypatch.setattr(doctor_mod, "_scan_stale_processes", _scan)
+    return calls
+
+
+def _only_staleness_checks(monkeypatch):
+    """Run just the two checks that consume the stale-process scan."""
+    monkeypatch.setattr(
+        doctor_mod,
+        "_CHECKS",
+        [("process_staleness", check_process_staleness), ("pypi_latest", check_pypi_latest)],
+    )
+
+
+async def test_processes_are_scanned_only_once_per_doctor_run(monkeypatch):
+    """Both consumers of the scan share it — process_iter must not walk the box twice."""
+    calls = _counting_scan(monkeypatch, doctor_mod.StalenessScan(stale_pids=(111,)))
+    monkeypatch.setattr(
+        urllib.request, "urlopen", _fake_urlopen({"info": {"version": __version__}})
+    )
+    _only_staleness_checks(monkeypatch)
+
+    findings = await run_checks(None, offline=False)
+
+    assert len(calls) == 1
+    # Both checks still saw it: the pid is reported, and it caveats the version line.
+    assert any("pid 111" in f["detail"] for f in findings)
+    assert any("see process_staleness" in f["detail"] for f in findings)
+
+
+async def test_the_process_scan_is_never_reused_across_doctor_runs(monkeypatch):
+    """The memo lives on the per-run context only: a second call rescans, always.
+
+    Caching across runs would let a long-lived server keep answering from a scan taken
+    before the user restarted anything — the exact lie this check exists to prevent.
+    """
+    calls = _counting_scan(monkeypatch, doctor_mod.StalenessScan())
+    monkeypatch.setattr(
+        urllib.request, "urlopen", _fake_urlopen({"info": {"version": __version__}})
+    )
+    _only_staleness_checks(monkeypatch)
+
+    await run_checks(None, offline=False)
+    await run_checks(None, offline=False)
+
+    assert len(calls) == 2
+
+
 def test_pypi_network_error_skips(monkeypatch):
     def _boom(req, timeout=None):
         raise OSError("no network")

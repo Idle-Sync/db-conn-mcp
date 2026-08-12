@@ -18,7 +18,8 @@ the time of that release.
   now answer on the text channel only — the same JSON as before, inside the
   `<<<UNTRUSTED DATABASE DATA …>>>` banner — and they no longer advertise an output
   schema. If you parsed `structuredContent` from any of these, read the text channel
-  instead. Why: that banner is the prompt-injection defence, and row values are the most
+  instead. A result with no rows is still an explicit answer: the banner contains an
+  empty JSON list `[]`, so "the table is empty" never arrives as an empty response. Why: that banner is the prompt-injection defence, and row values are the most
   attacker-controllable thing this server emits; a client that renders only the
   structured channel was seeing exactly that data with no fence around it. Every other
   tool (schemas, table stats, diagnostics, config) keeps its `structuredContent`
@@ -67,8 +68,9 @@ the time of that release.
   exactly like `execute_read_query`, so you get the plan for the query you are actually
   about to run instead of having to rewrite it with literals — which can plan
   differently — and it composes with `analyze=true`. `get_table_schema(...,
-  include_indexes=true)` adds an `indexes` list to the answer: each index's name, the
-  columns it covers in order (expression indexes report their expression), whether it is
+  include_indexes=true)` adds an `indexes` list to the answer: each index's name, its key
+  columns in index order (expression indexes report their expression; an INCLUDE payload
+  is not a key column, so it is not listed), whether it is
   unique, and its method (btree, gin, …) — so "is this column indexed?" no longer needs a
   hand-written catalog query. Both are additive: without `params` the plan is exactly
   what it was, and without `include_indexes` the schema response has no `indexes` key at

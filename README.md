@@ -178,7 +178,7 @@ The server exposes **23 tools** and **2 prompts**:
 |------|------|-------------|
 | `list_databases` | explore | Configured databases (name, mode, yolo, and `active_port` when a fallback port is in use — **no DSN**). |
 | `list_tables` | explore | Tables and views in a database. Narrow it in the database rather than after the fact: `pattern` keeps only names containing it (fuzzy, case-insensitive) and `limit` caps the number of rows. |
-| `get_table_schema` | explore | Columns, types, primary/foreign keys for a table. Pass `include_indexes=true` to also get its indexes (`name`, covered `columns` in order, `unique`, `method`); omitted by default. |
+| `get_table_schema` | explore | Columns, types, primary/foreign keys for a table. Pass `include_indexes=true` to also get its indexes (`name`, key `columns` in index order — an INCLUDE payload is not listed — `unique`, `method`); omitted by default. |
 | `get_database_schema` | explore | The whole database's schema in one deterministic call. `format="json"` (default) returns every table's columns/types/PK/FK; `format="sql"` returns a **self-contained, runnable DDL script** (tables, sequences, PK/FK/UNIQUE/CHECK, indexes, trigger functions, triggers) — no extra tools required. Pass `output_dir` to write `{database}_schema_{UTC}.{json,sql}` instead of returning it inline (recommended for large DBs). |
 | `dump_schema_faithful` | export | **Byte-faithful** schema dump via the database's own `pg_dump --schema-only` — the most complete/runnable export. Requires the `pg_dump` binary on the server host; if missing, returns `pg_dump_not_found` with install guidance (see the `faithful_schema_export` prompt). |
 | `sample_table_rows` | explore | First N rows of a table (default 10). |

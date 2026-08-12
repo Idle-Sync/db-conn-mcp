@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypedDict
 from urllib.parse import urlsplit
@@ -55,14 +55,6 @@ def finding(check: str, status: Status, detail: str, suggested_action: str = "no
         "detail": detail,
         "suggested_action": suggested_action,
     }
-
-
-@dataclass(frozen=True)
-class CheckContext:
-    """Everything a check may need; ``config_path`` is None when no config exists."""
-
-    config_path: Path | None
-    offline: bool
 
 
 def _installed_at() -> float | None:
@@ -109,8 +101,8 @@ def _scan_stale_processes() -> StalenessScan:
 
     Shared by :func:`check_process_staleness`, which reports them, and
     :func:`check_pypi_latest`, which must not read as "you're up to date" while an old
-    build is still serving. Deliberately uncached: a long-lived server would otherwise
-    keep answering from a scan taken before the user restarted anything.
+    build is still serving. Both reach it through :meth:`CheckContext.stale_processes`,
+    which runs this at most once per doctor run — and never keeps it beyond one.
     """
     try:
         import psutil
@@ -134,10 +126,35 @@ def _scan_stale_processes() -> StalenessScan:
     return StalenessScan(stale_pids=tuple(stale))
 
 
+@dataclass(frozen=True)
+class CheckContext:
+    """Everything a check may need; ``config_path`` is None when no config exists.
+
+    ``_scans`` memoizes work two checks would otherwise duplicate. It is scratch space
+    for ONE ``run_checks`` call — a fresh context (and so a fresh scan) is built per
+    run, which is what keeps a long-lived server from ever answering from a stale scan.
+    """
+
+    config_path: Path | None
+    offline: bool
+    _scans: dict[str, StalenessScan] = field(default_factory=dict, compare=False, repr=False)
+
+    def stale_processes(self) -> StalenessScan:
+        """This run's stale-process scan, walking the process table at most once.
+
+        :func:`check_process_staleness` and :func:`check_pypi_latest` both need it, and
+        the scan iterates every process on the machine — doing that twice per doctor run
+        is pure waste. The memo never outlives this context (see the class docstring).
+        """
+        if "stale" not in self._scans:
+            self._scans["stale"] = _scan_stale_processes()
+        return self._scans["stale"]
+
+
 def check_process_staleness(ctx: CheckContext) -> list[Finding]:
     """Use case 1: a client's long-lived server process still running an old version."""
     name = "process_staleness"
-    scan = _scan_stale_processes()
+    scan = ctx.stale_processes()
     if scan.skip_reason is not None:
         action = "install_doctor_extra" if scan.skip_reason == _NO_PSUTIL else "none"
         return [finding(name, "skipped", scan.skip_reason, action)]
@@ -190,7 +207,7 @@ def check_pypi_latest(ctx: CheckContext) -> list[Finding]:
     # "you have the latest" beside a still-running old process reads as an all-clear at
     # exactly the wrong moment (issue #29) — say so, and point at the check that details it.
     detail = f"v{__version__} is the latest published version"
-    if _scan_stale_processes().stale_pids:
+    if ctx.stale_processes().stale_pids:
         detail += " — but a running process predates this install; see process_staleness"
     return [finding(name, "ok", detail)]
 

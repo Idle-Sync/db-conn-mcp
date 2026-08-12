@@ -237,6 +237,9 @@ async def test_table_indexes_shape():
             "unique": False,
             "method": "btree",
         },
+        # An INCLUDE index reports its KEY columns only — the payload column (`email`)
+        # is not part of the key and must not be listed as if it were.
+        {"name": "users_org_incl_idx", "columns": ["org_id"], "unique": False, "method": "btree"},
     ]
     conn = FakeConn([rows])
     result = await PostgresDialect().table_indexes(conn, "users")
@@ -244,6 +247,13 @@ async def test_table_indexes_shape():
     assert all(set(r) == {"name", "columns", "unique", "method"} for r in result)
     assert conn.fetch_args[0] == ("users", None)  # identifier bound, never interpolated
     assert "pg_index" in conn.fetched[0]
+
+
+async def test_table_indexes_lists_key_columns_not_include_payload():
+    """`indnatts` counts INCLUDE payload columns too; the contract promises the KEY list."""
+    sql = pg._INDEXES_SQL
+    assert "indnkeyatts" in sql
+    assert "generate_series(1, ix.indnatts)" not in sql
 
 
 async def test_table_indexes_resolves_a_schema_qualified_table():

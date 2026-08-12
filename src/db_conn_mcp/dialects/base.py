@@ -43,7 +43,8 @@ class Dialect(ABC):
         """Return one table's indexes as ``[{name, columns, unique, method}]``.
 
         ``columns`` is the index's key list *in index order* (an expression index
-        reports its expression); ``unique`` says whether it enforces uniqueness;
+        reports its expression) — key columns only, so an INCLUDE payload is not
+        listed; ``unique`` says whether it enforces uniqueness;
         ``method`` is the access method (``btree``, ``gin``, ...). ``table`` may be
         schema-qualified and MUST be resolved with bound parameters — the same
         resolution :meth:`get_schema` uses — never interpolated (Rule 9).
