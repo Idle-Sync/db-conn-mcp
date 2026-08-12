@@ -11,7 +11,15 @@ the time of that release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Interactive commands now tell you when a newer release is out.** After a command
+  like `db-conn-mcp status` or `doctor` finishes, a single line points at the newer
+  version and how to upgrade. It only ever appears in a real terminal, is looked up in
+  the background so it can never slow a command down (offline just means no line), and
+  never changes the command's exit code. Set `DB_CONN_MCP_NO_UPDATE_CHECK=1` to turn it
+  off. The MCP server path never checks — a client launching db-conn-mcp makes no
+  network calls of ours.
 
 ## [0.6.2] — 2026-08-12
 

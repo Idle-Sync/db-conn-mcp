@@ -1100,6 +1100,141 @@ def test_no_gui_flag_reaches_server_run(monkeypatch):
     assert seen["gui"] is True
 
 
+# ---- update nudge (interactive commands only) --------------------------------
+
+
+class _FakeCheck:
+    """Stand-in for ``UpdateCheck``: answers with whatever the test wants, instantly."""
+
+    def __init__(self, answer=None):
+        self.answer = answer
+        self.asked = 0
+
+    def newer_version(self, current=None):
+        self.asked += 1
+        return self.answer
+
+
+def _fake_update_check(monkeypatch, answer=None):
+    """Make the CLI's ``start_check`` hand back a fake; return (starts, check)."""
+    starts = []
+    check = _FakeCheck(answer)
+
+    def _start():
+        starts.append(1)
+        return check
+
+    monkeypatch.setattr(cli.update_check, "start_check", _start)
+    return starts, check
+
+
+def _nudging_terminal(monkeypatch):
+    """Put the process in the only state that nudges: a TTY stdout, opt-out unset.
+
+    Called from the test body, never a fixture: ``capsys`` swaps ``sys.stdout`` for
+    its own object during setup, so a fixture would patch the one being replaced.
+    """
+    monkeypatch.delenv("DB_CONN_MCP_NO_UPDATE_CHECK", raising=False)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+
+
+def test_nudge_prints_after_a_command_and_keeps_the_exit_code(tmp_path, monkeypatch, capsys):
+    _nudging_terminal(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    starts, check = _fake_update_check(monkeypatch, "9.9.9")
+
+    rc = cli.main(["status", "--config", str(config.repo_config_path())])
+
+    assert rc == 0
+    assert starts == [1]
+    lines = capsys.readouterr().out.splitlines()
+    expected = (
+        f"db-conn-mcp 9.9.9 is available (you have {cli.__version__}) - "
+        "upgrade: pipx upgrade db-conn-mcp"
+    )
+    assert lines[-1] == expected  # after the command's own output, one ASCII line
+    assert check.asked == 1
+
+
+def test_nudge_starts_before_the_handler_runs(monkeypatch, capsys):
+    """The fetch must overlap the command's work, not start after it."""
+    _nudging_terminal(monkeypatch)
+    order = []
+
+    def _start():
+        order.append("start")
+        return _FakeCheck(None)
+
+    monkeypatch.setattr(cli.update_check, "start_check", _start)
+    monkeypatch.setattr(cli, "cmd_status", lambda config_arg: order.append("handler") or 0)
+    assert cli.main(["status"]) == 0
+    assert order == ["start", "handler"]
+
+
+def test_nudge_not_started_when_stdout_is_not_a_tty(monkeypatch, capsys):
+    monkeypatch.delenv("DB_CONN_MCP_NO_UPDATE_CHECK", raising=False)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: False)
+    starts, _ = _fake_update_check(monkeypatch, "9.9.9")
+    monkeypatch.setattr(cli, "cmd_status", lambda config_arg: 0)
+    assert cli.main(["status"]) == 0
+    assert starts == []
+    assert "is available" not in capsys.readouterr().out
+
+
+def test_nudge_opted_out_by_env_var(monkeypatch, capsys):
+    monkeypatch.setenv("DB_CONN_MCP_NO_UPDATE_CHECK", "1")
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    starts, _ = _fake_update_check(monkeypatch, "9.9.9")
+    monkeypatch.setattr(cli, "cmd_status", lambda config_arg: 0)
+    assert cli.main(["status"]) == 0
+    assert starts == []
+    assert "is available" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [[], ["--transport", "stdio"], ["--transport", "http"]])
+def test_serve_path_never_checks_for_updates(argv, monkeypatch):
+    """A client launching the MCP server gets zero network activity from this feature."""
+    _nudging_terminal(monkeypatch)
+    starts, _ = _fake_update_check(monkeypatch, "9.9.9")
+    monkeypatch.setattr(cli.server, "run", lambda **kw: None)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    cli.main(argv)
+    assert starts == []
+
+
+def test_nudge_prints_even_when_the_command_failed(monkeypatch, capsys):
+    _nudging_terminal(monkeypatch)
+    starts, _ = _fake_update_check(monkeypatch, "9.9.9")
+    monkeypatch.setattr(cli, "cmd_status", lambda config_arg: 2)
+    rc = cli.main(["status"])
+    assert rc == 2  # the command's exit code is untouched
+    assert starts == [1]
+    assert capsys.readouterr().out.splitlines()[-1].startswith("db-conn-mcp 9.9.9 is available")
+
+
+def test_no_nudge_when_nothing_newer(monkeypatch, capsys):
+    _nudging_terminal(monkeypatch)
+    _fake_update_check(monkeypatch, None)
+    monkeypatch.setattr(cli, "cmd_status", lambda config_arg: print("only mine") or 0)
+    assert cli.main(["status"]) == 0
+    assert capsys.readouterr().out == "only mine\n"
+
+
+def test_nudge_never_breaks_a_command(monkeypatch, capsys):
+    """A nudge that blows up must not change what the command returned."""
+    _nudging_terminal(monkeypatch)
+
+    class _Exploding:
+        def newer_version(self, current=None):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli.update_check, "start_check", _Exploding)
+    monkeypatch.setattr(cli, "cmd_status", lambda config_arg: 0)
+    assert cli.main(["status"]) == 0
+    assert "is available" not in capsys.readouterr().out
+
+
 def test_status_marks_an_unreadable_config(tmp_path, monkeypatch, capsys):
     cfg = tmp_path / "broken.json"
     cfg.write_text('{ "mcpServers": { "secret-token-abc123": ', encoding="utf-8")
