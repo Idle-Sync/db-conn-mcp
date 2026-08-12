@@ -41,7 +41,10 @@ the time of that release.
   unknown parameter(s), listing the ones the tool accepts, and suggesting the closest
   match for a near-miss spelling. Only parameter *names* appear in the message, never
   their values. If a client of yours passes extra arguments, it will now see errors where
-  it previously saw (wrong) results — fix the argument name.
+  it previously saw (wrong) results — fix the argument name. Some clients also send stray
+  or dummy arguments of their own, including to tools that take no parameters at all (for
+  example `list_databases`); those calls now error too, and the error names the offending
+  argument alongside the parameters the tool accepts.
 
 ### Added
 
