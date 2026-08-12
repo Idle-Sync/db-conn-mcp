@@ -84,31 +84,42 @@ def _installed_at() -> float | None:
         return None
 
 
-def check_process_staleness(ctx: CheckContext) -> list[Finding]:
-    """Use case 1: a client's long-lived server process still running an old version."""
-    name = "process_staleness"
+#: Skip reasons for a staleness scan that could not run at all (see :class:`StalenessScan`).
+_NO_PSUTIL = (
+    "psutil not installed — cannot inspect running processes (fix: pipx inject db-conn-mcp psutil)"
+)
+_NO_INSTALL_TIME = "could not determine when db-conn-mcp was installed (editable/source install?)"
+
+
+@dataclass(frozen=True)
+class StalenessScan:
+    """What one scan for out-of-date db-conn-mcp processes found.
+
+    ``skip_reason`` is set when staleness could not be determined *at all* (psutil
+    missing, or no install timestamp). ``stale_pids`` is empty in that case too, which
+    is why "empty" must never be read as "everything is fresh" without checking it.
+    """
+
+    stale_pids: tuple[int, ...] = ()
+    skip_reason: str | None = None
+
+
+def _scan_stale_processes() -> StalenessScan:
+    """Find running db-conn-mcp processes that started before the current install.
+
+    Shared by :func:`check_process_staleness`, which reports them, and
+    :func:`check_pypi_latest`, which must not read as "you're up to date" while an old
+    build is still serving. Deliberately uncached: a long-lived server would otherwise
+    keep answering from a scan taken before the user restarted anything.
+    """
     try:
         import psutil
     except ImportError:
-        return [
-            finding(
-                name,
-                "skipped",
-                "psutil not installed — cannot inspect running processes "
-                "(fix: pipx inject db-conn-mcp psutil)",
-            )
-        ]
+        return StalenessScan(skip_reason=_NO_PSUTIL)
     installed_at = _installed_at()
     if installed_at is None:
-        return [
-            finding(
-                name,
-                "skipped",
-                "could not determine when db-conn-mcp was installed (editable/source install?)",
-            )
-        ]
-    findings: list[Finding] = []
-    own_pid = os.getpid()
+        return StalenessScan(skip_reason=_NO_INSTALL_TIME)
+    stale: list[int] = []
     for proc in psutil.process_iter(["pid", "cmdline", "create_time"]):
         try:
             info = proc.info
@@ -119,30 +130,35 @@ def check_process_staleness(ctx: CheckContext) -> list[Finding]:
             continue
         if info["create_time"] >= installed_at:
             continue
-        if info["pid"] == own_pid:
+        stale.append(info["pid"])
+    return StalenessScan(stale_pids=tuple(stale))
+
+
+def check_process_staleness(ctx: CheckContext) -> list[Finding]:
+    """Use case 1: a client's long-lived server process still running an old version."""
+    name = "process_staleness"
+    scan = _scan_stale_processes()
+    if scan.skip_reason is not None:
+        action = "install_doctor_extra" if scan.skip_reason == _NO_PSUTIL else "none"
+        return [finding(name, "skipped", scan.skip_reason, action)]
+    findings: list[Finding] = []
+    own_pid = os.getpid()
+    for pid in scan.stale_pids:
+        if pid == own_pid:
             # Use case 1 from the inside: doctor is running AS the stale server, so the
             # fix is to reconnect *this* client — not to upgrade the package again.
-            findings.append(
-                finding(
-                    name,
-                    "warn",
-                    f"this db-conn-mcp process itself (pid {info['pid']}) started before "
-                    f"v{__version__} was installed — reconnect this MCP client to load "
-                    "the new version",
-                    "reconnect_client",
-                )
+            detail = (
+                f"this db-conn-mcp process itself (pid {pid}) started before "
+                f"v{__version__} was installed — reconnect this MCP client to load "
+                "the new version"
             )
         else:
-            findings.append(
-                finding(
-                    name,
-                    "warn",
-                    f"a db-conn-mcp process (pid {info['pid']}) started before "
-                    f"v{__version__} was installed — restart/reconnect that MCP client "
-                    "to load the new version",
-                    "reconnect_client",
-                )
+            detail = (
+                f"a db-conn-mcp process (pid {pid}) started before "
+                f"v{__version__} was installed — restart/reconnect that MCP client "
+                "to load the new version"
             )
+        findings.append(finding(name, "warn", detail, "reconnect_client"))
     if not findings:
         findings.append(finding(name, "ok", "no stale db-conn-mcp processes found"))
     return findings
@@ -171,7 +187,12 @@ def check_pypi_latest(ctx: CheckContext) -> list[Finding]:
                 "upgrade_package",
             )
         ]
-    return [finding(name, "ok", f"v{__version__} is the latest published version")]
+    # "you have the latest" beside a still-running old process reads as an all-clear at
+    # exactly the wrong moment (issue #29) — say so, and point at the check that details it.
+    detail = f"v{__version__} is the latest published version"
+    if _scan_stale_processes().stale_pids:
+        detail += " — but a running process predates this install; see process_staleness"
+    return [finding(name, "ok", detail)]
 
 
 _TOP_LEVEL_KEYS = set(Config.model_fields)
@@ -186,7 +207,11 @@ def check_config_schema(ctx: CheckContext) -> list[Finding]:
     """
     name = "config_schema"
     if ctx.config_path is None:
-        return [finding(name, "skipped", "no configuration found — run `db-conn-mcp setup`")]
+        return [
+            finding(
+                name, "skipped", "no configuration found — run `db-conn-mcp setup`", "run_setup"
+            )
+        ]
     try:
         raw = json.loads(ctx.config_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -451,7 +476,16 @@ async def check_connectivity(ctx: CheckContext) -> list[Finding]:
             port_note = f" (active_port={entry['active_port']})" if "active_port" in entry else ""
             findings.append(finding(name, "ok", f"{db_name}: reachable{port_note}"))
             continue
-        findings.append(finding(name, "fail", f"{db_name}: {entry.get('detail', entry['status'])}"))
+        # The remedy lives in the sanitized diagnostic prose; the action says so in a
+        # word, so an agent never has to parse that prose to know a database needs fixing.
+        findings.append(
+            finding(
+                name,
+                "fail",
+                f"{db_name}: {entry.get('detail', entry['status'])}",
+                "fix_connection",
+            )
+        )
         conn = config.get(cfg, db_name)
         if _auth_failed_with_fallbacks(entry, conn):
             findings.extend(await _probe_port_identity(conn))
@@ -482,5 +516,5 @@ async def run_checks(config_path: Path | None, *, offline: bool = False) -> list
             findings.extend(result)
         except Exception as exc:  # noqa: BLE001 — the engine must never crash the caller
             detail = f"check crashed with {type(exc).__name__} — please report this"
-            findings.append(finding(name, "fail", detail))
+            findings.append(finding(name, "fail", detail, "report_bug"))
     return findings

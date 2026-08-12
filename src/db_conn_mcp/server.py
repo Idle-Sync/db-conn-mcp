@@ -476,10 +476,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         with a credential-free fallback-port identity probe. Returns findings as
         {check, status: ok|warn|fail|skipped, detail, suggested_action} where
         suggested_action is machine-actionable: reconnect_client, upgrade_package,
-        swap_primary_port, fix_permissions, fix_config, repair_client_config, or
-        none. Fix what you can; report the rest to the user verbatim. Output is
-        sanitized — never contains DSNs, hosts, or credentials. offline=true skips
-        the PyPI lookup.
+        swap_primary_port, fix_permissions, fix_config, repair_client_config,
+        fix_connection, install_doctor_extra, run_setup, report_bug, or none —
+        every finding that states a remedy names one. Fix what you can; report the
+        rest to the user verbatim. Output is sanitized — never contains DSNs, hosts,
+        or credentials. offline=true skips the PyPI lookup.
         """
         # Existence is re-evaluated per call (like the CLI): the config file can be
         # deleted after startup, and run_checks() reads None as "no configuration".

@@ -351,7 +351,7 @@ class Finding(TypedDict):
     suggested_action: str                        # machine-actionable, or "none"
 ```
 
-`suggested_action` is a small closed vocabulary — `reconnect_client`, `upgrade_package`, `swap_primary_port`, `fix_permissions`, `fix_config`, `repair_client_config`, `none` — so an agent can act on a finding without natural-language parsing.
+`suggested_action` is a small closed vocabulary — `reconnect_client`, `upgrade_package`, `swap_primary_port`, `fix_permissions`, `fix_config`, `repair_client_config`, `fix_connection`, `install_doctor_extra`, `run_setup`, `report_bug`, `none` — so an agent can act on a finding without natural-language parsing. Any finding whose detail carries a remedy names it here too; `none` is reserved for findings with nothing to do.
 
 | Check | Asks | Typical finding |
 |---|---|---|
@@ -360,7 +360,9 @@ class Finding(TypedDict):
 | `config_schema` | Unknown keys / wrong value types in `connections.json`? | `warn` with a did-you-mean hint, or `fail` on an invalid value |
 | `secrets_exposure` | Is the plaintext-DSN config world-readable or un-ignored in git? | `warn` (mode bits) / `fail` (committable) |
 | `client_paths` | Does each injected client entry still point at a real command — and can each detected client's config be parsed at all? | `warn` + `repair_client_config` |
-| `connectivity` | Is each configured database reachable? | `fail` with the sanitized cause, plus `port_identity` findings (see below) |
+| `connectivity` | Is each configured database reachable? | `fail` + `fix_connection` with the sanitized cause, plus `port_identity` findings (see below) |
+
+**One scan, two honest answers.** `process_staleness` and `pypi_latest` share `_scan_stale_processes()`, which returns the stale PIDs *or* a skip reason (no `psutil`, no install timestamp) — an empty result is never silently read as "all fresh". `pypi_latest` calls it only on the up-to-date path, so when the user has already upgraded but a pre-upgrade process is still serving, the `ok` detail reads `… is the latest published version — but a running process predates this install; see process_staleness` instead of an all-clear at exactly the wrong moment. The scan is deliberately uncached: a long-lived server would otherwise keep answering from a scan taken before the user restarted anything.
 
 **Two seams the engine reuses rather than reimplements.** `clients.py` was extracted out of `cli.py` so the `client_paths` check can ask "which clients exist, and what command did we inject?" without importing `cli.py` — which already imports `doctor`, so that would be a circular import. And the port-identity probe is a new `Dialect.probe_listener(host, port)` method, so *how you tell a Postgres from something else on a port* stays inside the dialect: the Postgres implementation opens a TCP connection, writes the 8-byte `SSLRequest`, and reads the single `S`/`N` status byte. **No credentials are ever sent**, and the probe reports only a boolean — the host never reaches a finding.
 

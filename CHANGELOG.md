@@ -42,6 +42,22 @@ the time of that release.
   their values. If a client of yours passes extra arguments, it will now see errors where
   it previously saw (wrong) results — fix the argument name.
 
+- **`doctor` no longer says "you're up to date" beside a server process that isn't.**
+  After a `pipx upgrade`, a still-running client process keeps serving the *old* build —
+  yet the release check happily reported `v0.5.6 is the latest published version`, which
+  reads as an all-clear at exactly the wrong moment. When a pre-upgrade process is still
+  running, that line now ends `— but a running process predates this install; see
+  process_staleness`. Nothing changes when no stale process is found, and when `psutil`
+  is missing (staleness is unknowable) the wording is untouched.
+
+- **Doctor findings that tell you what to do now say it in `suggested_action` too.**
+  Failing checks used to ship `suggested_action: "none"` with the actual remedy buried in
+  prose. Four sites now carry a machine-actionable verb: an unreachable database →
+  `fix_connection`, a check that crashed → `report_bug`, the process check with no
+  `psutil` installed → `install_doctor_extra`, and "no configuration found" →
+  `run_setup`. If you match on the action vocabulary, add those four values; details and
+  statuses are unchanged.
+
 ### Added
 
 - **Interactive commands now tell you when a newer release is out.** After a command
