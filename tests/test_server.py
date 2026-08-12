@@ -685,11 +685,26 @@ async def test_build_server_advertises_our_own_version(cfg_path):
     assert options.server_version == __version__
 
 
+async def _call_over_the_wire(app, name, arguments):
+    """Drive the low-level CallToolRequest handler — the surface a real client sees."""
+    handler = app._mcp_server.request_handlers[types.CallToolRequest]
+    request = types.CallToolRequest(
+        method="tools/call",
+        params=types.CallToolRequestParams(name=name, arguments=arguments),
+    )
+    return (await handler(request)).root
+
+
+def _fenced_payload(block):
+    """Return the JSON payload from inside one guarded text block."""
+    return json.loads("\n".join(block.text.split("\n")[2:-1]))
+
+
 # ---- the untrusted-data guard, end to end through call_tool ---------------------
 
 
 async def test_call_tool_guards_text_but_leaves_structured_content_intact(cfg_path):
-    """Text blocks are fenced; structuredContent stays exactly what the handler returned."""
+    """A metadata tool: text blocks are fenced; structuredContent is the handler's result."""
     app = server.build_server(cfg_path)
     content, structured = await app.call_tool("list_databases", {})
 
@@ -738,17 +753,85 @@ async def test_server_advertises_the_untrusted_data_policy(cfg_path):
     assert "untrusted" in app.instructions.lower()
 
 
-# ---- unknown tool parameters are rejected loudly (issue #29) --------------------
+# ---- row values are served ONLY inside the banner (no structuredContent) --------
+
+#: Valid arguments per value-bearing tool; fetch_rows needs a live cursor, opened below.
+_VALUE_TOOL_ARGS = {
+    "sample_table_rows": {"database": "prod", "table": "users"},
+    "execute_read_query": {"database": "prod", "sql": "SELECT 1"},
+    "search_value": {"database": "prod", "value": "alice"},
+}
 
 
-async def _call_over_the_wire(app, name, arguments):
-    """Drive the low-level CallToolRequest handler — the surface a real client sees."""
-    handler = app._mcp_server.request_handlers[types.CallToolRequest]
-    request = types.CallToolRequest(
-        method="tools/call",
-        params=types.CallToolRequestParams(name=name, arguments=arguments),
+async def _value_tool_arguments(app, name):
+    """Arguments for calling ``name``, opening a cursor first when it is fetch_rows."""
+    if name != "fetch_rows":
+        return _VALUE_TOOL_ARGS[name]
+    blocks = await app.call_tool("open_query_cursor", {"database": "prod", "sql": "SELECT 1"})
+    return {"cursor_id": _fenced_payload(blocks[0])["cursor_id"]}
+
+
+@pytest.mark.parametrize("name", sorted(server.VALUE_BEARING_TOOLS))
+async def test_value_bearing_tools_emit_no_structured_content(name, cfg_path, monkeypatch):
+    """All four row-value tools answer with a fenced text channel and NO structured one."""
+    _patch_dialect(monkeypatch, FakeDialect(cursor_batches=[[{"id": 1}]]))
+    app = server.build_server(cfg_path)
+
+    content, structured = await app.call_tool(name, await _value_tool_arguments(app, name))
+
+    assert structured is None
+    assert content and all(isinstance(block, TextContent) for block in content)
+    for block in content:
+        assert block.text.startswith(guard.GUARD_OPEN)
+        assert block.text.endswith(guard.GUARD_CLOSE)
+        assert guard.GUARD_NOTICE in block.text
+
+
+async def test_value_bearing_tool_reaches_the_client_without_structured_content(
+    cfg_path, monkeypatch
+):
+    """The real client path: sample_table_rows (the one with an output schema) serializes
+    to structuredContent=None, with the rows readable only inside the banner."""
+    _patch_dialect(monkeypatch, FakeDialect())
+    app = server.build_server(cfg_path)
+
+    result = await _call_over_the_wire(
+        app, "sample_table_rows", _VALUE_TOOL_ARGS["sample_table_rows"]
     )
-    return (await handler(request)).root
+
+    assert result.isError is False
+    assert result.structuredContent is None
+    text = result.content[0].text
+    assert text.startswith(guard.GUARD_OPEN) and text.endswith(guard.GUARD_CLOSE)
+    # The row itself is inside the fence — the only place it exists in the response.
+    assert _fenced_payload(result.content[0]) == {"id": 1}
+
+
+async def test_value_bearing_tools_advertise_no_output_schema(cfg_path):
+    """Suppressing structuredContent means un-declaring the schema — clients see the truth."""
+    app = server.build_server(cfg_path)
+    schemas = {tool.name: tool.outputSchema for tool in await app.list_tools()}
+
+    assert all(schemas[name] is None for name in server.VALUE_BEARING_TOOLS)
+    assert schemas["list_databases"] is not None  # metadata tools keep theirs
+
+
+async def test_metadata_tool_keeps_structured_content_over_the_wire(cfg_path):
+    """list_databases is not value-bearing: its structured channel still reaches clients."""
+    app = server.build_server(cfg_path)
+
+    result = await _call_over_the_wire(app, "list_databases", {})
+
+    assert result.isError is False
+    assert {row["name"] for row in result.structuredContent["result"]} == {
+        "prod",
+        "dev",
+        "trusted",
+    }
+    assert result.content[0].text.startswith(guard.GUARD_OPEN)
+
+
+# ---- unknown tool parameters are rejected loudly (issue #29) --------------------
 
 
 async def test_unknown_parameter_is_rejected_instead_of_silently_dropped(cfg_path, monkeypatch):

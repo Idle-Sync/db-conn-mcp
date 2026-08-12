@@ -13,6 +13,17 @@ the time of that release.
 
 ### Breaking / Behaviour changes
 
+- **The four tools that return raw row values no longer send a `structuredContent`
+  channel.** `sample_table_rows`, `execute_read_query`, `fetch_rows`, and `search_value`
+  now answer on the text channel only — the same JSON as before, inside the
+  `<<<UNTRUSTED DATABASE DATA …>>>` banner — and they no longer advertise an output
+  schema. If you parsed `structuredContent` from any of these, read the text channel
+  instead. Why: that banner is the prompt-injection defence, and row values are the most
+  attacker-controllable thing this server emits; a client that renders only the
+  structured channel was seeing exactly that data with no fence around it. Every other
+  tool (schemas, table stats, diagnostics, config) keeps its `structuredContent`
+  unchanged.
+
 - **A tool call carrying a parameter the tool doesn't have is now rejected instead of
   quietly ignored.** Previously the unknown argument was dropped and the tool ran anyway
   — calling `check_database(connection="prod")` probed *every* configured database while

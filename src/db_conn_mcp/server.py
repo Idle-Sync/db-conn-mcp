@@ -25,16 +25,29 @@ from .handlers import Handlers
 
 Transport = Literal["stdio", "http"]
 
-#: What ``FastMCP.call_tool`` may return: the text blocks alone, or — for a tool
-#: with an output schema (all 23 of ours) — ``(text blocks, structured content)``.
-ToolResult = Sequence[ContentBlock] | tuple[Sequence[ContentBlock], dict[str, Any]]
+#: What ``FastMCP.call_tool`` may return: the text blocks alone, or
+#: ``(text blocks, structured content)`` — where the structured half is ``None`` for
+#: the value-bearing tools below.
+ToolResult = Sequence[ContentBlock] | tuple[Sequence[ContentBlock], dict[str, Any] | None]
+
+#: Tools that return raw row VALUES — the most attacker-controllable content this server
+#: emits, since anyone who can write a row chooses the text. Their payload must reach the
+#: agent ONLY inside the untrusted-data banner, so these four emit no ``structuredContent``
+#: at all: a client that renders only the structured channel would otherwise read raw row
+#: data with no fence around it. Metadata tools (schemas, stats, diagnostics, config) keep
+#: their structured output.
+VALUE_BEARING_TOOLS = frozenset(
+    {"sample_table_rows", "execute_read_query", "fetch_rows", "search_value"}
+)
 
 
 class GuardedFastMCP(FastMCP):
     """FastMCP that rejects unknown arguments and fences every tool's *text* output.
 
     One seam covers all 23 tools (Rule 1: no per-tool boilerplate). Only the text
-    channel is wrapped — ``structuredContent`` is passed through **untouched** so it
+    channel is wrapped; for the tools in :data:`VALUE_BEARING_TOOLS` the structured
+    channel is dropped entirely, so raw row values cannot reach a client outside the
+    banner. Every other tool's ``structuredContent`` passes through **untouched** so it
     stays valid against the tool's output schema, which clients rely on.
     """
 
@@ -61,9 +74,18 @@ class GuardedFastMCP(FastMCP):
         )
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
-        """Reject unknown arguments, run the tool, then wrap its text blocks in the guard."""
+        """Reject unknown arguments, run the tool, then wrap its text blocks in the guard.
+
+        A value-bearing tool answers ``(guarded blocks, None)``: its rows are served on
+        the fenced text channel only. Their output schemas are un-declared at build time
+        (see :func:`_drop_value_bearing_output_schemas`), which is what lets ``None``
+        through the SDK's output validation.
+        """
         self._reject_unknown_arguments(name, arguments)
         result = await super().call_tool(name, arguments)
+        if name in VALUE_BEARING_TOOLS:
+            blocks = result[0] if isinstance(result, tuple) else result
+            return guard_content_blocks(blocks), None
         if isinstance(result, tuple):
             unstructured, structured = result
             return guard_content_blocks(unstructured), structured
@@ -111,13 +133,35 @@ If they don't want to install anything, fall back to get_database_schema(format=
 """
 
 
+def _drop_value_bearing_output_schemas(app: GuardedFastMCP) -> None:
+    """Un-declare the output schema of every :data:`VALUE_BEARING_TOOLS` entry.
+
+    The SDK's low-level handler rejects a result whose ``structuredContent`` is ``None``
+    while the tool still advertises an ``outputSchema`` ("Output validation error"), so
+    suppressing the structured channel means the schema must go with it — and a client
+    then sees the honest surface: these tools promise text only.
+
+    Today only ``sample_table_rows`` actually declares one (FastMCP derives a schema from
+    a ``list[dict]`` return annotation but not from a bare ``dict``); the loop covers all
+    four so a future annotation change cannot silently re-open the gap.
+    """
+    for name in VALUE_BEARING_TOOLS:
+        tool = app._tool_manager.get_tool(name)
+        if tool is None:  # pragma: no cover — every name above is registered below
+            continue
+        tool.fn_metadata.output_schema = None
+        tool.fn_metadata.output_model = None
+
+
 def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
     """Construct the guarded FastMCP app with all 23 tools and 2 prompts."""
     resolved = resolve_path(str(config_path) if config_path else None)
     handlers = Handlers(resolved)
     # 23 tools + 2 prompts registered below. `instructions` reaches the client in the
-    # initialize response — the durable half of the prompt-injection defence, since a
-    # client reading only structuredContent never sees the per-response text guard.
+    # initialize response — the standing half of the prompt-injection defence, covering
+    # the metadata tools, whose structuredContent a client may read without ever seeing
+    # the per-response text guard. The row-value tools close that gap outright: they
+    # emit no structuredContent, so their data exists only inside the fence.
     app = GuardedFastMCP("db-conn-mcp", instructions=UNTRUSTED_DATA_POLICY)
     # FastMCP takes no `version`, and the low-level server then advertises the *SDK's*
     # version in the initialize response's serverInfo. Stamp our own instead, so a
@@ -417,6 +461,7 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         """How to export a schema: self-contained SQL vs. faithful pg_dump (+ installing it)."""
         return FAITHFUL_SCHEMA_GUIDANCE
 
+    _drop_value_bearing_output_schemas(app)
     return app
 
 
