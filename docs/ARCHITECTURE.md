@@ -2,7 +2,7 @@
 
 This document shows how `db-conn-mcp` is structured and traces the **end-to-end flow**, from a user setting up a connection on the CLI, through an AI agent exploring and querying the database, to the write-safety gate that protects their data.
 
-> **v1 scope:** PostgreSQL only. The code is built around a **dialect seam** so adding MySQL / SQLite later is a *one-file* job. See [Extensibility](#extensibility-adding-a-database).
+> **v1 scope:** PostgreSQL only. The code is built around a **dialect seam** so adding MySQL / SQLite later is a *one-file* job. See [Extensibility](#9-extensibility--adding-a-database).
 
 ---
 
@@ -17,9 +17,11 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
    └──────────────┘  http   │      ├─► guard.py       ── untrusted data │
                             │      ├─► diagnostics.py ── error → cause  │
    ┌──────────────┐         │      ├─► doctor.py      ── setup checks   │
-   │  Human user  │  CLI    │      ▼                                   │
-   │ (terminal)   │────────►│  dialects/   ── Postgres SQL + RO guard  │
-   └──────────────┘ setup   │   (registry) │        config.py ◄─ conns │
+   │  Human user  │  CLI    │      ├─► gui/app.py     ── the dashboard  │
+   │ (terminal or │◄───────►│      │   verify.py      ── live MCP check │
+   │  browser)    │ HTTP    │      ▼                                   │
+   └──────────────┘ :31415  │  dialects/   ── Postgres SQL + RO guard  │
+                            │   (registry) │        config.py ◄─ conns │
                             └──────┼───────────────────────│──────────┘
                                    ▼                        ▼
                             ┌─────────────┐         ┌────────────────┐
@@ -31,7 +33,7 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 
 | Module | Responsibility | Knows about Postgres? |
 |---|---|---|
-| `cli.py` | Parse args (`--config`, `--transport`); run server or a management subcommand (`setup`/`status`/`add`/`clients`/`remove`/`yolo`); drive the interactive wizard | No |
+| `cli.py` | Parse args (`--config`, `--transport`, `--no-gui`); run server or a management subcommand (`setup`/`status`/`add`/`clients`/`remove`/`yolo`/`doctor`/`gui`); drive the interactive wizard | No |
 | `clients.py` | Known MCP clients: `ClientSpec` (config path + entry format + file syntax), the per-syntax `Codec` + `read_config`/`write_config` seam, and the pure inject/remove/detect helpers. Shared by `cli.py` and the doctor | No |
 | `config.py` | Resolve, load, validate, **and save** `connections.json` | No |
 | `models.py` | Pydantic types: `Connection{name, dsn, mode, yolo}`, `Config` | No |
@@ -43,7 +45,10 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 | `diagnostics.py` | Classify **one driver error** → sanitized cause + fix (the per-connection diagnostic) | No |
 | `doctor.py` | The whole-setup diagnostic engine: the check registry, the `Finding` shape, and the crash guard. Composes `clients.py`, `config.py`, `handlers.py`, and the dialect seam | No |
 | `handlers.py` | The 22 database-facing tool handlers as plain async methods (transport-free, unit-testable) + the open-cursor registry + the dry-run grant registry (`_dry_run_grants`) | No |
-| `server.py` | `GuardedFastMCP` app (a `FastMCP` subclass): registers the 23 tools + 2 prompts (22 onto `handlers`, `doctor` onto `doctor.py`), applies `guard.py` at the `call_tool` seam, transport wiring | No |
+| `server.py` | `GuardedFastMCP` app (a `FastMCP` subclass): registers the 23 tools + 2 prompts (22 onto `handlers`, `doctor` onto `doctor.py`), applies `guard.py` at the `call_tool` seam, transport wiring, and the ride-along GUI start (`gui=True` unless `--no-gui`) | No |
+| `verify.py` | Live MCP verification: spawn a launch line and complete `initialize` → `tools/list` → `list_databases` as a *client*, returning one of a fixed verdict vocabulary. Always a separate process | No |
+| `gui/app.py` | The local dashboard: a token-guarded Starlette app on 127.0.0.1:31415, its JSON API over `config.py`/`clients.py`/`doctor.py`/`verify.py`, and both lifecycles (ride-along thread, standalone runner) | No |
+| `gui/static/` | The single page — hand-written HTML/CSS/JS, no build step, no external requests | No |
 
 The **dialect layer is the only place that knows a database is PostgreSQL.** Everything above it speaks the abstract `Dialect` contract.
 
@@ -361,7 +366,66 @@ class Finding(TypedDict):
 
 ---
 
-## 8. Extensibility — Adding a Database
+## 8. Flow F — The browser dashboard (`gui/`) and live verification (`verify.py`)
+
+The CLI wizard and the doctor answer "is this set up, and is it healthy?" from a terminal. The dashboard is the same answers, clickable — and it adds the one question neither could answer honestly: **does the binary your client actually launches speak MCP?**
+
+### Three roles, kept apart
+
+The design's load-bearing distinction is that these are three different things and none of them may impersonate another:
+
+| Role | Who plays it | What it may do |
+|---|---|---|
+| **Setup front-end** | `gui/app.py` + `gui/static/` | Edit `connections.json` and client entries — through `config.py` and `clients.py`, the same seams the wizard uses |
+| **Server-under-test** | A *separately spawned* `db-conn-mcp` process | Answer MCP. Its launch line comes from the client's own config, not from what we think it should be |
+| **Test MCP client** | `verify.py`, on the `mcp` SDK's **client** side | Hold a real conversation with the server-under-test and report a verdict |
+
+**The honesty rule: verification never answers from its own process.** The dashboard already imports every handler; answering `tools/list` from itself would be trivially green and would prove nothing about the user's install. So `verify.py` always spawns, always over a real transport, always with the SDK's own client library — the same one the user's AI client embeds. A client whose config still points at a venv that was deleted, or at an older copy on `PATH`, fails here exactly as it fails for the client.
+
+```
+GET  /                     ─► index.html (token stamped into its asset URLs)
+POST /api/verify/client/{key} ─► verify_client ─spawn─► db-conn-mcp (stdio) ─► verdict
+POST /api/verify/http         ─► verify_http   ─spawn─► db-conn-mcp --transport http ─► verdict
+POST /api/doctor              ─► doctor.run_checks (unchanged engine, third front end)
+GET/POST/PATCH/DELETE /api/databases[/{name}] ─► config.py  (public_view only, never a DSN)
+POST /api/clients/{key}/(un)inject            ─► clients.py (inject_entry / remove_entry)
+```
+
+A verdict is a fixed vocabulary, never prose to parse: `answers`, `launch_failed`, `handshake_failed`, `wrong_tool_count` (the run compares against `EXPECTED_TOOL_COUNT = 23`, the same number the smoke test pins), `timeout`, and — HTTP only — `port_in_use`, because the SSE port is not configurable today and a busy port is not a failure. Each result also carries the version the spawned server reported in `serverInfo`, and sets `stale` when it differs from the running dashboard's: the "upgraded, but this client still starts the old copy" symptom, now observed per client rather than inferred. (That field only became meaningful once the server stopped advertising the *SDK's* version as its own — see the initialize-handshake fix.)
+
+### The guard stack
+
+Every request passes the same boundary before any route sees it, and the boundary refuses to be constructed with an empty token — an empty credential compares equal to supplying none:
+
+1. **Loopback bind.** `127.0.0.1:31415` only; nothing off-machine can connect.
+2. **Host-header allowlist.** Only `127.0.0.1:31415` / `localhost:31415` are served. This is the DNS-rebinding defence: a hostile page that resolves its own name to 127.0.0.1 still arrives with the wrong `Host`.
+3. **A per-start token on *every* request** — the page and `/static` included, not just the API — compared with `hmac.compare_digest` on bytes (a `str` compare raises on non-ASCII, and a crash *inside* the boundary would escape to the error middleware as a CSP-less 500). Because a browser does not copy the page's `?token=` onto its subresource requests, `index.html` carries the marker `__GUI_TOKEN__`, replaced server-side with the percent-encoded token so it cannot break out of the attribute it lands in. That leaks nothing new: the token is already in the address bar of the page being served.
+4. **`content-security-policy: default-src 'self'`, no CORS, `cache-control: no-store`** on every response, 403s included — the page fetches nothing external, no other origin can read it, and nothing carrying `?token=` reaches the browser's disk cache.
+5. **POST for anything that spawns or writes.** Verification, doctor, injection, and connection mutations are never reachable by a link, an image tag, or a form GET.
+6. **DSNs are inbound-only.** Responses are built from `Connection.public_view()`, so no route *has* a field a DSN could travel out in. A rejected body reports the offending **field names** only: a pydantic `ValidationError` stringifies the values it rejected, and one of those is the DSN, so its text never reaches a response (Rule 6). The same reflex covers everything else — an unparseable client config yields a category, never the file's contents; an unknown connection or client key is not echoed back.
+7. **Text-only rendering.** The page writes every value with `textContent`; a database or table name cannot become markup.
+
+Two `asyncio.Lock`s live per app, and deliberately are not one: `config_lock` makes each load-mutate-save of `connections.json` (and of a client config) indivisible against a lost update, while `verify_lock` serializes spawns so two tabs cannot race processes. Sharing them would park every config edit behind a ~30-second subprocess.
+
+### The ride-along lifecycle
+
+The dashboard is not a separate daemon a user has to remember to start — it rides along with the server:
+
+```
+server.run(gui=True)  ──► gui.start_in_thread()
+                             │  bind 127.0.0.1:31415  ── taken? ─► return False, silently
+                             │  ▼ won the port
+                             │  write ~/.db-conn-mcp/gui-token (created 0600, not chmod'ed after)
+                             └─► uvicorn on a daemon thread, logs suppressed
+```
+
+**Bind first, then serve**: claiming the socket *is* the election, so the first server process to start wins and every later one skips without an error, a log line, or a retry. The whole call is wrapped so that any GUI failure whatsoever returns `False` rather than reaching the MCP server — stdout carries the protocol, so uvicorn's logging is disabled outright and its access log doubly so (the request line contains `?token=<secret>`). Only the winner writes the token file, and it is created with mode `0600` rather than chmod'ed afterwards: a write-then-chmod leaves the secret at the umask default for the window in between. `--no-gui` skips the whole thing.
+
+`db-conn-mcp gui` is the second front end. It reads the token file and probes `/api/summary` with the token in a **header** (a URL ends up in logs and process listings; the query form is used only for the browser hand-off), and reuses that dashboard if the response identifies itself as ours. Otherwise it runs standalone in the foreground: same app plus an `on_request` callback driving a 15-minute idle shutdown — mounted *inside* the guard, so an unauthenticated poker cannot hold the process open. A port held by something that is not us is reported as exactly that.
+
+---
+
+## 9. Extensibility — Adding a Database
 
 Adding MySQL or SQLite later touches **exactly one new file** plus a one-line registration. Nothing above the dialect layer changes.
 
@@ -411,7 +475,7 @@ Because each dialect owns its own read-only enforcement and catalog queries, tho
 
 ---
 
-## 9. End-to-End at a Glance
+## 10. End-to-End at a Glance
 
 ```
 Human ──setup──► connections.json ──read──► config.py
@@ -423,6 +487,9 @@ AI Agent ──MCP (stdio/http)──► server.py ─────┼─► safe
                                   ▼            ▼
                               dialects/registry ──► PostgresDialect ──► PostgreSQL
                                 (scheme → impl)      (RO guard + SQL)
+
+Browser ──HTTP 127.0.0.1:31415 (token)──► gui/app.py ──► config.py · clients.py · doctor.py
+                                              └──► verify.py ──spawns──► a real server process
 ```
 
 1. A human registers a DB once via the CLI wizard → `connections.json`.
@@ -433,3 +500,4 @@ AI Agent ──MCP (stdio/http)──► server.py ─────┼─► safe
 6. `set_yolo_mode` lets a trusted DB skip the per-op ask, persisted to disk.
 7. Any unreachable DB yields a **sanitized diagnostic** (cause + fix), never a raw error or leaked DSN; `check_database` probes proactively and `troubleshoot_connection` is the full gotchas checklist.
 8. When the problem isn't the database, the **doctor** (`db-conn-mcp doctor` or the `doctor` tool) sweeps the whole setup — stale processes, release freshness, config schema, secrets exposure, client entries, connectivity — into one list of sanitized, machine-actionable findings.
+9. All of that is also **clickable**: a loopback, token-guarded **dashboard** rides along with every server start (`--no-gui` opts out) and `db-conn-mcp gui` opens it — connections CRUD without ever displaying a DSN, client inject/uninject through the same seam as the wizard, the doctor, and **live verification** that spawns each client's own launch line and talks real MCP to it.
