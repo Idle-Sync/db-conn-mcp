@@ -295,6 +295,8 @@ That is the question the dashboard exists to answer, and it answers it with evid
 
 A result also carries the **version the spawned server reported**, and flags it as **stale** when that differs from the dashboard's own — the "I upgraded, but that client still starts the old copy" case, now visible per client instead of guessed at. The dashboard **never** answers these questions from its own process: it always spawns a separate one, so a client pointed at a different install is caught rather than masked. A separate button runs the same check over the HTTP (SSE) transport.
 
+> One honest caveat about that HTTP button: the SSE port (8000) isn't configurable yet, so when the dashboard is riding along inside a server *you* started with `--transport http`, that server already holds port 8000 and the check can only ever report `port_in_use`. Run the HTTP check from a standalone `db-conn-mcp gui`, or from a dashboard hosted by a stdio server, to get a real verdict.
+
 ### It starts with the server
 
 Starting the MCP server **also** hosts the dashboard on `127.0.0.1:31415`, from a background thread. The first server process to start wins the port; any others skip it silently, so five clients running the server still means one dashboard. If something else already holds the port, the server carries on without one — a dashboard problem can never take the MCP server down with it.
