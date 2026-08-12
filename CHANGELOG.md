@@ -22,6 +22,14 @@ the time of that release.
   "your host process stopped" notice is now a mains-warning strip, and the whole page
   follows your system light/dark setting with contrast checked in both. Nothing you click
   behaves differently; only the appearance changed.
+- **The "you need a token" page you get from visiting `http://127.0.0.1:31415` by hand now
+  looks like part of the tool** instead of an unstyled browser default. It styles itself
+  from a small inline block, because the real stylesheet sits behind the same guard that
+  refused you — so that one response is served under a *stricter* policy than the rest of
+  the dashboard (`default-src 'none'; style-src 'unsafe-inline'`): it may not fetch a
+  script, image, font, frame or request of any kind, from anywhere. It still refuses you,
+  still with a 403, and still discloses nothing but the tool's name and `db-conn-mcp gui`.
+
 ### Added
 
 - **Opening `http://127.0.0.1:31415` without a token now tells you how to get in.** Instead

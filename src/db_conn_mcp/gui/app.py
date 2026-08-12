@@ -3,8 +3,10 @@
 Security model (spec: 2026-08-11 GUI design): loopback bind, Host-header
 allowlist (DNS-rebinding defence), a per-start bearer token checked on every
 request including ``/``, no CORS ever, CSP ``default-src 'self'`` on every
-response. API responses use a fixed field vocabulary — a DSN cannot appear in
-any response by construction (Rule 6).
+response — the single exception being the unauthenticated hint page, which is
+served under a strictly tighter policy (see :data:`_HINT_CSP`). API responses use
+a fixed field vocabulary — a DSN cannot appear in any response by construction
+(Rule 6).
 """
 
 import asyncio
@@ -62,23 +64,68 @@ _ASSET_TOKEN_MARKER = "__GUI_TOKEN__"
 #: navigates here by hand is overwhelmingly the owner, and a bare ``{"error":
 #: "forbidden"}`` leaves them with no way in. It names the tool and the command that
 #: opens the dashboard and nothing else (Rule 6): the port is documented, so what runs
-#: here is already public, and none of it helps without the token. Deliberately
-#: unstyled — CSP forbids inline styles and an unauthenticated stylesheet fetch would
-#: itself be a 403.
+#: here is already public, and none of it helps without the token. It carries the
+#: dashboard's identity in miniature — wordmark, one idle lamp, one sentence, the
+#: command — from a small inline stylesheet, because the real stylesheet lives behind
+#: the guard and an unauthenticated fetch of it would itself be a 403. See
+#: :data:`_HINT_CSP` for the policy that inline block is served under.
 _HINT_PAGE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>db-conn-mcp dashboard</title>
+<style>
+:root {
+  --paper: #f6f7f9; --panel: #ffffff; --ink: #1b2432;
+  --muted: #5c6879; --line: #d9dee6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #141a23; --panel: #1a2230; --ink: #dee5ef;
+    --muted: #96a1b3; --line: #28323f;
+  }
+}
+body {
+  margin: 0; padding: 15vh 20px 0; background: var(--paper); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 540px; margin: 0 auto; }
+h1 {
+  display: flex; align-items: center; gap: 9px; margin: 0 0 14px;
+  font: 600 20px/1.2 ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace;
+  letter-spacing: -0.01em;
+}
+h1::before {
+  content: ""; flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
+  border: 1.5px solid var(--muted);
+}
+p { margin: 0 0 14px; color: var(--muted); }
+pre {
+  margin: 0; padding: 8px 10px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 3px; overflow-x: auto;
+  font: 13px/1.4 ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace;
+}
+</style>
 </head>
 <body>
+<main>
 <h1>db-conn-mcp</h1>
-<p>This dashboard needs a session token, and this request did not carry one.</p>
-<p>Run <code>db-conn-mcp gui</code> in a terminal to open it.</p>
+<p>This dashboard needs a session token, and this request did not carry one. Run:</p>
+<pre>db-conn-mcp gui</pre>
+</main>
 </body>
 </html>
 """
+#: The one response served under a policy other than :data:`_CSP`, and it is a
+#: *stricter* one in every direction except its own ``<style>`` block: ``'none'``
+#: rather than ``'self'`` as the default, so this page may not fetch a script, an
+#: image, a font, a frame or an XHR — not even from this origin. The trade is
+#: deliberate. The body is a module-level constant with no interpolation and no
+#: script of any kind, so ``'unsafe-inline'`` here can only ever apply the CSS
+#: written above; and the alternative — an external stylesheet — is impossible,
+#: because every asset sits behind the guard that just refused this request.
+_HINT_CSP = "default-src 'none'; style-src 'unsafe-inline'"
 
 
 def token_path() -> Path:
@@ -105,13 +152,17 @@ def _forbidden() -> JSONResponse:
 
 
 def _hint_response() -> HTMLResponse:
-    """The same 403, rendered for a human: :data:`_HINT_PAGE` with the same headers.
+    """The same 403, rendered for a human: :data:`_HINT_PAGE`, no-store like the rest.
 
     Both headers are set here for the reason :func:`_forbidden` sets them — this
     response replaces the call to the next app, so nothing downstream stamps them.
+
+    The exception is the policy: this is the only response served under
+    :data:`_HINT_CSP` rather than :data:`_CSP`, so that its inline ``<style>`` block
+    applies. Read that constant for why the swap is a tightening, not a loosening.
     """
     response = HTMLResponse(_HINT_PAGE, status_code=403)
-    response.headers["content-security-policy"] = _CSP
+    response.headers["content-security-policy"] = _HINT_CSP
     response.headers["cache-control"] = _NO_STORE
     return response
 
