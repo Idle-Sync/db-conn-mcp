@@ -501,8 +501,9 @@ async def test_check_sequences_flags_behind():
         fetchrow_results=[{"last_value": 10, "is_called": True}, {"max_id": 25}],
     )
     report = await PostgresDialect().check_sequences(conn)
-    assert report[0]["behind"] is True
-    assert report[0]["last_value"] == 10 and report[0]["max_id"] == 25
+    assert report["total_sequences"] == 1
+    assert report["sequences"][0]["behind"] is True
+    assert report["sequences"][0]["last_value"] == 10 and report["sequences"][0]["max_id"] == 25
     # identifiers are quoted in the per-sequence probes
     assert '"public"."users_id_seq"' in conn.fetchrow_calls[0]
     assert '"public"."users"' in conn.fetchrow_calls[1]
@@ -524,25 +525,80 @@ async def test_check_sequences_uncalled_sequence_collides_at_equal_value():
         fetchrow_results=[{"last_value": 5, "is_called": False}, {"max_id": 5}],
     )
     report = await PostgresDialect().check_sequences(conn)
-    assert report[0]["behind"] is True
+    assert report["sequences"][0]["behind"] is True
+
+
+def _owned(name="s", table="t"):
+    return {
+        "sequence_schema": "public",
+        "sequence": name,
+        "table_schema": "public",
+        "table": table,
+        "column": "id",
+    }
 
 
 async def test_check_sequences_healthy_and_empty_table():
-    owned = [
-        {
-            "sequence_schema": "public",
-            "sequence": "s",
-            "table_schema": "public",
-            "table": "t",
-            "column": "id",
-        }
-    ]
+    # Empty table can't be ahead of the sequence — and a healthy row is filtered out
+    # of the default (behind_only) answer, while still being counted as scanned.
+    def conn():
+        return FakeConn(
+            fetch_results=[[_owned()]],
+            fetchrow_results=[{"last_value": 100, "is_called": True}, {"max_id": None}],
+        )
+
+    default = await PostgresDialect().check_sequences(conn())
+    assert default == {"total_sequences": 1, "sequences": []}
+
+    census = await PostgresDialect().check_sequences(conn(), behind_only=False)
+    assert census["total_sequences"] == 1
+    assert census["sequences"][0]["behind"] is False
+
+
+async def test_check_sequences_default_keeps_only_problems():
     conn = FakeConn(
-        fetch_results=[owned],
-        fetchrow_results=[{"last_value": 100, "is_called": True}, {"max_id": None}],
+        fetch_results=[[_owned("bad_seq", "bad"), _owned("good_seq", "good")]],
+        fetchrow_results=[
+            {"last_value": 10, "is_called": True},
+            {"max_id": 25},
+            {"last_value": 99, "is_called": True},
+            {"max_id": 3},
+        ],
     )
     report = await PostgresDialect().check_sequences(conn)
-    assert report[0]["behind"] is False  # empty table can't be ahead of the sequence
+    assert report["total_sequences"] == 2
+    assert [s["sequence"] for s in report["sequences"]] == ["bad_seq"]
+
+
+async def test_check_sequences_census_returns_every_sequence():
+    conn = FakeConn(
+        fetch_results=[[_owned("bad_seq", "bad"), _owned("good_seq", "good")]],
+        fetchrow_results=[
+            {"last_value": 10, "is_called": True},
+            {"max_id": 25},
+            {"last_value": 99, "is_called": True},
+            {"max_id": 3},
+        ],
+    )
+    report = await PostgresDialect().check_sequences(conn, behind_only=False)
+    assert report["total_sequences"] == 2
+    assert [s["sequence"] for s in report["sequences"]] == ["bad_seq", "good_seq"]
+
+
+async def test_check_sequences_skips_unprobeable_sequence_and_excludes_it_from_total():
+    class Boom(FakeConn):
+        async def fetchrow(self, sql, *args):
+            if "bad" in sql:
+                raise asyncpg.PostgresError("no privilege")
+            return await super().fetchrow(sql, *args)
+
+    conn = Boom(
+        fetch_results=[[_owned("bad_seq", "bad"), _owned("good_seq", "good")]],
+        fetchrow_results=[{"last_value": 1, "is_called": True}, {"max_id": 9}],
+    )
+    report = await PostgresDialect().check_sequences(conn)
+    assert report["total_sequences"] == 1  # only the sequences actually inspected
+    assert [s["sequence"] for s in report["sequences"]] == ["good_seq"]
 
 
 # ---- table_stats / show_activity ---------------------------------------------------

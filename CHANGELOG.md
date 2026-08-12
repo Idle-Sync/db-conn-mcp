@@ -24,6 +24,15 @@ the time of that release.
   tool (schemas, table stats, diagnostics, config) keeps its `structuredContent`
   unchanged.
 
+- **`check_sequences` now returns only the problem sequences by default — pass
+  `behind_only=false` for the full census.** A database with 130 healthy sequences used
+  to send all 130 rows back just to report the one that was stale; the default answer is
+  now the stale ones alone, plus a new `total_sequences` field saying how many were
+  checked, so `behind_count: 0` still reads as an affirmative "all clear" rather than an
+  empty result. `behind_only=false` restores exactly the previous list (also with
+  `total_sequences` added). If you consumed `sequences` as a complete inventory of every
+  sequence, pass `behind_only=false`.
+
 - **A tool call carrying a parameter the tool doesn't have is now rejected instead of
   quietly ignored.** Previously the unknown argument was dropped and the tool ran anyway
   — calling `check_database(connection="prod")` probed *every* configured database while

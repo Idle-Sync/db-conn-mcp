@@ -191,7 +191,7 @@ The server exposes **23 tools** and **2 prompts**:
 | `fetch_rows` | cursor | Fetch the next N rows from an open cursor; auto-closes when drained. |
 | `close_cursor` | cursor | Close a cursor and release its connection (idempotent). |
 | `diff_schemas` | insight | Structural schema diff between two configured databases (tables, columns, types, defaults, PK/FK) — verify a migrated copy matches its source. |
-| `check_sequences` | insight | Find sequences **behind** their column's max value (the silent post-migration breakage); fix with `setval()`. |
+| `check_sequences` | insight | Find sequences **behind** their column's max value (the silent post-migration breakage); fix with `setval()`. Lists only the problem sequences by default, with `total_sequences` saying how many were checked; pass `behind_only=false` for the full census. |
 | `table_stats` | insight | Approximate row counts + disk/index sizes per table, largest first (statistics only, no scans). |
 | `show_activity` | insight | Sanitized `pg_stat_activity`: pid, state, wait events, query age — **no user names, client addresses, or query text** (text is opt-in and truncated). |
 | `set_yolo_mode` | config | Enable/disable `yolo` for one database (persisted). |

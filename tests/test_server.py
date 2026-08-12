@@ -93,6 +93,7 @@ class FakeDialect:
         self.table_stats_calls: list[dict] = []
         self.list_tables_calls: list[dict] = []
         self.find_columns_calls: list[dict] = []
+        self.sequences_behind_only = None
 
     async def connect(self, dsn, *, read_only):
         self.connected_read_only = read_only
@@ -155,11 +156,16 @@ class FakeDialect:
         self.explained.append((sql, analyze))
         return {"plan": ["Seq Scan on users"]}
 
-    async def check_sequences(self, conn):
-        return [
+    async def check_sequences(self, conn, behind_only=True):
+        self.sequences_behind_only = behind_only
+        rows = [
             {"sequence": "users_id_seq", "table": "users", "column": "id", "behind": True},
             {"sequence": "orgs_id_seq", "table": "orgs", "column": "id", "behind": False},
         ]
+        return {
+            "total_sequences": len(rows),
+            "sequences": [r for r in rows if r["behind"]] if behind_only else rows,
+        }
 
     async def table_stats(self, conn, limit=None, min_size_bytes=None, table=None):
         self.table_stats_calls.append(
@@ -696,12 +702,45 @@ async def test_diff_schemas_handler_reads_both(cfg_path, monkeypatch):
 # ---- sequence / stats / activity handlers ----------------------------------------------
 
 
-async def test_check_sequences_counts_behind(cfg_path, monkeypatch):
-    _patch_dialect(monkeypatch, FakeDialect())
+async def test_check_sequences_reports_only_problems_by_default(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
     h = Handlers(cfg_path)
     result = await h.check_sequences("prod")
+    assert dialect.sequences_behind_only is True
     assert result["behind_count"] == 1
+    assert result["total_sequences"] == 2
+    assert [s["sequence"] for s in result["sequences"]] == ["users_id_seq"]
+
+
+async def test_check_sequences_census_on_request(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.check_sequences("prod", behind_only=False)
+    assert dialect.sequences_behind_only is False
     assert len(result["sequences"]) == 2
+    assert result["total_sequences"] == 2
+    assert result["behind_count"] == 1
+
+
+async def test_check_sequences_clean_database_reads_affirmatively(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+
+    async def no_problems(conn, behind_only=True):
+        dialect.sequences_behind_only = behind_only
+        return {"total_sequences": 130, "sequences": []}
+
+    dialect.check_sequences = no_problems
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.check_sequences("prod")
+    assert result == {
+        "database": "prod",
+        "sequences": [],
+        "behind_count": 0,
+        "total_sequences": 130,
+    }
 
 
 async def test_table_stats_handler(cfg_path, monkeypatch):
@@ -1336,6 +1375,17 @@ async def test_execute_write_query_tool_defaults_to_dry_run(tmp_path):
     props = tool.inputSchema["properties"]
     assert props["dry_run"]["default"] is True
     assert props["skip_dry_run"]["default"] is False
+
+
+async def test_check_sequences_tool_defaults_to_problems_only(tmp_path):
+    cfg = {"connections": [{"name": "db", "dsn": "postgresql://u:p@h:5432/db", "mode": "read"}]}
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    app = build_server(config_path=path)
+    tools = await app.list_tools()
+    tool = next(t for t in tools if t.name == "check_sequences")
+    assert tool.inputSchema["properties"]["behind_only"]["default"] is True
+    assert "behind_only=false" in tool.description
 
 
 # ---- the doctor tool is registered on the app ------------------------------------

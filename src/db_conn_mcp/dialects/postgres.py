@@ -900,8 +900,12 @@ class PostgresDialect(Dialect):
         # Each row is one plan line under a single "QUERY PLAN" column.
         return {"plan": [next(iter(dict(r).values())) for r in rows]}
 
-    async def check_sequences(self, conn: Any) -> list[dict]:
+    async def check_sequences(self, conn: Any, behind_only: bool = True) -> dict:
+        # "behind" needs the sequence's own last_value/is_called next to the column's
+        # max, which is one probe pair per sequence — the catalog query can't decide it,
+        # so the filtering happens here, over the rows we inspected.
         report: list[dict] = []
+        scanned = 0
         for r in await conn.fetch(_OWNED_SEQUENCES_SQL):
             d = dict(r)
             qseq = f"{_quote_identifier(d['sequence_schema'])}.{_quote_identifier(d['sequence'])}"
@@ -918,16 +922,20 @@ class PostgresDialect(Dialect):
             # An uncalled sequence hands out last_value itself next, so its safe
             # ceiling is one lower than a called one.
             ceiling = last_value if is_called else last_value - 1
+            behind = max_id is not None and max_id > ceiling
+            scanned += 1
+            if behind_only and not behind:
+                continue
             report.append(
                 {
                     **d,
                     "last_value": last_value,
                     "is_called": is_called,
                     "max_id": max_id,
-                    "behind": max_id is not None and max_id > ceiling,
+                    "behind": behind,
                 }
             )
-        return report
+        return {"total_sequences": scanned, "sequences": report}
 
     async def table_stats(
         self,

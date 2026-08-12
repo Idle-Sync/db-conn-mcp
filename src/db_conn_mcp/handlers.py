@@ -638,18 +638,26 @@ class Handlers:
             **_diff_schemas(schemas[0], schemas[1]),
         }
 
-    async def check_sequences(self, database: str) -> dict:
-        """Report sequences whose next value would collide with existing rows."""
+    async def check_sequences(self, database: str, behind_only: bool = True) -> dict:
+        """Report sequences whose next value would collide with existing rows.
+
+        By default only the problem sequences are listed; ``behind_only=False`` returns
+        the full census. Either way ``total_sequences`` says how many were inspected, so
+        ``behind_count: 0`` is an affirmative "nothing is stale" answer rather than an
+        empty one.
+        """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            sequences = await dialect.check_sequences(db)
+            report = await dialect.check_sequences(db, behind_only)
         finally:
             await db.close()
+        sequences = report["sequences"]
         return {
             "database": database,
             "sequences": sequences,
             "behind_count": sum(1 for s in sequences if s["behind"]),
+            "total_sequences": report["total_sequences"],
         }
 
     async def table_stats(

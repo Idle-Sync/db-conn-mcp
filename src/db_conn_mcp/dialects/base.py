@@ -149,13 +149,18 @@ class Dialect(ABC):
         """
 
     @abstractmethod
-    async def check_sequences(self, conn: Any) -> list[dict]:
-        """Report every column-owned sequence vs. the max value in its column.
+    async def check_sequences(self, conn: Any, behind_only: bool = True) -> dict:
+        """Compare every column-owned sequence with the max value in its column.
 
-        Returns ``[{sequence_schema, sequence, table_schema, table, column,
-        last_value, is_called, max_id, behind}]`` where ``behind=True`` means the
-        next sequence value would collide with existing data (the classic
-        post-migration stale-sequence problem).
+        Returns ``{"total_sequences": int, "sequences": [{sequence_schema, sequence,
+        table_schema, table, column, last_value, is_called, max_id, behind}]}`` where
+        ``behind=True`` means the next sequence value would collide with existing data
+        (the classic post-migration stale-sequence problem).
+
+        ``behind_only=True`` (the default) keeps only the problem rows in
+        ``sequences``; ``False`` returns the full census. ``total_sequences`` always
+        counts every sequence actually inspected, so a filtered answer still says how
+        much was checked.
         """
 
     @abstractmethod

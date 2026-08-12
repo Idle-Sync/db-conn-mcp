@@ -394,13 +394,17 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         return await handlers.diff_schemas(database_a, database_b)
 
     @app.tool()
-    async def check_sequences(database: str) -> dict:
+    async def check_sequences(database: str, behind_only: bool = True) -> dict:
         """Find sequences lagging behind their column's max value (stale after migrations).
 
         A `behind: true` sequence would hand out an id that already exists — fix with
-        setval(). Run this after any bulk copy or logical-replication migration.
+        setval(). Run this after any bulk copy or logical-replication migration. By
+        default only the problem sequences are listed, with `total_sequences` reporting
+        how many were checked — so `behind_count: 0` means "all clear". Pass
+        `behind_only=false` for the full census; on a large schema that is one row per
+        sequence (hundreds), so ask for it only when you need every sequence's state.
         """
-        return await handlers.check_sequences(database)
+        return await handlers.check_sequences(database, behind_only)
 
     @app.tool()
     async def table_stats(
