@@ -27,11 +27,34 @@ from db_conn_mcp.gui.app import (
 )
 
 
+def _claim_gui_port() -> socket.socket | None:
+    """Hold the real GUI port, or ``None`` when something else already holds it.
+
+    The question is asked by *binding*, not by connecting, for two reasons. It is
+    the same question :func:`_bind_gui_port` asks in production — "would a server
+    starting now win this port?" — and a connect probe answers a different one
+    ("is something accepting?") unreliably: measured against a holder that binds
+    and listens without accepting, both ``connect_ex`` (WSAEWOULDBLOCK, 10035) and
+    ``socket.create_connection`` (timeout) report the port *free* once its backlog
+    fills. A refused bind cannot be a false negative.
+    """
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", GUI_PORT))
+        sock.listen(1)
+    except OSError:
+        sock.close()
+        return None
+    return sock
+
+
 def _gui_port_is_taken() -> bool:
-    """Whether something outside this process already listens on the real GUI port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.settimeout(0.25)
-        return probe.connect_ex(("127.0.0.1", GUI_PORT)) == 0
+    """Whether something outside this process already holds the real GUI port."""
+    sock = _claim_gui_port()
+    if sock is None:
+        return True
+    sock.close()
+    return False
 
 
 @contextlib.contextmanager
@@ -42,16 +65,12 @@ def _gui_port_held():
     port raises (WSAEADDRINUSE on Windows), so claiming the socket unconditionally
     would turn "the developer has a client running" into a test error.
     """
-    if _gui_port_is_taken():
-        yield
-        return
-    blocker = socket.socket()
-    blocker.bind(("127.0.0.1", GUI_PORT))
-    blocker.listen(1)
+    blocker = _claim_gui_port()
     try:
         yield
     finally:
-        blocker.close()
+        if blocker is not None:
+            blocker.close()
 
 
 def test_idle_decision_is_pure():
