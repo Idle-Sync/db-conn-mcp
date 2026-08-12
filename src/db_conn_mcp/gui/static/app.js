@@ -11,7 +11,26 @@
  *     written until a human presses a button.
  */
 
-const token = new URLSearchParams(location.search).get("token") || "";
+/**
+ * The session token this page will send on every call.
+ *
+ * The query string is the freshly-opened case. A bookmarked or reloaded URL has
+ * none - it was authenticated by the session cookie, which is HttpOnly and so
+ * unreadable here - and then the token the server stamped into the page is the only
+ * source. Both are percent-encoded server-side; URLSearchParams already decodes.
+ *
+ * Read at load time: the script is deferred, so the document is fully parsed.
+ */
+function sessionToken() {
+  const fromQuery = new URLSearchParams(location.search).get("token");
+  if (fromQuery) {
+    return fromQuery;
+  }
+  const meta = document.querySelector('meta[name="gui-token"]');
+  return meta ? decodeURIComponent(meta.content) : "";
+}
+
+const token = sessionToken();
 const HDRS = { "X-GUI-Token": token, "Content-Type": "application/json" };
 
 /** Cards by client key, so a refresh can put a message back where it belongs. */

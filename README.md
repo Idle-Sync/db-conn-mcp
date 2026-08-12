@@ -316,12 +316,14 @@ To turn it off, add `--no-gui` to the db-conn-mcp command in your client's confi
 
 `db-conn-mcp gui` reuses whichever dashboard is already running; if none is, it starts one in the foreground that shuts itself down after 15 idle minutes.
 
+The tab it opens carries the session token in its URL, and that URL is **bookmarkable for as long as that server keeps running**: opening the page also sets a session cookie, so a reload — or a bare `http://127.0.0.1:31415` with the query string gone — keeps working. The cookie only ever authorises *reading*; anything that spawns a process or writes a file still needs the real token, and the next server start mints a new one, which retires every old session. Visit the port without a token and the page now tells you to run `db-conn-mcp gui` instead of answering with a bare `{"error": "forbidden"}`.
+
 ### The security posture
 
 It is a local tool, and it is built to stay local:
 
 - **Loopback only.** It binds `127.0.0.1`, so nothing from another machine can reach it — and it refuses any request that didn't address it as `127.0.0.1:31415` or `localhost:31415`, which is what stops a hostile web page from pointing a DNS name at your loopback and talking to it.
-- **A secret token on every request** — including the page itself and its CSS/JS, not just the API. The token is new on every start, compared in constant time, and stored user-only (mode `0600`) at `~/.db-conn-mcp/gui-token`. Someone else on your machine without read access to that file cannot use the dashboard.
+- **A secret token on every request** — including the page itself and its CSS/JS, not just the API. The token is new on every start, compared in constant time, and stored user-only (mode `0600`) at `~/.db-conn-mcp/gui-token`. Someone else on your machine without read access to that file cannot use the dashboard. It is accepted from a header, from `?token=`, and — **for reads only** — from the `HttpOnly`, `SameSite=Strict` session cookie the page sets, so a bookmark cannot be turned into a write.
 - **No CORS, ever**, and a `default-src 'self'` content-security policy: the page loads nothing from the internet and no other origin can read from it. Nothing it serves is written to your browser's disk cache.
 - **DSNs go in and never come out.** The API has no field that can carry a DSN outward, so it cannot leak one even by accident — and a rejected connection reports the *names* of the invalid fields, never the values you typed.
 - **Anything that spawns a process or writes a file is a POST**, never something a link or an image tag can trigger, and everything on the page is rendered as text — database and client names can't smuggle markup in.

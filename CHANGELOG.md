@@ -11,7 +11,21 @@ the time of that release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Opening `http://127.0.0.1:31415` without a token now tells you how to get in.** Instead
+  of a raw `{"error": "forbidden"}` with no way forward, a browser navigating to the
+  dashboard gets a small page saying it needs a token and to run `db-conn-mcp gui`. The
+  request is still refused (it is still a 403, and it still discloses nothing else) — only
+  what a human sees changed. Every other unauthenticated request keeps the same opaque JSON
+  refusal it always had.
+- **The dashboard URL is now bookmarkable for the life of the server run.** Opening the page
+  with its token also sets a session cookie, so reloading the tab — or visiting the bare
+  `http://127.0.0.1:31415` after the `?token=` is gone — keeps working instead of dropping
+  you back to a 403. The cookie is `HttpOnly` and `SameSite=Strict`, it disappears when you
+  close the browser, and it authorises **reads only**: anything that spawns a process,
+  edits `connections.json`, or writes a client config still requires the real token. As
+  before, restarting the server mints a new token and retires every existing session.
 
 ## [0.6.1] — 2026-08-12
 

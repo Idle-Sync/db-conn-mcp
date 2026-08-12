@@ -9,7 +9,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from db_conn_mcp import __version__
-from db_conn_mcp.gui.app import GUI_PORT, TOKEN_HEADER, create_app
+from db_conn_mcp.gui.app import GUI_PORT, SESSION_COOKIE, TOKEN_HEADER, create_app
 
 TOKEN = "test-token-abcdef"
 HOST = f"127.0.0.1:{GUI_PORT}"
@@ -686,6 +686,146 @@ def test_static_js_scrolls_the_banner_into_view_and_settles_in_flight_work(clien
     assert "settleInFlight" in js
     assert "button[disabled]" in js
     assert "in-flight" in js
+    assert "innerHTML" not in js
+
+
+# ---- Issue 34: the browser hint page and the session cookie ----
+
+#: What a browser actually sends when a human types the URL into the address bar.
+BROWSER_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+
+
+def _cookie(value: str = TOKEN) -> dict[str, str]:
+    """Headers carrying only the session cookie — no header or query credential."""
+    return {"cookie": f"{SESSION_COOKIE}={value}"}
+
+
+def test_unauthenticated_browser_root_gets_the_hint_page(client):
+    """A human who navigates to the port gets a way in, not a raw JSON refusal.
+
+    The status stays 403 — "unauthenticated is 403 everywhere" is the invariant;
+    only the representation changes.
+    """
+    r = client.get("/", headers={"accept": BROWSER_ACCEPT})
+    assert r.status_code == 403
+    assert r.headers["content-type"].startswith("text/html")
+    assert "db-conn-mcp gui" in r.text
+    assert r.headers.get("content-security-policy") == "default-src 'self'"
+    assert r.headers.get("cache-control") == "no-store"
+
+
+def test_the_hint_page_discloses_nothing(client):
+    """Rule 6: it names the tool and the command that opens it, and nothing else."""
+    text = client.get("/", headers={"accept": BROWSER_ACCEPT}).text
+    assert TOKEN not in text
+    for leak in ("token=", "connections.json", "gui-token", "/api/", "/static/", "Traceback"):
+        assert leak not in text, leak
+
+
+def test_unauthenticated_root_without_an_html_accept_is_the_json_403(client):
+    """Only a browser navigation gets prose; every other caller keeps the fixed body."""
+    for accept in ("application/json", "*/*"):
+        r = client.get("/", headers={"accept": accept})
+        assert r.status_code == 403
+        assert r.json() == {"error": "forbidden"}
+    assert client.get("/").json() == {"error": "forbidden"}  # no Accept at all
+
+
+def test_the_hint_page_is_only_served_for_the_root_path(client):
+    """An API or asset URL stays opaque even when a browser asks for HTML."""
+    for path in ("/api/summary", "/static/app.js"):
+        r = client.get(path, headers={"accept": BROWSER_ACCEPT})
+        assert r.status_code == 403
+        assert r.json() == {"error": "forbidden"}
+
+
+def test_tokened_index_sets_the_session_cookie(client):
+    r = client.get(f"/?token={TOKEN}")
+    assert r.status_code == 200
+    raw = r.headers["set-cookie"]
+    assert raw.startswith(f"{SESSION_COOKIE}={TOKEN}")
+    lowered = raw.lower()
+    assert "httponly" in lowered
+    assert "samesite=strict" in lowered
+    assert "path=/" in lowered
+    # Session lifetime: it dies with the browser, and the next server start mints a
+    # new token anyway, so a persisted one could only ever be a stale secret on disk.
+    assert "max-age" not in lowered
+    assert "expires" not in lowered
+    # The dashboard is plain http on loopback; a Secure cookie would never be sent.
+    assert "secure" not in lowered
+
+
+def test_no_other_response_sets_a_cookie(client):
+    """The cookie is minted by the page hand-off only — never by an API or an asset."""
+    served = (_get(client, "/api/summary"), _get(client, "/static/app.js"))
+    for r in served:
+        assert r.status_code == 200
+        assert "set-cookie" not in r.headers
+    assert "set-cookie" not in client.get("/", headers={"accept": BROWSER_ACCEPT}).headers
+
+
+def test_a_cookie_alone_serves_the_page_with_the_token_in_a_meta_tag(client):
+    """The bookmark case: no query string to read, so the page carries the token."""
+    r = client.get("/", headers=_cookie())
+    assert r.status_code == 200
+    assert f'<meta name="gui-token" content="{TOKEN}">' in r.text
+    assert f"/static/app.js?token={TOKEN}" in r.text
+
+
+def test_a_cookie_alone_serves_a_safe_read(client):
+    assert client.get("/api/summary", headers=_cookie()).status_code == 200
+    assert client.get("/static/app.js", headers=_cookie()).status_code == 200
+
+
+def test_a_cookie_alone_can_never_authorize_a_write(cfg_client, monkeypatch):
+    """Ambient credentials must not be enough for an unsafe method.
+
+    ``SameSite=Strict`` is the browser's part of that promise; this is the server's,
+    and it does not depend on the browser keeping it. Every mutating route still
+    demands the token in a header or the query string.
+    """
+    from db_conn_mcp import config
+
+    client, cfg = cfg_client
+    body = {"name": "s", "dsn": SECRET_DSN, "mode": "read"}
+    assert client.post("/api/databases", json=body, headers=_cookie()).status_code == 403
+    assert client.patch("/api/databases/s", json={}, headers=_cookie()).status_code == 403
+    assert client.delete("/api/databases/s", headers=_cookie()).status_code == 403
+    assert client.post("/api/databases/s/check", headers=_cookie()).status_code == 403
+    assert client.post("/api/verify/http", headers=_cookie()).status_code == 403
+    assert client.post("/api/doctor", json={}, headers=_cookie()).status_code == 403
+    assert not cfg.exists()
+
+    # The same calls with the real credential are not refused.
+    assert client.post("/api/databases", json=body, headers=_hdr()).status_code == 201
+
+    def boom(explicit=None):
+        raise config.ConfigError("none")
+
+    monkeypatch.setattr(config, "resolve_path", boom)
+    assert client.post("/api/verify/http", headers=_hdr()).status_code == 409
+
+
+def test_an_explicit_credential_beats_the_cookie(client):
+    """Acceptance order: header, then query, then (safe methods only) the cookie."""
+    wrong_header = {**_cookie(), TOKEN_HEADER: "wrong"}
+    assert client.get("/api/summary", headers=wrong_header).status_code == 403
+    assert client.get("/api/summary?token=wrong", headers=_cookie()).status_code == 403
+
+
+def test_a_wrong_cookie_is_refused_and_still_gets_the_hint_page(client):
+    bad = _cookie("not-the-token")
+    assert client.get("/api/summary", headers=bad).status_code == 403
+    r = client.get("/", headers={**bad, "accept": BROWSER_ACCEPT})
+    assert r.status_code == 403
+    assert "db-conn-mcp gui" in r.text
+
+
+def test_static_js_falls_back_to_the_meta_tag_token(client):
+    """A reloaded bookmark has no ``?token=``; the page's own meta tag is the source."""
+    js = client.get(f"/static/app.js?token={TOKEN}").text
+    assert 'meta[name="gui-token"]' in js
     assert "innerHTML" not in js
 
 

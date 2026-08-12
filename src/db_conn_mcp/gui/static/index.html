@@ -11,6 +11,12 @@
   No inline <style> or <script> may be added here - CSP is `default-src 'self'`,
   which is not `unsafe-inline`, so an inline block would silently never run.
 -->
+<!--
+  The same token, for the page's own fetches. A visit authenticated by the session
+  cookie arrives with no query string for app.js to read - the cookie is HttpOnly,
+  so script cannot read that either - and this tag is what keeps such a page working.
+-->
+<meta name="gui-token" content="__GUI_TOKEN__">
 <link rel="stylesheet" href="/static/style.css?token=__GUI_TOKEN__">
 <script src="/static/app.js?token=__GUI_TOKEN__" defer></script>
 </head>
