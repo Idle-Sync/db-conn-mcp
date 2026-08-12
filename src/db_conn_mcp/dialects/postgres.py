@@ -316,17 +316,24 @@ _OWNED_SEQUENCES_SQL = """
     ORDER BY sn.nspname, s.relname
 """
 
-#: Per-table size/row statistics from the statistics collector (no table scans).
-_TABLE_STATS_SQL = """
+#: Per-table size/row statistics from the statistics collector (no table scans). Split
+#: so :func:`_build_table_stats_sql` can slot a WHERE between the two halves.
+_TABLE_STATS_SELECT = """
     SELECT s.schemaname AS schema,
            s.relname AS table,
            s.n_live_tup AS approx_rows,
            pg_table_size(s.relid) AS table_bytes,
            pg_indexes_size(s.relid) AS index_bytes,
            pg_total_relation_size(s.relid) AS total_bytes
-    FROM pg_stat_user_tables s
-    ORDER BY pg_total_relation_size(s.relid) DESC, s.schemaname, s.relname
-"""
+    FROM pg_stat_user_tables s"""
+
+#: The total-size expression the rows report — also what ``min_size_bytes`` filters on.
+_TABLE_STATS_SIZE = "pg_total_relation_size(s.relid)"
+
+_TABLE_STATS_ORDER = f"\n    ORDER BY {_TABLE_STATS_SIZE} DESC, s.schemaname, s.relname\n"
+
+#: The unfiltered query — what an argument-free ``table_stats`` still runs, verbatim.
+_TABLE_STATS_SQL = _TABLE_STATS_SELECT + _TABLE_STATS_ORDER
 
 #: Sanitized activity view — no user names, no client addresses; query text is
 #: opt-in ($1) and truncated so secrets embedded in SQL can't leak by default.
@@ -403,6 +410,44 @@ def _build_table_search_sql(schema: str, table: str, columns: list[str], limit: 
         parts.append(f"count(*) FILTER (WHERE {cond}) AS m_{i}")
         parts.append(f"(array_agg(DISTINCT {qc}) FILTER (WHERE {cond}))[1:{limit}] AS s_{i}")
     return f"SELECT {', '.join(parts)} FROM {qtable}"
+
+
+def _build_table_stats_sql(
+    table: str | None = None,
+    min_size_bytes: int | None = None,
+    limit: int | None = None,
+) -> tuple[str, list[Any]]:
+    """Compose the table-stats query with optional filters; return ``(sql, args)``.
+
+    Every filter *value* is bound through a placeholder (Rule 9) — nothing is
+    interpolated. ``table`` matches the table name and may be schema-qualified
+    (``analytics.events`` binds both parts); ``min_size_bytes`` filters on the same
+    total-size expression the rows report; ``limit`` caps the answer but binds
+    ``limit + 1`` so one row *beyond* the limit comes back and the caller can tell a
+    truncated answer from a complete one. With no filters the text is exactly
+    :data:`_TABLE_STATS_SQL`, so the default answer is unchanged.
+    """
+    conditions: list[str] = []
+    args: list[Any] = []
+    if table is not None:
+        name, schema = _split_schema_table(table)
+        args.append(name)
+        conditions.append(f"s.relname = ${len(args)}")
+        if schema is not None:
+            args.append(schema)
+            conditions.append(f"s.schemaname = ${len(args)}")
+    if min_size_bytes is not None:
+        args.append(int(min_size_bytes))
+        conditions.append(f"{_TABLE_STATS_SIZE} >= ${len(args)}")
+
+    sql = _TABLE_STATS_SELECT
+    if conditions:
+        sql += "\n    WHERE " + "\n      AND ".join(conditions)
+    sql += _TABLE_STATS_ORDER
+    if limit is not None:
+        args.append(max(0, int(limit)) + 1)
+        sql += f"    LIMIT ${len(args)}\n"
+    return sql, args
 
 
 def _assemble_ddl(
@@ -831,8 +876,15 @@ class PostgresDialect(Dialect):
             )
         return report
 
-    async def table_stats(self, conn: Any) -> list[dict]:
-        return [dict(r) for r in await conn.fetch(_TABLE_STATS_SQL)]
+    async def table_stats(
+        self,
+        conn: Any,
+        limit: int | None = None,
+        min_size_bytes: int | None = None,
+        table: str | None = None,
+    ) -> list[dict]:
+        sql, args = _build_table_stats_sql(table, min_size_bytes, limit)
+        return [dict(r) for r in await conn.fetch(sql, *args)]
 
     async def show_activity(self, conn: Any, include_query: bool = False) -> list[dict]:
         rows = await conn.fetch(_SHOW_ACTIVITY_SQL, bool(include_query))

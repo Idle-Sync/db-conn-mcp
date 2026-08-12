@@ -17,6 +17,7 @@ from db_conn_mcp.dialects.postgres import (
     PostgresDialect,
     _assemble_ddl,
     _build_table_search_sql,
+    _build_table_stats_sql,
     _is_junk_table,
     _leading_keyword,
     _pg_env_from_dsn,
@@ -517,6 +518,47 @@ async def test_table_stats_maps_rows():
     ]
     conn = FakeConn([rows])
     assert await PostgresDialect().table_stats(conn) == rows
+    assert conn.fetch_args[0] == ()  # unfiltered: nothing bound
+
+
+def test_build_table_stats_sql_unfiltered_is_the_plain_query():
+    """No filters must produce exactly today's query, so the default answer is unchanged."""
+    sql, args = _build_table_stats_sql()
+    assert sql == pg._TABLE_STATS_SQL
+    assert args == []
+
+
+def test_build_table_stats_sql_binds_every_filter_value():
+    sql, args = _build_table_stats_sql(table="users", min_size_bytes=1024, limit=5)
+    assert "users" not in sql and "1024" not in sql  # values are bound, not interpolated
+    assert "$1" in sql and "$2" in sql and "$3" in sql
+    assert args == ["users", 1024, 6]  # limit+1: one row beyond reveals truncation
+    assert sql.index("WHERE") < sql.index("ORDER BY") < sql.index("LIMIT")
+
+
+def test_build_table_stats_sql_splits_a_schema_qualified_table():
+    sql, args = _build_table_stats_sql(table="analytics.events")
+    assert args == ["events", "analytics"]
+    assert "s.relname = $1" in sql and "s.schemaname = $2" in sql
+
+
+def test_build_table_stats_sql_filters_on_the_reported_size_expression():
+    sql, _args = _build_table_stats_sql(min_size_bytes=1)
+    assert "pg_total_relation_size(s.relid) >= $1" in sql
+
+
+async def test_table_stats_fetches_one_row_beyond_the_limit():
+    rows = [{"schema": "public", "table": f"t{i}", "total_bytes": i} for i in range(3)]
+    conn = FakeConn([rows])
+    result = await PostgresDialect().table_stats(conn, limit=2)
+    assert result == rows  # the dialect hands back what it fetched; the handler caps
+    assert conn.fetch_args[0] == (3,)
+
+
+async def test_table_stats_coerces_a_negative_limit():
+    conn = FakeConn([[]])
+    await PostgresDialect().table_stats(conn, limit=-5)
+    assert conn.fetch_args[0] == (1,)
 
 
 async def test_show_activity_strips_query_by_default():

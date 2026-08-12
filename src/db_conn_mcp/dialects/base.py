@@ -151,12 +151,24 @@ class Dialect(ABC):
         """
 
     @abstractmethod
-    async def table_stats(self, conn: Any) -> list[dict]:
+    async def table_stats(
+        self,
+        conn: Any,
+        limit: int | None = None,
+        min_size_bytes: int | None = None,
+        table: str | None = None,
+    ) -> list[dict]:
         """Approximate row counts and on-disk sizes per user table.
 
         Returns ``[{schema, table, approx_rows, table_bytes, index_bytes,
         total_bytes}]`` ordered largest-first. Row counts come from the
         database's own statistics (fast, approximate) — no table scans.
+
+        ``table`` narrows to one table (may be schema-qualified), ``min_size_bytes``
+        drops anything smaller than that total size, and ``limit`` caps the scan.
+        Filter values MUST be bound, never interpolated (Rule 9). With ``limit`` set,
+        implementations return up to ``limit + 1`` rows — the extra row is how the
+        caller detects truncation; capping to ``limit`` is the caller's job.
         """
 
     @abstractmethod

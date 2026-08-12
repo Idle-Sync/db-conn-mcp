@@ -395,13 +395,22 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         return await handlers.check_sequences(database)
 
     @app.tool()
-    async def table_stats(database: str) -> dict:
+    async def table_stats(
+        database: str,
+        limit: int | None = None,
+        min_size_bytes: int | None = None,
+        table: str | None = None,
+    ) -> dict:
         """Approximate row counts and disk/index sizes per table, largest first.
 
         Uses the database's own statistics — fast, no table scans. Useful for planning
-        migration copy order and spotting anomalies.
+        migration copy order and spotting anomalies. Ask the narrower question instead of
+        filtering afterwards: `table` for one table (optionally schema-qualified),
+        `min_size_bytes` to skip anything smaller, `limit` for the top N by total size.
+        With `limit` set the result carries `truncated: true` when more tables matched
+        than were returned.
         """
-        return await handlers.table_stats(database)
+        return await handlers.table_stats(database, limit, min_size_bytes, table)
 
     @app.tool()
     async def show_activity(database: str, include_query: bool = False) -> dict:

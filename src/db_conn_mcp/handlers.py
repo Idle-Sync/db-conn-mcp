@@ -640,15 +640,35 @@ class Handlers:
             "behind_count": sum(1 for s in sequences if s["behind"]),
         }
 
-    async def table_stats(self, database: str) -> dict:
-        """Approximate row counts and disk/index sizes per table, largest first."""
+    async def table_stats(
+        self,
+        database: str,
+        limit: int | None = None,
+        min_size_bytes: int | None = None,
+        table: str | None = None,
+    ) -> dict:
+        """Approximate row counts and disk/index sizes per table, largest first.
+
+        ``table`` narrows to one table (optionally schema-qualified), ``min_size_bytes``
+        drops anything smaller, and ``limit`` returns only the top N by total size. When
+        ``limit`` is set the result also carries ``truncated`` — ``True`` when more tables
+        matched than were returned. Without ``limit`` the payload is exactly as before.
+        """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            tables = await dialect.table_stats(db)
+            tables = await dialect.table_stats(db, limit, min_size_bytes, table)
         finally:
             await db.close()
-        return {"database": database, "tables": tables}
+        if limit is None:
+            return {"database": database, "tables": tables}
+        # The dialect fetched one row past the limit; its presence is the truncation signal.
+        capped = max(0, int(limit))
+        return {
+            "database": database,
+            "tables": tables[:capped],
+            "truncated": len(tables) > capped,
+        }
 
     async def show_activity(self, database: str, include_query: bool = False) -> dict:
         """Sanitized server activity — what is holding connections right now."""

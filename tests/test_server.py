@@ -72,6 +72,7 @@ class FakeDialect:
         dump_result=None,
         cursor_batches=None,
         db_schema=None,
+        table_stats_rows=None,
     ):
         self.raise_on_connect = raise_on_connect
         self.exec_result = exec_result or {"columns": [], "rows": []}
@@ -86,6 +87,10 @@ class FakeDialect:
         self.explained: list[tuple] = []
         self.cancelled_pids: list[int] = []
         self.activity_include_query = None
+        self.table_stats_rows = table_stats_rows or [
+            {"schema": "public", "table": "users", "approx_rows": 5, "total_bytes": 8192}
+        ]
+        self.table_stats_calls: list[dict] = []
 
     async def connect(self, dsn, *, read_only):
         self.connected_read_only = read_only
@@ -152,8 +157,14 @@ class FakeDialect:
             {"sequence": "orgs_id_seq", "table": "orgs", "column": "id", "behind": False},
         ]
 
-    async def table_stats(self, conn):
-        return [{"schema": "public", "table": "users", "approx_rows": 5, "total_bytes": 8192}]
+    async def table_stats(self, conn, limit=None, min_size_bytes=None, table=None):
+        self.table_stats_calls.append(
+            {"limit": limit, "min_size_bytes": min_size_bytes, "table": table}
+        )
+        rows = list(self.table_stats_rows)
+        if limit is not None:  # the dialect serves one row beyond the limit
+            rows = rows[: max(0, int(limit)) + 1]
+        return rows
 
     async def show_activity(self, conn, include_query=False):
         self.activity_include_query = include_query
@@ -654,6 +665,56 @@ async def test_table_stats_handler(cfg_path, monkeypatch):
     result = await h.table_stats("prod")
     assert dialect.connected_read_only is True
     assert result["tables"][0]["table"] == "users"
+    # Unfiltered answer is exactly what it always was — no truncation key without a limit.
+    assert result == {"database": "prod", "tables": dialect.table_stats_rows}
+    assert dialect.table_stats_calls == [{"limit": None, "min_size_bytes": None, "table": None}]
+
+
+def _stat_rows(n):
+    """``n`` canned stats rows, largest first."""
+    return [{"schema": "public", "table": f"t{i}", "total_bytes": 100 - i} for i in range(n)]
+
+
+async def test_table_stats_caps_rows_and_reports_truncation(cfg_path, monkeypatch):
+    dialect = FakeDialect(table_stats_rows=_stat_rows(5))
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.table_stats("prod", limit=2)
+    assert [row["table"] for row in result["tables"]] == ["t0", "t1"]
+    assert result["truncated"] is True
+
+
+async def test_table_stats_truncated_false_when_everything_fits(cfg_path, monkeypatch):
+    dialect = FakeDialect(table_stats_rows=_stat_rows(2))
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.table_stats("prod", limit=5)
+    assert len(result["tables"]) == 2
+    assert result["truncated"] is False
+
+
+async def test_table_stats_forwards_filters_to_the_dialect(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    await h.table_stats("prod", limit=3, min_size_bytes=1024, table="public.users")
+    assert dialect.table_stats_calls == [
+        {"limit": 3, "min_size_bytes": 1024, "table": "public.users"}
+    ]
+
+
+async def test_table_stats_tool_accepts_the_new_filters(cfg_path, monkeypatch):
+    """The filters are declared on the tool, so the unknown-parameter seam lets them by."""
+    dialect = FakeDialect(table_stats_rows=_stat_rows(4))
+    _patch_dialect(monkeypatch, dialect)
+    app = server.build_server(cfg_path)
+    blocks = await app.call_tool(
+        "table_stats", {"database": "prod", "limit": 1, "min_size_bytes": 10, "table": "t0"}
+    )
+    stats = _fenced_payload(blocks[0])
+    assert stats["truncated"] is True
+    assert len(stats["tables"]) == 1
+    assert dialect.table_stats_calls == [{"limit": 1, "min_size_bytes": 10, "table": "t0"}]
 
 
 async def test_show_activity_handler_defaults_sanitized(cfg_path, monkeypatch):
