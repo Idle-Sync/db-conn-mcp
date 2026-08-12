@@ -11,6 +11,15 @@ the time of that release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.0] — 2026-08-12
+
+The tools get sharper: bounds on everything unbounded, loud rejection of arguments that used
+to vanish silently, raw database values fenced on every channel a client can read, and a
+one-line nudge when a newer release exists. Still 23 tools and 2 prompts. **Read the
+breaking changes first** — three of them alter what existing consumers observe.
+
 ### Breaking / Behaviour changes
 
 - **The four tools that return raw row values no longer send a `structuredContent`
@@ -586,7 +595,8 @@ agents.
 - Setup and management CLI — `setup`, `status`, `add`, `clients`, `check`, `remove`, `yolo` —
   with auto-injection into 8 MCP clients.
 
-[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.6...v0.6.0
