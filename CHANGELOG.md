@@ -11,6 +11,14 @@ the time of that release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.6.0] — 2026-08-12
+
+A browser dashboard, and the first proof your setup actually speaks MCP. Still 23 tools and
+2 prompts — nothing about querying your databases changed, but read the behaviour changes
+below: the server now hosts the dashboard by default.
+
 ### Added
 
 - **A browser dashboard — the CLI's equal, clickable.** One page on
@@ -429,7 +437,8 @@ agents.
 - Setup and management CLI — `setup`, `status`, `add`, `clients`, `check`, `remove`, `yolo` —
   with auto-injection into 8 MCP clients.
 
-[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.6...HEAD
+[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.6...v0.6.0
 [0.5.6]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.3...v0.5.4
