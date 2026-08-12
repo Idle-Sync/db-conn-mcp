@@ -4,8 +4,13 @@ TEST ORDER MATTERS in this file. ``test_start_in_thread_serves_and_writes_token`
 claims the real GUI port for the rest of the pytest process (daemon thread, no
 clean stop), so it MUST stay last — the skip test needs the port free-then-taken
 on its own terms, and every other test here binds an ephemeral port instead.
+
+The two tests that touch the real port also have to cope with a *foreign* holder:
+once this branch ships, any running MCP server hosts a dashboard on 31415, so a
+developer's own client makes that the normal state rather than the exception.
 """
 
+import contextlib
 import socket
 import time
 
@@ -20,6 +25,33 @@ from db_conn_mcp.gui.app import (
     run_standalone,
     start_in_thread,
 )
+
+
+def _gui_port_is_taken() -> bool:
+    """Whether something outside this process already listens on the real GUI port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.25)
+        return probe.connect_ex(("127.0.0.1", GUI_PORT)) == 0
+
+
+@contextlib.contextmanager
+def _gui_port_held():
+    """Guarantee the real GUI port is held for the block, binding it only if it is free.
+
+    A live dashboard already satisfies the precondition, and a second bind of a held
+    port raises (WSAEADDRINUSE on Windows), so claiming the socket unconditionally
+    would turn "the developer has a client running" into a test error.
+    """
+    if _gui_port_is_taken():
+        yield
+        return
+    blocker = socket.socket()
+    blocker.bind(("127.0.0.1", GUI_PORT))
+    blocker.listen(1)
+    try:
+        yield
+    finally:
+        blocker.close()
 
 
 def test_idle_decision_is_pure():
@@ -95,13 +127,8 @@ def test_start_in_thread_skips_when_port_taken(tmp_path, monkeypatch, capfd):
     # Pointed at tmp_path so a regression that writes the token BEFORE winning the
     # bind fails here instead of silently clobbering the live GUI's real token.
     monkeypatch.setattr("db_conn_mcp.gui.app.token_path", lambda: tmp_path / "gui-token")
-    blocker = socket.socket()
-    blocker.bind(("127.0.0.1", GUI_PORT))
-    blocker.listen(1)
-    try:
+    with _gui_port_held():
         assert start_in_thread() is False
-    finally:
-        blocker.close()
     assert not (tmp_path / "gui-token").exists()  # the loser writes nothing
     assert capfd.readouterr().out == ""  # stdout is sacred
 
@@ -143,6 +170,11 @@ def test_server_run_survives_a_broken_gui(monkeypatch):
 def test_start_in_thread_serves_and_writes_token(tmp_path, monkeypatch, capfd):
     import httpx
 
+    if _gui_port_is_taken():
+        pytest.skip(
+            f"127.0.0.1:{GUI_PORT} is already held — this test needs to win the port. "
+            "Stop the running dashboard (or the MCP server hosting it) and re-run."
+        )
     monkeypatch.setattr("db_conn_mcp.gui.app.token_path", lambda: tmp_path / "gui-token")
     assert start_in_thread() is True
     token = (tmp_path / "gui-token").read_text(encoding="utf-8").strip()

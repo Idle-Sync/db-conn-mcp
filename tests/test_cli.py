@@ -6,7 +6,9 @@ driving it with scripted ``input``.
 """
 
 import builtins
+import io
 import json
+import sys
 
 import pytest
 
@@ -104,8 +106,27 @@ def test_main_http_on_tty_still_runs_server(monkeypatch):
 
 def test_star_cta_prints_only_when_called(capsys):
     """The star nudge fires from its function — never as a side effect of import."""
+    out = capsys.readouterr()  # drop anything an earlier fixture printed
     cli._print_star_cta()
-    assert cli.REPO_URL in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert cli.REPO_URL in out
+    assert "db-conn-mcp gui" in out  # the tip is part of the same call
+
+
+def test_star_cta_survives_a_cp1252_stdout(monkeypatch):
+    """A redirected Windows console cannot encode the star — the tip must still land.
+
+    The star used to print first and unguarded, so ``UnicodeEncodeError`` ate the
+    dashboard tip on exactly the platform the tip is most needed on.
+    """
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", newline="")
+    monkeypatch.setattr(sys, "stdout", stream)
+    cli._print_star_cta()
+    stream.flush()
+    printed = stream.buffer.getvalue().decode("cp1252")
+    assert "db-conn-mcp gui" in printed
+    assert cli.REPO_URL in printed
+    assert "⭐" not in printed  # swapped for the ASCII stand-in, not dropped
 
 
 def test_main_setup_dispatches(monkeypatch):

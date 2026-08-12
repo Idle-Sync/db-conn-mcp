@@ -368,16 +368,33 @@ def run_setup_wizard(config_arg: str | None = None) -> int:
         return 130
 
 
+def _stdout_can_encode(text: str) -> bool:
+    """Whether stdout's encoding can carry ``text`` (a redirected Windows one is cp1252)."""
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+#: The star glyph and its ASCII stand-in, chosen the same way the doctor picks its
+#: icons: a console that cannot encode the glyph must still get the line, because
+#: the dashboard tip prints right after it and a raising ``print`` would eat it.
+_STAR = "⭐"
+_STAR_ASCII = "*"
+
+
 def _print_star_cta() -> None:
     """Print the star nudge and the dashboard tip after setup finishes successfully.
 
     The honest version of "grow the repo": ask at the moment the tool just
     worked for someone. Never gates, blocks, or touches their GitHub account.
     The tip rides along here — right where a first-time user has just learned
-    the CLI and would otherwise never discover the dashboard. Plain ASCII: this
-    line also has to survive a cp1252 Windows console.
+    the CLI and would otherwise never discover the dashboard.
     """
-    print(f"⭐ Find db-conn-mcp useful? A star helps others find it: {REPO_URL}")
+    star = _STAR if _stdout_can_encode(_STAR) else _STAR_ASCII
+    print(f"{star} Find db-conn-mcp useful? A star helps others find it: {REPO_URL}")
     print("Tip: `db-conn-mcp gui` opens a browser dashboard for setup and verification.")
 
 
@@ -510,10 +527,7 @@ _DOCTOR_ASCII = {"ok": "[ok]", "warn": "[warn]", "fail": "[FAIL]", "skipped": "[
 
 def _status_markers() -> dict[str, str]:
     """Return the icons, or the ASCII fallbacks when stdout cannot encode them."""
-    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
-    try:
-        "".join(_DOCTOR_ICONS.values()).encode(encoding)
-    except (UnicodeEncodeError, LookupError):
+    if not _stdout_can_encode("".join(_DOCTOR_ICONS.values())):
         return _DOCTOR_ASCII
     return _DOCTOR_ICONS
 
