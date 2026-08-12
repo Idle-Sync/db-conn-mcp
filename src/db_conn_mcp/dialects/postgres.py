@@ -894,9 +894,17 @@ class PostgresDialect(Dialect):
         row = await conn.fetchrow(_CANCEL_BACKEND_SQL, int(pid))
         return {"pid": int(pid), "cancelled": bool(row["cancelled"]) if row else False}
 
-    async def explain(self, conn: Any, sql: str, analyze: bool = False) -> dict:
+    async def explain(
+        self,
+        conn: Any,
+        sql: str,
+        analyze: bool = False,
+        params: list[Any] | None = None,
+    ) -> dict:
         prefix = "EXPLAIN (ANALYZE, BUFFERS) " if analyze else "EXPLAIN "
-        rows = await conn.fetch(prefix + sql)
+        # Same bind path as execute(): asyncpg's $1/$2 positional arguments, so the
+        # planner sees the real values rather than a query mangled by interpolation.
+        rows = await conn.fetch(prefix + sql, *(params or []))
         # Each row is one plan line under a single "QUERY PLAN" column.
         return {"plan": [next(iter(dict(r).values())) for r in rows]}
 

@@ -496,17 +496,26 @@ class Handlers:
         finally:
             await db.close()
 
-    async def explain_query(self, database: str, sql: str, analyze: bool = False) -> dict:
+    async def explain_query(
+        self,
+        database: str,
+        sql: str,
+        analyze: bool = False,
+        params: list[Any] | None = None,
+    ) -> dict:
         """Return the query plan for a read-only statement (optionally ANALYZE).
 
         The SQL is validated read-only first; ``analyze=True`` really executes the
         statement to gather timings, which the read-only session keeps safe.
+        ``params`` bind through the same driver mechanism ``execute_read_query``
+        uses (Postgres ``$1``/``$2``), so the plan explained is the plan the query
+        an agent is about to run will actually get.
         """
         conn = config.get(self._load(), database)
         dialect_for(conn.dsn).validate_read_only(sql)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            return await dialect.explain(db, sql, analyze)
+            return await dialect.explain(db, sql, analyze, params)
         finally:
             await db.close()
 

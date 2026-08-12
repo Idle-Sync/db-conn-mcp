@@ -325,13 +325,21 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         )
 
     @app.tool()
-    async def explain_query(database: str, sql: str, analyze: bool = False) -> dict:
+    async def explain_query(
+        database: str, sql: str, analyze: bool = False, params: list[Any] | None = None
+    ) -> dict:
         """Show the execution plan for a read-only query (EXPLAIN; optionally ANALYZE).
 
         Use to confirm index usage or diagnose a slow query. analyze=true actually runs
         the (read-only, validated) query to collect real timings and buffer stats.
+
+        EXPLAIN the query you will ACTUALLY run: a plan for bound parameters can differ
+        from the plan for the same SQL with the values pasted in. Pass `params` with the
+        $1/$2/... placeholders exactly as you would to execute_read_query (real driver
+        binds), instead of rewriting the query with literals just to explain it.
+        `params` composes with analyze=true.
         """
-        return await handlers.explain_query(database, sql, analyze)
+        return await handlers.explain_query(database, sql, analyze, params)
 
     @app.tool()
     async def cancel_query(database: str, pid: int) -> dict:

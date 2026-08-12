@@ -140,12 +140,22 @@ class Dialect(ABC):
         """
 
     @abstractmethod
-    async def explain(self, conn: Any, sql: str, analyze: bool = False) -> dict:
+    async def explain(
+        self,
+        conn: Any,
+        sql: str,
+        analyze: bool = False,
+        params: list[Any] | None = None,
+    ) -> dict:
         """Return the query plan as ``{"plan": [str, ...]}``.
 
         With ``analyze=True`` the statement is actually executed to collect real
         timings — callers must only pass validated read-only SQL, and the
         read-only session blocks any write natively as defense-in-depth.
+
+        ``params`` bind through the driver's native parameterization — the same
+        mechanism :meth:`execute` uses — so the plan is the one the *bound* query
+        gets, which can differ from the plan for the same SQL with literals.
         """
 
     @abstractmethod

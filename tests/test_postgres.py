@@ -483,6 +483,30 @@ async def test_explain_analyze_adds_options():
     assert conn.fetched[0].startswith("EXPLAIN (ANALYZE, BUFFERS) SELECT")
 
 
+async def test_explain_without_params_binds_nothing():
+    """The no-params call keeps exactly today's shape: the SQL and no bind arguments."""
+    conn = FakeConn([[]])
+    await PostgresDialect().explain(conn, "SELECT 1")
+    assert conn.fetch_args[0] == ()
+
+
+async def test_explain_binds_params_like_execute_does():
+    conn = FakeConn([[{"QUERY PLAN": "Index Scan using users_pkey on users"}]])
+    result = await PostgresDialect().explain(conn, "SELECT * FROM users WHERE id = $1", params=[7])
+    assert conn.fetched[0] == "EXPLAIN SELECT * FROM users WHERE id = $1"
+    assert conn.fetch_args[0] == (7,)  # bound by the driver, never interpolated
+    assert result == {"plan": ["Index Scan using users_pkey on users"]}
+
+
+async def test_explain_analyze_and_params_compose():
+    conn = FakeConn([[]])
+    await PostgresDialect().explain(
+        conn, "SELECT * FROM t WHERE a = $1 AND b = $2", analyze=True, params=[1, "x"]
+    )
+    assert conn.fetched[0].startswith("EXPLAIN (ANALYZE, BUFFERS) SELECT")
+    assert conn.fetch_args[0] == (1, "x")
+
+
 # ---- check_sequences ---------------------------------------------------------------
 
 

@@ -152,8 +152,8 @@ class FakeDialect:
         self.cancelled_pids.append(pid)
         return {"pid": pid, "cancelled": True}
 
-    async def explain(self, conn, sql, analyze=False):
-        self.explained.append((sql, analyze))
+    async def explain(self, conn, sql, analyze=False, params=None):
+        self.explained.append((sql, analyze, params))
         return {"plan": ["Seq Scan on users"]}
 
     async def check_sequences(self, conn, behind_only=True):
@@ -563,8 +563,37 @@ async def test_explain_query_connects_read_only(cfg_path, monkeypatch):
     h = Handlers(cfg_path)
     result = await h.explain_query("prod", "SELECT 1", analyze=True)
     assert dialect.connected_read_only is True
-    assert dialect.explained == [("SELECT 1", True)]
+    assert dialect.explained == [("SELECT 1", True, None)]  # no params: today's call shape
     assert result["plan"] == ["Seq Scan on users"]
+
+
+async def test_explain_query_forwards_params_verbatim(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    await h.explain_query("prod", "SELECT * FROM users WHERE id = $1", params=[7])
+    assert dialect.explained == [("SELECT * FROM users WHERE id = $1", False, [7])]
+
+
+async def test_explain_query_analyze_and_params_compose(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    await h.explain_query("prod", "SELECT * FROM t WHERE a = $1", analyze=True, params=["x"])
+    assert dialect.explained == [("SELECT * FROM t WHERE a = $1", True, ["x"])]
+
+
+async def test_explain_query_tool_accepts_params(cfg_path, monkeypatch):
+    """`params` is declared on the tool, so the unknown-parameter seam lets it through."""
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    app = server.build_server(cfg_path)
+    blocks = await app.call_tool(
+        "explain_query",
+        {"database": "prod", "sql": "SELECT * FROM users WHERE id = $1", "params": [7]},
+    )
+    assert _fenced_payload(blocks[0])["plan"] == ["Seq Scan on users"]
+    assert dialect.explained == [("SELECT * FROM users WHERE id = $1", False, [7])]
 
 
 async def test_cancel_query_passes_pid(cfg_path, monkeypatch):
