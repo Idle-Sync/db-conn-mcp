@@ -59,6 +59,8 @@ Running via **`uvx`** (e.g. in an MCP client config)? There's nothing installed 
 
 After upgrading, **restart/reconnect your AI client** so it picks up the new version (and any new tools). Verify with `db-conn-mcp -v`.
 
+**You don't have to remember to check.** When you run a `db-conn-mcp` subcommand in a terminal, it prints a single line if a newer release is published — looked up in the background, so it never slows a command down or changes its exit code (offline just means no line). Set `DB_CONN_MCP_NO_UPDATE_CHECK=1` to silence it. The server your MCP client launches never checks; `db-conn-mcp doctor` is the deliberate, authoritative version of the same question.
+
 > PyPI's index can lag a release by a minute or two. If your upgrade reports "already at latest" right after a release, retry with `pipx upgrade db-conn-mcp --pip-args="--no-cache-dir"` (or `pip install --upgrade --no-cache-dir db-conn-mcp`).
 
 ---
@@ -175,12 +177,12 @@ The server exposes **23 tools** and **2 prompts**:
 | Tool | Kind | Description |
 |------|------|-------------|
 | `list_databases` | explore | Configured databases (name, mode, yolo, and `active_port` when a fallback port is in use — **no DSN**). |
-| `list_tables` | explore | Tables and views in a database. |
+| `list_tables` | explore | Tables and views in a database. Narrow it in the database rather than after the fact: `pattern` keeps only names containing it (fuzzy, case-insensitive) and `limit` caps the number of rows. |
 | `get_table_schema` | explore | Columns, types, primary/foreign keys for a table. Pass `include_indexes=true` to also get its indexes (`name`, covered `columns` in order, `unique`, `method`); omitted by default. |
 | `get_database_schema` | explore | The whole database's schema in one deterministic call. `format="json"` (default) returns every table's columns/types/PK/FK; `format="sql"` returns a **self-contained, runnable DDL script** (tables, sequences, PK/FK/UNIQUE/CHECK, indexes, trigger functions, triggers) — no extra tools required. Pass `output_dir` to write `{database}_schema_{UTC}.{json,sql}` instead of returning it inline (recommended for large DBs). |
 | `dump_schema_faithful` | export | **Byte-faithful** schema dump via the database's own `pg_dump --schema-only` — the most complete/runnable export. Requires the `pg_dump` binary on the server host; if missing, returns `pg_dump_not_found` with install guidance (see the `faithful_schema_export` prompt). |
 | `sample_table_rows` | explore | First N rows of a table (default 10). |
-| `find_columns` | search | Find columns by name across all tables (fuzzy, case-insensitive). |
+| `find_columns` | search | Find columns by name across all tables (fuzzy, case-insensitive). `limit` caps the number of rows for a broad pattern. |
 | `search_value` | search | Find **where** a value appears across tables (fuzzy); returns table/column hits + samples. Pass `tables=[…]` to scope it. |
 | `get_object_definition` | explore | Faithful SQL definition of a **view / function / trigger / sequence / index** by name (native `pg_get_*def`; overloads and all schemas returned). |
 | `execute_read_query` | execute | Run a single read-only statement (`SELECT`/`WITH`/…) inside a read-only transaction. Optional `params` (**real bind parameters** via `$1`/`$2` — no quoting pitfalls) and `timeout_ms`. |
@@ -192,7 +194,7 @@ The server exposes **23 tools** and **2 prompts**:
 | `close_cursor` | cursor | Close a cursor and release its connection (idempotent). |
 | `diff_schemas` | insight | Structural schema diff between two configured databases (tables, columns, types, defaults, PK/FK) — verify a migrated copy matches its source. |
 | `check_sequences` | insight | Find sequences **behind** their column's max value (the silent post-migration breakage); fix with `setval()`. Lists only the problem sequences by default, with `total_sequences` saying how many were checked; pass `behind_only=false` for the full census. |
-| `table_stats` | insight | Approximate row counts + disk/index sizes per table, largest first (statistics only, no scans). |
+| `table_stats` | insight | Approximate row counts + disk/index sizes per table, largest first (statistics only, no scans). Ask the narrower question directly: `table` for one table, `min_size_bytes` to skip anything smaller, `limit` for the top N by total size (which adds `truncated` to the result). |
 | `show_activity` | insight | Sanitized `pg_stat_activity`: pid, state, wait events, query age — **no user names, client addresses, or query text** (text is opt-in and truncated). |
 | `set_yolo_mode` | config | Enable/disable `yolo` for one database (persisted). |
 | `check_database` | doctor | Test one database (or all) → `OK` or a sanitized diagnostic; reports `active_port` when a fallback port answered, and `failed_port` on an `UNREACHABLE` row when the failure that ended the probe chain (auth, TLS, DB-not-found, …) came from a probed fallback port rather than the primary. |

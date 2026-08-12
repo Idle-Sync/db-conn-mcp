@@ -44,6 +44,7 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 | `guard.py` | Pure untrusted-data fencing: the guard markers, the standing `instructions` policy, marker defanging (delimiter-injection defence), and the text-block wrapper | No |
 | `diagnostics.py` | Classify **one driver error** → sanitized cause + fix (the per-connection diagnostic) | No |
 | `doctor.py` | The whole-setup diagnostic engine: the check registry, the `Finding` shape, and the crash guard. Composes `clients.py`, `config.py`, `handlers.py`, and the dialect seam | No |
+| `update_check.py` | The "is a newer release published?" lookup for the CLI nudge: one daemon thread, no cache file, answers instantly or not at all. Never imported by the serve path | No |
 | `handlers.py` | The 22 database-facing tool handlers as plain async methods (transport-free, unit-testable) + the open-cursor registry + the dry-run grant registry (`_dry_run_grants`) | No |
 | `server.py` | `GuardedFastMCP` app (a `FastMCP` subclass): registers the 23 tools + 2 prompts (22 onto `handlers`, `doctor` onto `doctor.py`), rejects unknown arguments and applies `guard.py` at the `call_tool` seam, transport wiring, and the ride-along GUI start (`gui=True` unless `--no-gui`) | No |
 | `verify.py` | Live MCP verification: spawn a launch line and complete `initialize` → `tools/list` → `list_databases` as a *client*, returning one of a fixed verdict vocabulary. Always a separate process | No |
@@ -59,16 +60,16 @@ The **dialect layer is the only place that knows a database is PostgreSQL.** Eve
 | # | Tool | Kind | Safety |
 |---|---|---|---|
 | 1 | `list_databases` | Explore | safe — names + mode + yolo |
-| 2 | `list_tables` | Explore | safe |
-| 3 | `get_table_schema` | Explore | safe |
+| 2 | `list_tables` | Explore | safe — optional `pattern` + `limit`, applied in SQL |
+| 3 | `get_table_schema` | Explore | safe — optional `include_indexes` adds the table's indexes |
 | 4 | `get_database_schema` | Explore | safe — whole-DB schema, deterministic; `format` json or self-contained SQL DDL |
 | 5 | `dump_schema_faithful` | Export | safe (read-only) — faithful `pg_dump -s`; DSN never leaks; `pg_dump_not_found` if the binary is absent |
 | 6 | `sample_table_rows` | Explore | safe (first N rows) |
-| 7 | `find_columns` | Search | safe — fuzzy column-name search across tables |
+| 7 | `find_columns` | Search | safe — fuzzy column-name search across tables; optional `limit` |
 | 8 | `search_value` | Search | safe (read-only) — fuzzy value search across tables; scoped/bounded |
 | 9 | `execute_read_query` | Execute | runs inside a **read-only transaction**; optional `params` (driver bind) + `timeout_ms` |
 | 10 | `execute_write_query` | Execute | **gated** (mode → dry-run-first → yolo → consent); defaults to `dry_run=true`, which executes-then-ROLLS-BACK (mode gate only — nothing commits) and grants the matching commit; optional `params` + `timeout_ms` |
-| 11 | `explain_query` | Execute | safe — EXPLAIN (optionally ANALYZE) of a validated read-only query |
+| 11 | `explain_query` | Execute | safe — EXPLAIN (optionally ANALYZE) of a validated read-only query; optional `params` plan the *bound* query |
 | 12 | `cancel_query` | Execute | safe — native `pg_cancel_backend(pid)`; cancels the statement, session survives |
 | 13 | `open_query_cursor` | Cursor | safe (read-only) — server-side cursor for large results; pins one connection |
 | 14 | `fetch_rows` | Cursor | safe — next N rows from an open cursor; auto-closes when drained |
@@ -76,11 +77,13 @@ The **dialect layer is the only place that knows a database is PostgreSQL.** Eve
 | 16 | `get_object_definition` | Explore | safe — faithful `pg_get_*def` definition of a view/function/trigger/sequence/index |
 | 17 | `diff_schemas` | Insight | safe — structural schema diff between two configured DBs |
 | 18 | `check_sequences` | Insight | safe — sequences whose next value would collide with existing rows (problems only by default; `behind_only=false` for the census) |
-| 19 | `table_stats` | Insight | safe — approximate rows + disk/index sizes per table (statistics, no scans) |
+| 19 | `table_stats` | Insight | safe — approximate rows + disk/index sizes per table (statistics, no scans); optional `table` / `min_size_bytes` / `limit`, the last adding `truncated` |
 | 20 | `show_activity` | Insight | safe — **sanitized** `pg_stat_activity` (no user names/addresses; query text opt-in, truncated) |
 | 21 | `set_yolo_mode` | Config | persists `yolo` flag for one named DB |
 | 22 | `check_database` | Doctor | tests one DB (or all) → `OK` or sanitized cause + fix; reports `active_port`, and `failed_port` when a *fallback* port produced the failure |
 | 23 | `doctor` | Doctor | runs **every** check (processes, release freshness, config schema, secrets, client entries, connectivity) → `{check, status, detail, suggested_action}` findings; `offline=true` skips only the PyPI lookup |
+
+**The limits convention** (how a tool bounds an answer that grows with the database). A tool whose result scales with the schema takes the narrowing argument *it* can push into SQL, never a generic one: `list_tables` and `find_columns` take `pattern` + `limit`, `table_stats` takes `table` / `min_size_bytes` / `limit`, `check_sequences` takes `behind_only`, `search_value` takes `tables` + `limit_per_column`. Three rules hold across all of them. **Filtering happens in the database**, not after the rows come back — the point is that the large answer is never assembled, so `limit` is `LIMIT`, not a slice. **Shape is stable**: a list-shaped tool returns a shorter list, never a wrapper object, so bounding a call can never break a caller's parsing; only a dict-shaped result may carry a `truncated` flag (`table_stats` when `limit` is set, `search_value` when a scan hit its ceiling), because there is somewhere honest to put it. And **the bound is opt-in**: omit the narrowing arguments and the tool answers exactly as it did before they existed, so adding one is never a silent behaviour change. `check_sequences` is the single deliberate exception — its `behind_only` defaults to `true`, because "which sequences are broken" is the question that tool is for and the full census was the answer nobody asked for; that default flip is called out as a behaviour change in the changelog. Each tool's description states both the size risk and the argument that bounds it, since the description is the only place an agent learns to ask the narrower question in the first place.
 
 **Cursor lifecycle** (the one stateful corner, deliberately bounded): `open_query_cursor` validates the SQL read-only, opens a dedicated read-only connection, and registers the native cursor under a `cursor_id` in `handlers.py`. At most **5** cursors may be open; a cursor idle for **15 minutes** is reaped on the next cursor call; a fully drained cursor closes itself. Everything else in the server remains one-connection-per-call.
 
@@ -372,6 +375,12 @@ class Finding(TypedDict):
 
 `process_staleness` is the one check with an optional dependency: `psutil` is deliberately **not** a hard requirement of the package, so its absence skips that check and nothing else. It also inspects **its own process**: when the doctor runs as the MCP tool inside a server that started before the installed build, that is precisely the reported symptom, so it emits `warn` + `reconnect_client` phrased at *this* client rather than staying silent (a fresh own process still says nothing). Findings name only the PID and the version — never the command line.
 
+### The release nudge (`update_check.py`) — the doctor's instant, unasked-for half
+
+`pypi_latest` is the *authoritative* freshness answer, and the user has to run `doctor` to get it. The nudge is the same fact volunteered by every other interactive command, under a hard constraint: **it may never cost anything.** `update_check.start_check()` fires one HTTPS GET on a **daemon thread** that the caller never joins; `newer_version()` reads whatever that thread has already produced and returns `None` otherwise. Offline, slow, or still in flight are therefore indistinguishable from "you're current" — all three simply print no line. There is no cache file: a state file to locate, version, corrupt, and clean up is not worth a nudge, and the stdlib `urllib.request` keeps a module imported on every CLI invocation dependency-free.
+
+`cli.main` starts the check *before* dispatching the subcommand (so the lookup overlaps the command's own work) and prints at the single seam every handler returns through, success or failure, without touching the exit code. Two gates decide whether it starts at all: stdout must be a **TTY** — a nudge belongs to a human, not to a pipe or a CI log — and `DB_CONN_MCP_NO_UPDATE_CHECK` must be unset. **The serve path never calls it**: `stdio` speaks JSON-RPC on stdout, where a nudge would be protocol corruption, and a client launching this server should make no network request of ours. `PYPI_JSON_URL` and `is_newer` live here and are imported *by* `doctor.py`, so the two lookups can never disagree about which endpoint they ask or which of two versions is newer. Rule 6 holds throughout: nothing from the response is logged, raised, or printed beyond the version string itself, and the request URL is a fixed constant embedding no user data.
+
 ---
 
 ## 8. Flow F — The browser dashboard (`gui/`) and live verification (`verify.py`)
@@ -460,17 +469,18 @@ class Dialect(ABC):
 
     async def connect(self, dsn, *, read_only): ...  # native read-only enforcement lives here
     async def probe_listener(self, host, port): ...  # credential-free "is this us?" handshake
-    async def list_tables(self, conn): ...
+    async def list_tables(self, conn, pattern=None, limit=None): ...  # narrowed in SQL
     async def get_schema(self, conn, table): ...
+    async def table_indexes(self, conn, table): ...  # get_table_schema(include_indexes=True)
     async def sample_rows(self, conn, table, n=10): ...
     async def execute(self, conn, sql, params=None, timeout_ms=None): ...  # driver bind params
     async def execute_dry_run(self, conn, sql, params=None, timeout_ms=None): ...  # tx + ROLLBACK
     async def open_cursor(self, conn, sql, params=None): ...  # native server-side cursor
     async def get_object_definition(self, conn, object_type, name): ...
     async def cancel_backend(self, conn, pid): ...
-    async def explain(self, conn, sql, analyze=False): ...
+    async def explain(self, conn, sql, analyze=False, params=None): ...  # plan the bound query
     async def check_sequences(self, conn, behind_only=True): ...  # problems only by default
-    async def table_stats(self, conn): ...
+    async def table_stats(self, conn, limit=None, min_size_bytes=None, table=None): ...
     async def show_activity(self, conn, include_query=False): ...
 ```
 

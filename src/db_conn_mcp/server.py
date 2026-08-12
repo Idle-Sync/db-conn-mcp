@@ -236,7 +236,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
     @app.tool()
     async def sample_table_rows(database: str, table: str, n: int = 10) -> list[dict]:
-        """Fetch the first N rows of a table to learn its data shape."""
+        """Fetch the first N rows of a table to learn its data shape.
+
+        Rows arrive on the text channel only, inside the untrusted-data banner: this
+        tool emits no structuredContent.
+        """
         return await handlers.sample_table_rows(database, table, n)
 
     # ---- Discovery / search tools --------------------------------------------
@@ -263,6 +267,9 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         For speed on large databases, first narrow with list_tables/find_columns and pass
         a `tables` shortlist; otherwise it scans all non-system tables (bounded, may
         return partial results flagged `truncated`).
+
+        Matches arrive on the text channel only, inside the untrusted-data banner: this
+        tool emits no structuredContent.
         """
         return await handlers.search_value(database, value, tables, limit_per_column)
 
@@ -284,6 +291,9 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         ALWAYS pass user-supplied values via `params` with $1/$2/... placeholders in the
         SQL (real driver bind parameters — no quoting/injection pitfalls), not by pasting
         them into the SQL string. Optional timeout_ms cancels an overrunning query.
+
+        Rows arrive on the text channel only, inside the untrusted-data banner: this
+        tool emits no structuredContent.
         """
         return await handlers.execute_read_query(database, sql, params, timeout_ms)
 
@@ -374,6 +384,9 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Returns {rows, row_count, exhausted, cursor_closed}; the cursor closes itself
         once fully drained.
+
+        Rows arrive on the text channel only, inside the untrusted-data banner: this
+        tool emits no structuredContent.
         """
         return await handlers.fetch_rows(cursor_id, n)
 
@@ -431,7 +444,8 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         """Approximate row counts and disk/index sizes per table, largest first.
 
         Uses the database's own statistics — fast, no table scans. Useful for planning
-        migration copy order and spotting anomalies. Ask the narrower question instead of
+        migration copy order and spotting anomalies. One row per table, so the full
+        answer may be large on a big database — ask the narrower question instead of
         filtering afterwards: `table` for one table (optionally schema-qualified),
         `min_size_bytes` to skip anything smaller, `limit` for the top N by total size.
         With `limit` set the result carries `truncated: true` when more tables matched

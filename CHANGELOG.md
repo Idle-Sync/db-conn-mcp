@@ -42,22 +42,6 @@ the time of that release.
   their values. If a client of yours passes extra arguments, it will now see errors where
   it previously saw (wrong) results — fix the argument name.
 
-- **`doctor` no longer says "you're up to date" beside a server process that isn't.**
-  After a `pipx upgrade`, a still-running client process keeps serving the *old* build —
-  yet the release check happily reported `v0.5.6 is the latest published version`, which
-  reads as an all-clear at exactly the wrong moment. When a pre-upgrade process is still
-  running, that line now ends `— but a running process predates this install; see
-  process_staleness`. Nothing changes when no stale process is found, and when `psutil`
-  is missing (staleness is unknowable) the wording is untouched.
-
-- **Doctor findings that tell you what to do now say it in `suggested_action` too.**
-  Failing checks used to ship `suggested_action: "none"` with the actual remedy buried in
-  prose. Four sites now carry a machine-actionable verb: an unreachable database →
-  `fix_connection`, a check that crashed → `report_bug`, the process check with no
-  `psutil` installed → `install_doctor_extra`, and "no configuration found" →
-  `run_setup`. If you match on the action vocabulary, add those four values; details and
-  statuses are unchanged.
-
 ### Added
 
 - **Interactive commands now tell you when a newer release is out.** After a command
@@ -89,6 +73,32 @@ the time of that release.
   hand-written catalog query. Both are additive: without `params` the plan is exactly
   what it was, and without `include_indexes` the schema response has no `indexes` key at
   all.
+
+### Changed
+
+- **`doctor` no longer says "you're up to date" beside a server process that isn't.**
+  After a `pipx upgrade`, a still-running client process keeps serving the *old* build —
+  yet the release check happily reported `v0.5.6 is the latest published version`, which
+  reads as an all-clear at exactly the wrong moment. When a pre-upgrade process is still
+  running, that line now ends `— but a running process predates this install; see
+  process_staleness`. Nothing changes when no stale process is found, and when `psutil`
+  is missing (staleness is unknowable) the wording is untouched.
+
+- **Doctor findings that tell you what to do now say it in `suggested_action` too.**
+  Failing checks used to ship `suggested_action: "none"` with the actual remedy buried in
+  prose. Four sites now carry a machine-actionable verb: an unreachable database →
+  `fix_connection`, a check that crashed → `report_bug`, the process check with no
+  `psutil` installed → `install_doctor_extra`, and "no configuration found" →
+  `run_setup`. If you match on the action vocabulary, add those four values; details and
+  statuses are unchanged.
+
+- **The tool descriptions your agent reads now state the size and the channel up front.**
+  Every tool whose answer grows with your database (`list_tables`, `find_columns`,
+  `table_stats`, `check_sequences`) says so in its description and names the argument
+  that bounds it, so an agent reaches for `limit`/`pattern` instead of pulling a whole
+  schema back to filter it in context; and the four tools that return raw row values say
+  outright that their rows come back on the text channel only, inside the untrusted-data
+  banner. Descriptions only — no tool's behaviour changed because of this entry.
 
 ## [0.6.2] — 2026-08-12
 
