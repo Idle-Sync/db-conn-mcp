@@ -30,6 +30,11 @@ from .dialects.registry import dialect_for
 from .handlers import Handlers
 from .models import Config, Connection
 
+# Cache-bypassed version lookup (use case 2: pip's cached index hid a fresh release).
+# The URL and the comparison live in `update_check` so the doctor and the CLI's
+# background nudge can never disagree about which version is newer.
+from .update_check import PYPI_JSON_URL, is_newer
+
 Status = Literal["ok", "warn", "fail", "skipped"]
 
 
@@ -143,18 +148,6 @@ def check_process_staleness(ctx: CheckContext) -> list[Finding]:
     return findings
 
 
-#: Cache-bypassed version lookup (use case 2: pip's cached index hid a fresh release).
-PYPI_JSON_URL = "https://pypi.org/pypi/db-conn-mcp/json"
-
-
-def _version_tuple(version: str) -> tuple[int, ...] | None:
-    """Parse '0.5.2' -> (0, 5, 2); None for anything non-numeric (pre-releases)."""
-    parts = version.split(".")
-    if parts and all(p.isdigit() for p in parts):
-        return tuple(int(p) for p in parts)
-    return None
-
-
 def check_pypi_latest(ctx: CheckContext) -> list[Finding]:
     """Use case 2: is a newer release published that a cached index would hide?"""
     name = "pypi_latest"
@@ -168,8 +161,7 @@ def check_pypi_latest(ctx: CheckContext) -> list[Finding]:
             latest = str(json.load(response)["info"]["version"])
     except Exception:  # noqa: BLE001 — no internet is not a broken setup
         return [finding(name, "skipped", "PyPI could not be reached — freshness not checked")]
-    installed, remote = _version_tuple(__version__), _version_tuple(latest)
-    if installed is not None and remote is not None and remote > installed:
+    if is_newer(latest, __version__):
         return [
             finding(
                 name,
