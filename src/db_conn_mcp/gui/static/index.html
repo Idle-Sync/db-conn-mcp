@@ -1,5 +1,213 @@
 <!doctype html>
+<html lang="en">
+<head>
 <meta charset="utf-8">
-<title>db-conn-mcp</title>
-<h1>db-conn-mcp dashboard</h1>
-<p>Placeholder — the real page arrives with the front-end task.</p>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>db-conn-mcp dashboard</title>
+<!--
+  The asset URLs carry the session token: every request is guarded, and a browser
+  does not copy the page's query string onto its subresource loads. The server
+  substitutes __GUI_TOKEN__ when it serves this file; nothing else is templated.
+  No inline <style> or <script> may be added here - CSP is `default-src 'self'`,
+  which is not `unsafe-inline`, so an inline block would silently never run.
+-->
+<link rel="stylesheet" href="/static/style.css?token=__GUI_TOKEN__">
+<script src="/static/app.js?token=__GUI_TOKEN__" defer></script>
+</head>
+<body>
+
+<div id="dead-banner" role="alert" hidden>
+  The dashboard's host process stopped. Run <code>db-conn-mcp gui</code> to bring it back.
+</div>
+
+<header id="page-head">
+  <h1>db-conn-mcp</h1>
+  <p id="summary-line" class="muted">loading&hellip;</p>
+  <nav>
+    <a href="#databases">Databases</a>
+    <a href="#clients">Clients</a>
+    <a href="#verify">Verify &amp; Doctor</a>
+  </nav>
+</header>
+
+<main>
+
+<section id="databases">
+  <h2>Databases</h2>
+  <p class="muted">
+    Connections from <code>connections.json</code>. A DSN is write-only: it is sent
+    when you add or replace one and is never read back into this page.
+  </p>
+  <p id="db-status" class="note" hidden></p>
+  <div id="db-list" class="cards"></div>
+
+  <details id="add-panel">
+    <summary>Add a database</summary>
+    <form id="add-form" autocomplete="off">
+      <label>Name
+        <input id="add-name" name="name" required spellcheck="false">
+      </label>
+      <label>DSN
+        <input id="add-dsn" name="dsn" type="password" required spellcheck="false"
+               placeholder="postgresql://user:password@host:5432/db">
+      </label>
+      <label>Mode
+        <select id="add-mode" name="mode">
+          <option value="read" selected>read</option>
+          <option value="write">write</option>
+        </select>
+      </label>
+      <p id="add-write-note" class="note warn-note" hidden>
+        write mode permits data-changing queries (still gated server-side)
+      </p>
+      <label class="inline">
+        <input id="add-yolo" name="yolo" type="checkbox">
+        yolo (skip the write confirmation prompt on this database)
+      </label>
+      <label>Fallback ports <span class="muted">(optional, comma separated)</span>
+        <input id="add-ports" name="fallback_ports" spellcheck="false" placeholder="5433, 5434">
+      </label>
+      <div class="actions">
+        <button type="submit" id="add-submit">Add database</button>
+      </div>
+      <p id="add-error" class="msg fail-text" hidden></p>
+    </form>
+  </details>
+</section>
+
+<section id="clients">
+  <h2>Clients</h2>
+  <p class="muted">
+    Detected MCP clients on this machine. Injecting writes the launch line shown on
+    the card into that client's own config - check it before you trust it.
+  </p>
+  <div id="client-list" class="cards"></div>
+</section>
+
+<section id="verify">
+  <h2>Verify &amp; Doctor</h2>
+  <p class="muted">
+    Nothing here runs until you click it. Verification really spawns the server and
+    speaks MCP to it, so each check takes a few seconds.
+  </p>
+  <div class="actions">
+    <button id="verify-all">Verify every client, then HTTP</button>
+    <button id="verify-http">Verify the HTTP transport</button>
+  </div>
+  <p id="verify-status" class="msg" hidden></p>
+  <div id="verify-results" class="cards"></div>
+
+  <h3>Doctor</h3>
+  <div class="actions">
+    <button id="run-doctor">Run doctor</button>
+    <label class="inline">
+      <input id="doctor-offline" type="checkbox">
+      offline (skip the checks that need the network)
+    </label>
+  </div>
+  <p id="doctor-status" class="msg" hidden></p>
+  <div id="doctor-results" class="cards"></div>
+</section>
+
+</main>
+
+<template id="tpl-db">
+  <article class="card">
+    <header>
+      <h3 class="db-name"></h3>
+      <span class="badge db-mode"></span>
+      <span class="badge warn db-yolo" hidden>yolo</span>
+    </header>
+    <p class="db-ports muted" hidden></p>
+    <div class="actions">
+      <button class="db-check" type="button">Check connection</button>
+      <button class="db-edit" type="button">Edit</button>
+      <button class="db-remove danger" type="button">Remove</button>
+    </div>
+    <p class="db-msg msg" hidden></p>
+    <div class="db-check-out"></div>
+    <form class="db-form" hidden autocomplete="off">
+      <label>Name
+        <input class="f-name" readonly>
+        <span class="muted">a connection cannot be renamed here</span>
+      </label>
+      <label>Replace the DSN
+        <input class="f-dsn" type="password" spellcheck="false"
+               placeholder="leave empty to keep the current one">
+      </label>
+      <label>Mode
+        <select class="f-mode">
+          <option value="read">read</option>
+          <option value="write">write</option>
+        </select>
+      </label>
+      <p class="note warn-note f-write-note" hidden>
+        write mode permits data-changing queries (still gated server-side)
+      </p>
+      <label class="inline">
+        <input class="f-yolo" type="checkbox">
+        yolo (skip the write confirmation prompt on this database)
+      </label>
+      <label>Fallback ports
+        <input class="f-ports" spellcheck="false" placeholder="5433, 5434">
+        <span class="muted">these can be replaced but not emptied from here</span>
+      </label>
+      <div class="actions">
+        <button type="submit" class="f-save">Save changes</button>
+        <button type="button" class="f-cancel">Cancel</button>
+      </div>
+      <p class="f-error msg fail-text" hidden></p>
+    </form>
+  </article>
+</template>
+
+<template id="tpl-client">
+  <article class="card">
+    <header>
+      <h3 class="c-label"></h3>
+      <span class="badge c-state"></span>
+    </header>
+    <p class="c-launch-label muted" hidden>this client will launch:</p>
+    <pre class="c-launch" hidden></pre>
+    <div class="actions">
+      <button class="c-inject" type="button">Inject</button>
+      <button class="c-uninject" type="button">Remove entry</button>
+      <button class="c-verify" type="button">Verify</button>
+    </div>
+    <p class="c-msg msg" hidden></p>
+    <div class="c-verify-out"></div>
+  </article>
+</template>
+
+<template id="tpl-verify">
+  <article class="card">
+    <header>
+      <h3 class="v-target"></h3>
+      <span class="badge v-verdict"></span>
+      <span class="badge warn v-stale" hidden>stale install</span>
+    </header>
+    <p class="v-detail"></p>
+    <p class="v-action note" hidden></p>
+    <p class="v-meta muted" hidden></p>
+    <p class="v-launch-label muted" hidden>launched:</p>
+    <pre class="v-launch" hidden></pre>
+    <details class="v-out" hidden>
+      <summary>what list_databases answered</summary>
+      <pre class="v-dbtext"></pre>
+    </details>
+  </article>
+</template>
+
+<template id="tpl-finding">
+  <article class="card finding">
+    <header>
+      <h3 class="fi-check"></h3>
+      <span class="badge fi-status"></span>
+    </header>
+    <p class="fi-detail"></p>
+    <p class="fi-action note" hidden></p>
+  </article>
+</template>
+
+</body>
+</html>

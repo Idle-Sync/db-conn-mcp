@@ -599,6 +599,18 @@ def test_an_unloadable_config_is_never_overwritten(cfg_client, broken):
     assert cfg.read_bytes() == before
 
 
+def test_page_has_all_three_sections_and_no_inline_handlers(client):
+    html = client.get(f"/?token={TOKEN}").text
+    for anchor in ('id="databases"', 'id="clients"', 'id="verify"'):
+        assert anchor in html
+    assert "onclick=" not in html  # all behaviour lives in app.js listeners
+
+
+def test_static_js_never_uses_innerhtml(client):
+    js = client.get(f"/static/app.js?token={TOKEN}").text
+    assert "innerHTML" not in js
+
+
 def test_doctor_endpoint_returns_findings(cfg_client, monkeypatch):
     from db_conn_mcp.gui import app as gui_app
 

@@ -18,6 +18,7 @@ import webbrowser
 from collections.abc import Awaitable, Callable
 from importlib import resources
 from pathlib import Path
+from urllib.parse import quote
 
 import uvicorn
 from pydantic import ValidationError
@@ -25,7 +26,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -42,6 +43,11 @@ GUI_PORT = 31415
 TOKEN_HEADER = "X-GUI-Token"
 _ALLOWED_HOSTS = frozenset({f"127.0.0.1:{GUI_PORT}", f"localhost:{GUI_PORT}"})
 _CSP = "default-src 'self'"
+#: Replaced with the session token when ``index.html`` is served. A browser does not
+#: copy the page's ``?token=`` onto its subresource requests, and ``/static`` sits
+#: behind the same guard, so the page's own CSS and JS would 403 without this. The
+#: token is not new information in that HTML — it is already in the address bar.
+_ASSET_TOKEN_MARKER = "__GUI_TOKEN__"
 
 
 def token_path() -> Path:
@@ -155,6 +161,9 @@ class _Guard(BaseHTTPMiddleware):
             return _forbidden()
         response = await call_next(request)
         response.headers["content-security-policy"] = _CSP
+        # Every guarded URL carries ``?token=<secret>`` (the page and its assets), so
+        # nothing here may be written to the browser's on-disk cache.
+        response.headers["cache-control"] = "no-store"
         return response
 
 
@@ -210,9 +219,15 @@ def create_app(
     # would find the whole editor frozen. The two guard unrelated resources.
     config_lock = asyncio.Lock()
 
-    async def index(request: Request) -> FileResponse:
-        """Serve the dashboard page itself (still behind the guard)."""
-        return FileResponse(_static_dir() / "index.html")
+    async def index(request: Request) -> HTMLResponse:
+        """Serve the dashboard page, stamping the token into its asset URLs.
+
+        The one templated value is :data:`_ASSET_TOKEN_MARKER`; everything else in
+        the file is static. It is percent-encoded on the way in so a token can never
+        break out of the attribute it lands in.
+        """
+        html = (_static_dir() / "index.html").read_text(encoding="utf-8")
+        return HTMLResponse(html.replace(_ASSET_TOKEN_MARKER, quote(token, safe="")))
 
     async def summary(request: Request) -> JSONResponse:
         """Report the app identity, whether a config was found, and client state."""
