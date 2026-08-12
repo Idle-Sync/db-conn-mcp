@@ -16,6 +16,8 @@ from db_conn_mcp.dialects import postgres as pg
 from db_conn_mcp.dialects.postgres import (
     PostgresDialect,
     _assemble_ddl,
+    _build_find_columns_sql,
+    _build_list_tables_sql,
     _build_table_search_sql,
     _build_table_stats_sql,
     _is_junk_table,
@@ -168,6 +170,47 @@ async def test_list_tables_shape():
     conn = FakeConn([rows])
     result = await PostgresDialect().list_tables(conn)
     assert result == rows
+    assert conn.fetch_args[0] == ()  # unfiltered: nothing bound
+
+
+def test_build_list_tables_sql_unfiltered_is_the_plain_query():
+    sql, args = _build_list_tables_sql()
+    assert sql == pg._LIST_TABLES_SQL
+    assert args == []
+
+
+def test_build_list_tables_sql_mirrors_the_find_columns_pattern_form():
+    """One containment form across the two name searches — same ILIKE, same binding."""
+    sql, args = _build_list_tables_sql(pattern="user")
+    assert "table_name ILIKE '%' || $1 || '%'" in sql
+    assert "column_name ILIKE '%' || $1 || '%'" in pg._FIND_COLUMNS_SQL
+    assert "user" not in sql.replace("table_name", "").replace("column_name", "")
+    assert args == ["user"]
+
+
+def test_build_list_tables_sql_binds_the_limit_after_the_pattern():
+    sql, args = _build_list_tables_sql(pattern="user", limit=5)
+    assert args == ["user", 5]  # exactly the limit — the list shape carries no marker
+    assert "LIMIT $2" in sql
+    assert sql.index("ORDER BY") < sql.index("LIMIT")
+
+
+def test_build_list_tables_sql_limit_without_pattern_is_first_placeholder():
+    sql, args = _build_list_tables_sql(limit=2)
+    assert args == [2] and "LIMIT $1" in sql
+
+
+async def test_list_tables_applies_pattern_and_limit():
+    conn = FakeConn([[]])
+    await PostgresDialect().list_tables(conn, pattern="user", limit=3)
+    assert conn.fetch_args[0] == ("user", 3)
+    assert "ILIKE" in conn.fetched[0].upper()
+
+
+async def test_list_tables_coerces_a_negative_limit():
+    conn = FakeConn([[]])
+    await PostgresDialect().list_tables(conn, limit=-1)
+    assert conn.fetch_args[0] == (0,)
 
 
 async def test_get_schema_shape():
@@ -654,6 +697,26 @@ async def test_find_columns_ilike_and_maps():
     assert result == rows
     assert "ILIKE" in conn.fetched[0].upper()  # fuzzy match
     assert conn.fetch_args[0] == ("mail",)  # pattern is parameterized, not concatenated
+    assert conn.fetched[0] == pg._FIND_COLUMNS_SQL  # unbounded call is unchanged
+
+
+def test_build_find_columns_sql_without_limit_is_the_plain_query():
+    sql, args = _build_find_columns_sql("mail")
+    assert sql == pg._FIND_COLUMNS_SQL
+    assert args == ["mail"]
+
+
+async def test_find_columns_binds_the_limit():
+    conn = FakeConn(fetch_results=[[]])
+    await PostgresDialect().find_columns(conn, "mail", limit=3)
+    assert conn.fetch_args[0] == ("mail", 3)  # bound, never interpolated
+    assert "LIMIT $2" in conn.fetched[0]
+
+
+async def test_find_columns_coerces_a_negative_limit():
+    conn = FakeConn(fetch_results=[[]])
+    await PostgresDialect().find_columns(conn, "mail", limit=-4)
+    assert conn.fetch_args[0] == ("mail", 0)
 
 
 # ---- junk-table filter (pure) ------------------------------------------------

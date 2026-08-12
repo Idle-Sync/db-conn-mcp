@@ -252,12 +252,19 @@ class Handlers:
             rows.append(view)
         return rows
 
-    async def list_tables(self, database: str) -> list[dict]:
-        """Return tables and views for one database."""
+    async def list_tables(
+        self, database: str, pattern: str | None = None, limit: int | None = None
+    ) -> list[dict]:
+        """Return tables and views for one database.
+
+        ``pattern`` keeps only names containing it (case-insensitive, the same match
+        :meth:`find_columns` uses); ``limit`` returns at most that many rows. The shape is
+        always a plain list — a bounded answer is simply shorter.
+        """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            return await dialect.list_tables(db)
+            return await dialect.list_tables(db, pattern, limit)
         finally:
             await db.close()
 
@@ -374,12 +381,17 @@ class Handlers:
         finally:
             await db.close()
 
-    async def find_columns(self, database: str, pattern: str) -> list[dict]:
-        """Fuzzy-search for columns by name across all tables in a database."""
+    async def find_columns(
+        self, database: str, pattern: str, limit: int | None = None
+    ) -> list[dict]:
+        """Fuzzy-search for columns by name across all tables in a database.
+
+        ``limit`` returns at most that many rows; the shape stays a plain list.
+        """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            return await dialect.find_columns(db, pattern)
+            return await dialect.find_columns(db, pattern, limit)
         finally:
             await db.close()
 

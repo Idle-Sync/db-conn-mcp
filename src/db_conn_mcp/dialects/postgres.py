@@ -41,14 +41,18 @@ _SSL_REQUEST = (8).to_bytes(4, "big") + (80877103).to_bytes(4, "big")
 # more than one command. So banning non-read leaders also bans a trailing "; DELETE".
 _READ_ONLY_LEADERS = frozenset({"select", "with", "values", "table", "show", "explain"})
 
-_LIST_TABLES_SQL = """
+#: Tables and views. Split so :func:`_build_list_tables_sql` can add a name filter
+#: between the two halves; the unfiltered text is :data:`_LIST_TABLES_SQL`.
+_LIST_TABLES_SELECT = """
     SELECT table_schema AS schema,
            table_name   AS name,
            CASE table_type WHEN 'VIEW' THEN 'view' ELSE 'table' END AS kind
     FROM information_schema.tables
-    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-    ORDER BY table_schema, table_name
-"""
+    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"""
+
+_LIST_TABLES_ORDER = "\n    ORDER BY table_schema, table_name\n"
+
+_LIST_TABLES_SQL = _LIST_TABLES_SELECT + _LIST_TABLES_ORDER
 
 _COLUMNS_SQL = """
     SELECT column_name                   AS name,
@@ -353,8 +357,10 @@ _SHOW_ACTIVITY_SQL = """
 """
 
 
-#: Fuzzy column-name search (Tool A). ``$1`` is the parameterized pattern.
-_FIND_COLUMNS_SQL = """
+#: Fuzzy column-name search (Tool A). ``$1`` is the parameterized pattern. Split so
+#: :func:`_build_find_columns_sql` can append a LIMIT; unbounded it is
+#: :data:`_FIND_COLUMNS_SQL`.
+_FIND_COLUMNS_SELECT = """
     SELECT table_schema AS schema,
            table_name   AS table,
            column_name  AS column,
@@ -362,9 +368,11 @@ _FIND_COLUMNS_SQL = """
            (is_nullable = 'YES') AS nullable
     FROM information_schema.columns
     WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-      AND column_name ILIKE '%' || $1 || '%'
-    ORDER BY table_schema, table_name, ordinal_position
-"""
+      AND column_name ILIKE '%' || $1 || '%'"""
+
+_FIND_COLUMNS_ORDER = "\n    ORDER BY table_schema, table_name, ordinal_position\n"
+
+_FIND_COLUMNS_SQL = _FIND_COLUMNS_SELECT + _FIND_COLUMNS_ORDER
 
 #: Base-table columns (excludes views/system schemas); ``$1::text[]`` (NULL = all)
 #: restricts to specific table names for a scoped value search.
@@ -410,6 +418,48 @@ def _build_table_search_sql(schema: str, table: str, columns: list[str], limit: 
         parts.append(f"count(*) FILTER (WHERE {cond}) AS m_{i}")
         parts.append(f"(array_agg(DISTINCT {qc}) FILTER (WHERE {cond}))[1:{limit}] AS s_{i}")
     return f"SELECT {', '.join(parts)} FROM {qtable}"
+
+
+def _limit_clause(args: list[Any], limit: int | None) -> str:
+    """Append ``limit`` to ``args`` and return the matching ``LIMIT $n`` line (or "").
+
+    The bound value is coerced to a non-negative int; the number itself is never
+    interpolated into the SQL text (Rule 9).
+    """
+    if limit is None:
+        return ""
+    args.append(max(0, int(limit)))
+    return f"    LIMIT ${len(args)}\n"
+
+
+def _build_list_tables_sql(
+    pattern: str | None = None, limit: int | None = None
+) -> tuple[str, list[Any]]:
+    """Compose the table listing with an optional name filter and bound; ``(sql, args)``.
+
+    ``pattern`` is a case-insensitive containment match on the table name — the exact
+    form :data:`_FIND_COLUMNS_SQL` uses for column names, so the two name searches behave
+    identically — and is bound, never interpolated (Rule 9). ``limit`` caps the rows
+    returned; the caller gets a plain list, so exactly ``limit`` rows are fetched. With
+    neither argument the text is exactly :data:`_LIST_TABLES_SQL`.
+    """
+    args: list[Any] = []
+    sql = _LIST_TABLES_SELECT
+    if pattern is not None:
+        args.append(pattern)
+        sql += f"\n      AND table_name ILIKE '%' || ${len(args)} || '%'"
+    sql += _LIST_TABLES_ORDER + _limit_clause(args, limit)
+    return sql, args
+
+
+def _build_find_columns_sql(pattern: str, limit: int | None = None) -> tuple[str, list[Any]]:
+    """Compose the column-name search with an optional bound; returns ``(sql, args)``.
+
+    ``pattern`` is always bound as ``$1``; ``limit``, when given, is bound as ``$2``.
+    Without a limit the text is exactly :data:`_FIND_COLUMNS_SQL`.
+    """
+    args: list[Any] = [pattern]
+    return _FIND_COLUMNS_SQL + _limit_clause(args, limit), args
 
 
 def _build_table_stats_sql(
@@ -667,8 +717,11 @@ class PostgresDialect(Dialect):
             await conn.execute(_READ_ONLY_SQL)
         return conn
 
-    async def list_tables(self, conn: Any) -> list[dict]:
-        rows = await conn.fetch(_LIST_TABLES_SQL)
+    async def list_tables(
+        self, conn: Any, pattern: str | None = None, limit: int | None = None
+    ) -> list[dict]:
+        sql, args = _build_list_tables_sql(pattern, limit)
+        rows = await conn.fetch(sql, *args)
         return [dict(r) for r in rows]
 
     async def get_schema(self, conn: Any, table: str) -> dict:
@@ -914,8 +967,9 @@ class PostgresDialect(Dialect):
                 "execute_write_query for INSERT/UPDATE/DELETE/DDL or SET."
             )
 
-    async def find_columns(self, conn: Any, pattern: str) -> list[dict]:
-        rows = await conn.fetch(_FIND_COLUMNS_SQL, pattern)
+    async def find_columns(self, conn: Any, pattern: str, limit: int | None = None) -> list[dict]:
+        sql, args = _build_find_columns_sql(pattern, limit)
+        rows = await conn.fetch(sql, *args)
         return [dict(r) for r in rows]
 
     async def search_value(

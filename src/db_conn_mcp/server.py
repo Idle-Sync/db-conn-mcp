@@ -180,9 +180,16 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         return await handlers.list_databases()
 
     @app.tool()
-    async def list_tables(database: str) -> list[dict]:
-        """List all tables and views in the named database."""
-        return await handlers.list_tables(database)
+    async def list_tables(
+        database: str, pattern: str | None = None, limit: int | None = None
+    ) -> list[dict]:
+        """List all tables and views in the named database.
+
+        Narrow instead of listing everything: `pattern` keeps only names containing it
+        (fuzzy, case-insensitive — "order" matches ORDERS, order_items). `limit` returns
+        at most that many rows, so a huge database can't flood the answer.
+        """
+        return await handlers.list_tables(database, pattern, limit)
 
     @app.tool()
     async def get_table_schema(database: str, table: str) -> dict:
@@ -227,13 +234,14 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
     # ---- Discovery / search tools --------------------------------------------
     @app.tool()
-    async def find_columns(database: str, pattern: str) -> list[dict]:
+    async def find_columns(database: str, pattern: str, limit: int | None = None) -> list[dict]:
         """Find columns by name across all tables (fuzzy, case-insensitive substring).
 
         e.g. pattern "email" matches user_email, EMAIL_ADDRESS. Use this to locate where
-        a concept lives before querying.
+        a concept lives before querying. `limit` returns at most that many rows — set it
+        when a broad pattern would otherwise match half the database.
         """
-        return await handlers.find_columns(database, pattern)
+        return await handlers.find_columns(database, pattern, limit)
 
     @app.tool()
     async def search_value(

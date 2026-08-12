@@ -43,6 +43,16 @@ the time of that release.
   off. The MCP server path never checks — a client launching db-conn-mcp makes no
   network calls of ours.
 
+- **Three exploration tools can now be asked the narrower question directly.**
+  `table_stats` takes `table` (one table, optionally schema-qualified), `min_size_bytes`
+  (skip anything smaller), and `limit` (top N by total size); `list_tables` takes
+  `pattern` (fuzzy, case-insensitive name match, the same one `find_columns` uses) and
+  `limit`; `find_columns` takes `limit`. All filtering happens in the database, so a huge
+  schema no longer has to come back in full just to answer "which is the biggest table".
+  When you pass `limit` to `table_stats` the result carries `truncated: true`/`false`;
+  `list_tables` and `find_columns` still return a plain list of rows, simply a shorter
+  one. Omit the new arguments and every one of these tools answers exactly as before.
+
 ## [0.6.2] — 2026-08-12
 
 The dashboard grows a front door and a face: a bare visit now tells you how in, a

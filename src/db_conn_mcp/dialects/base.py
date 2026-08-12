@@ -23,8 +23,16 @@ class Dialect(ABC):
         """
 
     @abstractmethod
-    async def list_tables(self, conn: Any) -> list[dict]:
-        """Return tables and views as ``[{schema, name, kind}]``."""
+    async def list_tables(
+        self, conn: Any, pattern: str | None = None, limit: int | None = None
+    ) -> list[dict]:
+        """Return tables and views as ``[{schema, name, kind}]``.
+
+        ``pattern`` narrows to names containing it (case-insensitive) — the same
+        containment match :meth:`find_columns` applies to column names — and ``limit``
+        returns at most that many rows. Both MUST be bound, never interpolated (Rule 9).
+        The return shape never changes: a bare list, with no truncation marker.
+        """
 
     @abstractmethod
     async def get_schema(self, conn: Any, table: str) -> dict:
@@ -192,11 +200,12 @@ class Dialect(ABC):
         """
 
     @abstractmethod
-    async def find_columns(self, conn: Any, pattern: str) -> list[dict]:
+    async def find_columns(self, conn: Any, pattern: str, limit: int | None = None) -> list[dict]:
         """Fuzzy (case-insensitive substring) search for columns by name across tables.
 
         Returns ``[{schema, table, column, type, nullable}]`` for columns whose name
-        matches ``pattern``.
+        matches ``pattern``, at most ``limit`` of them when given. Both values MUST be
+        bound, never interpolated (Rule 9); the return shape never changes.
         """
 
     @abstractmethod
