@@ -61,25 +61,59 @@ async function api(path, opts = {}) {
   return resp;
 }
 
-/** Reveal the "your server is gone" banner. Deliberately one-way: it stays up. */
-function deadPage() {
+/** Left in place of whatever was mid-flight when the host stopped answering. */
+const SETTLED_TEXT = "stopped - see the notice at the top of the page";
+
+/**
+ * Show the banner and settle the page around it. Deliberately one-way and
+ * first-state-wins: it only fires while the banner is still hidden, so whichever
+ * terminal state was reached first is the one that stays on screen.
+ *
+ * The scroll is the point of this function. The banner lives at the top of the
+ * page, and the click that discovers the dead host is usually further down, so
+ * without it the user is left staring at cards that simply stopped.
+ *
+ * `text`, when given, is assigned as textContent like everything else here.
+ */
+function revealBanner(text) {
   const banner = byId("dead-banner");
-  if (banner) {
-    banner.hidden = false;
+  if (!banner || !banner.hidden) {
+    return;
   }
+  if (text) {
+    banner.textContent = text;
+  }
+  banner.hidden = false;
+  banner.scrollIntoView({ behavior: "smooth", block: "start" });
+  settleInFlight();
+}
+
+/** Reveal the "your server is gone" banner, keeping the markup's own wording. */
+function deadPage() {
+  revealBanner(null);
+}
+
+/** Reveal the same banner with the expired-session text. */
+function expiredPage() {
+  revealBanner(EXPIRED_TEXT);
 }
 
 /**
- * Reveal the same banner with the expired-session text. Also one-way, and it only
- * writes while the banner is still hidden, so whichever state was reached first
- * stays on screen. Assigned as textContent, like everything else on this page.
+ * End every action that will never come back: nothing on this page can finish
+ * once the banner is up. Buttons are re-enabled so the page is not frozen (a
+ * later click just re-runs a fetch that fails the same way), and every status
+ * still showing in-flight text is replaced with a terminal line pointing at the
+ * banner. Nothing is rebuilt and nothing is re-fetched - the server is gone.
  */
-function expiredPage() {
-  const banner = byId("dead-banner");
-  if (banner && banner.hidden) {
-    banner.textContent = EXPIRED_TEXT;
-    banner.hidden = false;
-  }
+function settleInFlight() {
+  document.querySelectorAll("button[disabled]").forEach((button) => {
+    button.disabled = false;
+  });
+  // `message` rewrites className, so this both re-labels the node and clears its
+  // in-flight tag: calling it twice is a no-op.
+  document.querySelectorAll(".in-flight").forEach((node) => {
+    message(node, SETTLED_TEXT, "fail-text");
+  });
 }
 
 /** The decoded JSON body, or null when there is not one (never the raw text). */
@@ -155,6 +189,15 @@ function message(node, text, className) {
   node.className = className ? `msg ${className}` : "msg";
   node.textContent = text || "";
   node.hidden = !text;
+}
+
+/**
+ * Show `text` for an action that is still running. Same as `message`, plus a tag
+ * so `settleInFlight` can find the statuses that will never resolve on their own.
+ */
+function working(node, text) {
+  message(node, text, null);
+  node.classList.add("in-flight");
 }
 
 /** Paint a badge: fixed vocabulary in the class, untrusted-safe text inside. */
@@ -247,7 +290,7 @@ function clientCard(row) {
     "click",
     guard(async () => {
       await busy([inject, uninject, verify], async () => {
-        message(msg, "spawning the server and speaking MCP to it...", null);
+        working(msg, "spawning the server and speaking MCP to it...");
         const result = await verifyClient(row.key, row.label || row.key);
         message(msg, "", null);
         clear(out);
@@ -346,7 +389,7 @@ function databaseCard(row) {
     "click",
     guard(async () => {
       await busy(buttons, async () => {
-        message(msg, "connecting...", null);
+        working(msg, "connecting...");
         const resp = await api(`/api/databases/${encodeURIComponent(row.name)}/check`, {
           method: "POST",
         });
@@ -605,10 +648,10 @@ async function verifyAll() {
     const targets = rows.filter((row) => row.injected && !row.unreadable);
     for (const row of targets) {
       const label = row.label || row.key;
-      message(status, `verifying ${label}...`, null);
+      working(status, `verifying ${label}...`);
       results.appendChild(await verifyClient(row.key, label));
     }
-    message(status, "verifying the HTTP transport...", null);
+    working(status, "verifying the HTTP transport...");
     results.appendChild(await verifyHttp());
     message(status, "", null);
   });
@@ -619,7 +662,7 @@ async function runDoctor() {
   const status = byId("doctor-status");
   const offline = byId("doctor-offline").checked;
   await busy([byId("run-doctor")], async () => {
-    message(status, "running the checks...", null);
+    working(status, "running the checks...");
     const resp = await api("/api/doctor", {
       method: "POST",
       body: JSON.stringify({ offline }),
@@ -663,7 +706,7 @@ window.addEventListener("DOMContentLoaded", () => {
     guard(async () => {
       const results = byId("verify-results");
       await busy([byId("verify-all"), byId("verify-http")], async () => {
-        message(byId("verify-status"), "verifying the HTTP transport...", null);
+        working(byId("verify-status"), "verifying the HTTP transport...");
         const card = await verifyHttp();
         clear(results);
         results.appendChild(card);

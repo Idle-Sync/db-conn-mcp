@@ -674,6 +674,21 @@ def test_static_js_handles_an_expired_session(client):
     assert "expired" in js
 
 
+def test_static_js_scrolls_the_banner_into_view_and_settles_in_flight_work(client):
+    """The banner is at the top of the page; the click that trips it usually is not.
+
+    Firing it out of view left the reported symptom: cards stuck on "connecting..."
+    with the explanation scrolled off screen. The banner must scroll itself in, and
+    one shared settle step must release the buttons and re-label the dead statuses.
+    """
+    js = client.get(f"/static/app.js?token={TOKEN}").text
+    assert "scrollIntoView" in js
+    assert "settleInFlight" in js
+    assert "button[disabled]" in js
+    assert "in-flight" in js
+    assert "innerHTML" not in js
+
+
 def test_doctor_endpoint_returns_findings(cfg_client, monkeypatch):
     from db_conn_mcp.gui import app as gui_app
 

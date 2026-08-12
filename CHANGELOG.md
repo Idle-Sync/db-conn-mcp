@@ -11,7 +11,14 @@ the time of that release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **The dashboard no longer leaves you staring at frozen cards.** When the host process
+  stops (or the session expires), the notice explaining it now scrolls itself into view
+  instead of sitting off screen at the top of the page, and every action it interrupted is
+  released: stuck `connecting...` / `verifying...` labels are replaced with
+  `stopped - see the notice at the top of the page`, and the buttons they disabled become
+  clickable again.
 
 ## [0.6.0] — 2026-08-12
 
