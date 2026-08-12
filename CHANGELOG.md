@@ -11,6 +11,14 @@ the time of that release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.6.2] — 2026-08-12
+
+The dashboard grows a front door and a face: a bare visit now tells you how in, a
+bookmark keeps working, and the page looks like the instrument it is. Still 23 tools and
+2 prompts — nothing about querying your databases changed.
+
 ### Changed
 
 - **The dashboard has been restyled as a bench instrument.** It now reads like a piece of
@@ -486,7 +494,8 @@ agents.
 - Setup and management CLI — `setup`, `status`, `add`, `clients`, `check`, `remove`, `yolo` —
   with auto-injection into 8 MCP clients.
 
-[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.6...v0.6.0
 [0.5.6]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.5.5...v0.5.6
