@@ -11,7 +11,26 @@
  *     written until a human presses a button.
  */
 
-const token = new URLSearchParams(location.search).get("token") || "";
+/**
+ * The session token this page will send on every call.
+ *
+ * The query string is the freshly-opened case. A bookmarked or reloaded URL has
+ * none - it was authenticated by the session cookie, which is HttpOnly and so
+ * unreadable here - and then the token the server stamped into the page is the only
+ * source. Both are percent-encoded server-side; URLSearchParams already decodes.
+ *
+ * Read at load time: the script is deferred, so the document is fully parsed.
+ */
+function sessionToken() {
+  const fromQuery = new URLSearchParams(location.search).get("token");
+  if (fromQuery) {
+    return fromQuery;
+  }
+  const meta = document.querySelector('meta[name="gui-token"]');
+  return meta ? decodeURIComponent(meta.content) : "";
+}
+
+const token = sessionToken();
 const HDRS = { "X-GUI-Token": token, "Content-Type": "application/json" };
 
 /** Cards by client key, so a refresh can put a message back where it belongs. */
@@ -214,6 +233,15 @@ function launchLine(command, args) {
 
 // ---- summary --------------------------------------------------------------
 
+/**
+ * What the summary last reported about connections.json; null until it answers.
+ *
+ * The page's two opening reads run in parallel, so the databases list can render
+ * before this is known. `refreshDbEmpty` is the other half of that: whichever of
+ * the two lands second writes the final wording.
+ */
+let configFound = null;
+
 async function renderSummary() {
   const line = byId("summary-line");
   const resp = await api("/api/summary");
@@ -227,6 +255,8 @@ async function renderSummary() {
   line.appendChild(make("span", null, `version ${data.version} - `));
   const found = make("span", null, data.config_found ? "connections.json found" : "no connections.json yet");
   line.appendChild(found);
+  configFound = Boolean(data.config_found);
+  refreshDbEmpty();
   renderClients(Array.isArray(data.clients) ? data.clients : []);
 }
 
@@ -322,12 +352,36 @@ async function clientAction(key, action, buttons) {
 
 // ---- databases ------------------------------------------------------------
 
+/**
+ * Show or hide the empty slot under the databases list.
+ *
+ * The wording differs by whether a config file exists at all: a first run is being
+ * told what the Add form will create, while an existing-but-empty file is not.
+ */
+function showDbEmpty(show) {
+  const empty = byId("db-empty");
+  empty.textContent = show
+    ? configFound
+      ? "Your connections.json has no databases yet. Add one below."
+      : "No databases yet. Add your first below - this creates connections.json in your home directory."
+    : "";
+  empty.hidden = !show;
+}
+
+/** Re-word the slot when the summary lands after the list did. No-op otherwise. */
+function refreshDbEmpty() {
+  if (!byId("db-empty").hidden) {
+    showDbEmpty(true);
+  }
+}
+
 async function renderDatabases() {
   const list = byId("db-list");
   const status = byId("db-status");
   const resp = await api("/api/databases");
   if (resp.status === 409) {
     clear(list);
+    showDbEmpty(false);
     message(
       status,
       "connections.json exists but could not be loaded - fix it by hand; nothing " +
@@ -339,15 +393,15 @@ async function renderDatabases() {
   const rows = resp.ok ? await readJson(resp) : null;
   if (!Array.isArray(rows)) {
     clear(list);
+    showDbEmpty(false);
     message(status, "could not read the connection list", "fail-text");
     return;
   }
   status.hidden = true;
   clear(list);
-  if (!rows.length) {
-    list.appendChild(make("p", "muted", "No connections configured yet - add one below."));
-    return;
-  }
+  // Renders repeat after every add, edit and removal: removing the last connection
+  // must bring the slot back, and adding one must take it away again.
+  showDbEmpty(!rows.length);
   rows.forEach((row) => list.appendChild(databaseCard(row)));
 }
 

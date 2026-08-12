@@ -1,44 +1,70 @@
-/* db-conn-mcp dashboard.
-   One stylesheet, no external assets: CSP is `default-src 'self'`, so a webfont
-   or a CDN reset would simply be blocked. Colours live in custom properties and
-   are re-declared once under prefers-color-scheme: dark. */
+/* db-conn-mcp dashboard - "bench instrument".
+ *
+ * This page is diagnostics for a developer's database plumbing, sitting next to a
+ * terminal. It is laid out as engraved equipment, not as a product page: dense rows
+ * rather than floating cards, two type stacks, and colour spent on state alone.
+ *
+ * One stylesheet, no external assets. CSP is `default-src 'self'`, so a webfont or a
+ * CDN reset would simply be blocked - there is a test that pins "no URL in here".
+ *
+ * Colours live in custom properties and are re-declared once under
+ * prefers-color-scheme: dark. Every text/background pair below clears 4.5:1 in both
+ * themes; the tint chips are pre-mixed as literals so that stays true without
+ * color-mix() support.
+ */
 
 :root {
-  --bg: #f6f7f9;
+  --paper: #f6f7f9;
   --panel: #ffffff;
-  --ink: #1b1f24;
-  --muted: #5b6472;
-  --line: #d7dce3;
-  --accent: #1f6feb;
-  --ok-bg: #d8f3df;
-  --ok-ink: #145c2e;
-  --warn-bg: #fdf0cf;
-  --warn-ink: #6b4a05;
-  --fail-bg: #fbdcdc;
-  --fail-ink: #8a1c1c;
-  --skip-bg: #e6e9ee;
-  --skip-ink: #4a525e;
-  --code-bg: #eef1f5;
+  --ink: #1b2432;
+  --muted: #5c6879;
+  --line: #d9dee6;
+  --accent: #336791; /* Postgres slate */
+  --ok: #146f44;
+  --warn: #8f6209;
+  --fail: #b23a31;
+
+  /* State chips: the state colour mixed 10% into the panel. */
+  --accent-chip: #ebf0f4;
+  --ok-chip: #e8f1ec;
+  --warn-chip: #f4efe6;
+  --fail-chip: #f7ebea;
+  --skip-chip: #eff0f2;
+
+  /* The dead-banner strip: --fail mixed 10% into the paper. */
+  --fail-well: #efe4e5;
+  /* Recessed surface for code and pre blocks. */
+  --well: #f1f3f6;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #14171c;
-    --panel: #1c2027;
-    --ink: #e6e9ee;
-    --muted: #99a3b1;
-    --line: #2e343d;
-    --accent: #64a0ff;
-    --ok-bg: #16351f;
-    --ok-ink: #86e0a3;
-    --warn-bg: #3a2f10;
-    --warn-ink: #f0cf7a;
-    --fail-bg: #3d1a1a;
-    --fail-ink: #ff9d9d;
-    --skip-bg: #262b33;
-    --skip-ink: #aab3bf;
-    --code-bg: #10131a;
+    --paper: #141a23;
+    --panel: #1a2230;
+    --ink: #dee5ef;
+    --muted: #96a1b3;
+    --line: #28323f;
+    --accent: #6fa3c7;
+    --ok: #3dbe7b;
+    --warn: #d9a03f;
+    --fail: #e8837a;
+
+    --accent-chip: #243142;
+    --ok-chip: #1e3539;
+    --warn-chip: #313132;
+    --fail-chip: #332e39;
+    --skip-chip: #293140;
+
+    --fail-well: #29242c;
+    --well: #10161e;
   }
+}
+
+/* Two stacks, nothing else. */
+:root {
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", "Liberation Mono",
+    monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
 * {
@@ -54,147 +80,441 @@
 
 body {
   margin: 0;
-  padding: 0 1rem 4rem;
-  background: var(--bg);
+  padding: 0 0 4rem;
+  background: var(--paper);
   color: var(--ink);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
-    Arial, "Noto Sans", sans-serif;
+  font: 14px/1.5 var(--sans);
 }
 
-main,
+/* One column, one gutter. The banner, the head and the body all measure the same,
+   so their left edges line up at every width down to ~360px. */
+#dead-banner,
 #page-head,
-#dead-banner {
-  max-width: 60rem;
-  margin: 0 auto;
+main {
+  max-width: 900px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 20px;
+  padding-right: 20px;
 }
 
-h1 {
-  font-size: 1.5rem;
-  margin: 1.25rem 0 0.25rem;
+/* Keyboard first: one visible ring, same everywhere. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
-h2 {
-  font-size: 1.2rem;
-  margin: 0 0 0.25rem;
+/* ---- the lamp -----------------------------------------------------------
+ * The signature of the page. Every card title carries a 9px status lamp drawn as
+ * a pseudo-element, so it costs no markup and no script: idle is hollow, and the
+ * settled states are keyed off the badge the JS already writes.
+ */
+.card > header > h3::before,
+#page-head h1::before,
+#dead-banner::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--muted);
+  background: transparent;
 }
 
-h3 {
-  font-size: 1rem;
+@keyframes lamp-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* ---- header -------------------------------------------------------------- */
+
+#page-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding-top: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+#page-head h1 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   margin: 0;
+  font: 600 20px/1.2 var(--mono);
+  letter-spacing: -0.01em;
 }
 
-code,
-pre {
-  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas,
-    "Liberation Mono", monospace;
-  font-size: 0.85em;
+/* The one lamp that is lit by simply having rendered: the host answered. */
+#page-head h1::before {
+  background: var(--ok);
+  border-color: var(--ok);
 }
 
-code {
-  background: var(--code-bg);
-  border-radius: 4px;
-  padding: 0.1em 0.35em;
+/* ...and the mains strip takes it back. A liveness lamp that stays green above a
+   "the host process stopped" banner is a lying instrument. */
+body:has(#dead-banner:not([hidden])) #page-head h1::before {
+  background: var(--fail);
+  border-color: var(--fail);
 }
 
-pre {
-  background: var(--code-bg);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.5rem 0.6rem;
-  margin: 0.25rem 0;
-  /* Windows launch lines are long absolute paths; wrap rather than scroll. */
-  white-space: pre-wrap;
-  word-break: break-all;
+#summary-line {
+  margin: 0;
+  font: 13px/1.4 var(--mono);
+}
+
+nav {
+  display: flex;
+  gap: 14px;
+  margin-left: auto;
+}
+
+nav a {
+  font: 12px/1.4 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+nav a:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
 }
 
 a {
   color: var(--accent);
 }
 
-nav {
+/* ---- the mains strip ------------------------------------------------------
+ * Not a toast. This is the instrument's power warning: the host process is gone,
+ * and nothing else on the page can finish.
+ */
+#dead-banner {
   display: flex;
-  gap: 1rem;
-  margin: 0.75rem 0 0;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+  /* 17px + the 3px rule = the 20px gutter every other line sits on. */
+  padding: 12px 20px 12px 17px;
+  background: var(--fail-well);
+  border: 1px solid var(--fail);
+  border-left-width: 3px;
+  border-radius: 3px;
+  color: var(--ink);
+  font: 13px/1.5 var(--mono);
 }
 
-section {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 1rem;
-  margin: 1rem 0;
+#dead-banner::before {
+  margin-top: 4px;
+  background: var(--fail);
+  border-color: var(--fail);
+}
+
+#dead-banner code {
+  padding: 0;
+  background: transparent;
+  color: var(--fail);
+}
+
+/* ---- modules --------------------------------------------------------------
+ * A section is not a panel. Its header is an engraved label: eyebrow, then a rule
+ * running out to the right margin. The cards below are the only raised surface.
+ */
+
+main > section {
+  margin: 30px 0 0;
+}
+
+main > section > h2,
+main > section > h3 {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 10px;
+  font: 600 12px/1.4 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+main > section > h3 {
+  margin-top: 30px;
+}
+
+main > section > h2::after,
+main > section > h3::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--line);
+}
+
+/* The one paragraph of prose each module gets. Its own margin is zero: whatever
+   follows owns the 12px, so every module opens on the same beat. */
+main > section > p.muted {
+  max-width: 68ch;
+  margin: 0;
+  font-size: 13px;
 }
 
 .muted {
   color: var(--muted);
 }
 
+/* ---- rows ----------------------------------------------------------------- */
+
 .cards {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
-  margin: 0.75rem 0;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+
+.cards:empty {
+  margin: 0;
+}
+
+/* The unfilled slot where the first database row will sit: same box as a row, drawn
+   dashed so it reads as a space waiting to be used rather than a row that failed. */
+#db-empty {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .card {
+  padding: 12px 14px;
+  background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.75rem;
-  background: var(--bg);
+  border-radius: 3px;
 }
 
 .card > header {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 8px;
   flex-wrap: wrap;
-  margin-bottom: 0.4rem;
+  margin: 0 0 8px;
+}
+
+.card > header > h3 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  font: 600 15px/1.4 var(--sans);
 }
 
 .card p {
-  margin: 0.3rem 0;
+  margin: 6px 0 0;
 }
+
+.card > header + p,
+.card > header + pre {
+  margin-top: 0;
+}
+
+/* Labels and meta inside a row are annotation, not body copy. */
+.card .muted {
+  font-size: 13px;
+}
+
+/* One line of `check_database` output: the badge leads, and wrapped detail lines
+   up under the detail rather than under the badge. */
+.db-check-out > .msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* Verification output nests one card inside another; give it room to read as a
+   result of the row above rather than a sibling of it. */
+.c-verify-out > .card,
+.db-check-out > .card {
+  margin-top: 10px;
+}
+
+/* ---- lamps: the settled states -------------------------------------------
+ * Everything below is keyed off classes the JS already writes, so app.js needs no
+ * knowledge of any of this. Note that `badge()` and `message()` both *rewrite*
+ * className: a painted chip is `badge <state>` and a painted status line is
+ * `msg <state>`, and the template's own hooks (.db-mode, .db-msg, .c-state, .c-msg)
+ * are gone by then. So nothing below may name them - state and position are what
+ * survive, and they are what these selectors use.
+ *
+ * Every combinator is a direct child on purpose: a client card can contain a whole
+ * verify card, and a nested failure must not light its parent's lamp.
+ *
+ * A browser without :has() drops these rules and keeps hollow lamps everywhere -
+ * the badges still say what happened.
+ */
+
+/* Clients, verifications and doctor findings all carry their verdict in the header. */
+.card:has(> header > .badge.ok) > header > :is(.c-label, .v-target, .fi-check)::before {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.card:has(> header > .badge.warn) > header > :is(.c-label, .v-target, .fi-check)::before {
+  background: var(--warn);
+  border-color: var(--warn);
+}
+
+.card:has(> header > .badge.fail) > header > :is(.c-label, .v-target, .fi-check)::before {
+  background: var(--fail);
+  border-color: var(--fail);
+}
+
+/* A database row's header chip is its *mode*, not a verdict, so its lamp reads the
+   connection check instead. Failure is declared after success on purpose: one bad
+   result in a multi-database check is what the operator needs to see. */
+.card:has(> .db-check-out .badge.ok) > header > .db-name::before {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.card:has(> .db-check-out .badge.fail) > header > .db-name::before,
+.card:has(> .msg.fail-text:not([hidden])) > header > .db-name::before {
+  background: var(--fail);
+  border-color: var(--fail);
+}
+
+/* In flight, and declared last so it beats every settled state at equal weight:
+   a row that is working again must not still show its previous verdict. */
+.card:has(> .msg.in-flight:not([hidden])) > header > :is(h3, .db-name)::before {
+  background: var(--accent);
+  border-color: var(--accent);
+  animation: lamp-pulse 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card:has(> .msg.in-flight:not([hidden])) > header > :is(h3, .db-name)::before {
+    animation: none;
+  }
+}
+
+/* ---- badges ---------------------------------------------------------------
+ * Chips, not pills: the radius never leaves 3px.
+ */
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: var(--skip-chip);
+  color: var(--muted);
+  font: 12px/1.4 var(--mono);
+  white-space: nowrap;
+}
+
+.badge.ok {
+  background: var(--ok-chip);
+  color: var(--ok);
+}
+
+.badge.warn {
+  background: var(--warn-chip);
+  color: var(--warn);
+}
+
+.badge.fail {
+  background: var(--fail-chip);
+  color: var(--fail);
+}
+
+.badge.skip {
+  background: var(--skip-chip);
+  color: var(--muted);
+}
+
+/* The two chips in a database row's header are settings, not results: mode and
+   yolo. Outlined so they never read as a verdict, and write stays amber wherever
+   it appears - it is the security boundary, and it should always be visible. */
+#db-list > .card > header > .badge {
+  background: transparent;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+#db-list > .card > header > .badge.warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+/* ---- controls -------------------------------------------------------------- */
 
 .actions {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 8px;
   flex-wrap: wrap;
-  margin: 0.5rem 0 0;
+  margin: 12px 0 0;
+}
+
+.card .actions {
+  margin-top: 10px;
 }
 
 button {
-  font: inherit;
+  padding: 6px 12px;
   color: var(--ink);
-  background: var(--panel);
+  background: transparent;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.35rem 0.75rem;
+  border-radius: 3px;
+  font: 13px/1.4 var(--mono);
   cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
 }
 
 button:hover:not(:disabled) {
+  color: var(--accent);
   border-color: var(--accent);
 }
 
 button:disabled {
-  opacity: 0.5;
-  cursor: progress;
+  opacity: 0.45;
+  cursor: default;
 }
 
-button.danger {
-  color: var(--fail-ink);
+/* Destructive, but not shouting until it is about to be pressed. */
+button.danger:hover:not(:disabled) {
+  color: var(--fail);
+  border-color: var(--fail);
 }
+
+/* ---- forms ----------------------------------------------------------------- */
 
 form label {
   display: block;
-  margin: 0.6rem 0;
+  margin: 12px 0;
+  font-size: 13px;
 }
 
-form label.inline {
+/* Not scoped to forms: the doctor's "offline" toggle is a bare label in .actions. */
+label.inline {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.actions > label.inline {
+  margin: 0;
 }
 
 input[type="text"],
@@ -202,87 +522,122 @@ input:not([type]),
 input[type="password"],
 select {
   display: block;
-  font: inherit;
+  width: 100%;
+  max-width: 32rem;
+  margin-top: 5px;
+  padding: 6px 8px;
   color: var(--ink);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.35rem 0.5rem;
-  margin-top: 0.2rem;
-  width: 100%;
-  max-width: 34rem;
+  border-radius: 3px;
+  font: 13px/1.5 var(--mono);
+}
+
+input[type="checkbox"] {
+  accent-color: var(--accent);
 }
 
 input[readonly] {
   color: var(--muted);
-  background: var(--code-bg);
+  background: var(--well);
+}
+
+input::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+#add-panel {
+  margin-top: 10px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+
+#add-panel[open] {
+  padding-bottom: 4px;
 }
 
 summary {
+  font: 13px/1.4 var(--mono);
+  color: var(--muted);
   cursor: pointer;
 }
 
-.badge {
-  display: inline-block;
-  border-radius: 999px;
-  padding: 0.05rem 0.55rem;
-  font-size: 0.78rem;
-  font-weight: 600;
-  background: var(--skip-bg);
-  color: var(--skip-ink);
-  white-space: nowrap;
+summary:hover {
+  color: var(--accent);
 }
 
-.badge.ok {
-  background: var(--ok-bg);
-  color: var(--ok-ink);
+/* ---- text ------------------------------------------------------------------ */
+
+code,
+pre {
+  font-family: var(--mono);
 }
 
-.badge.warn {
-  background: var(--warn-bg);
-  color: var(--warn-ink);
+code {
+  padding: 1px 5px;
+  background: var(--well);
+  border-radius: 3px;
+  font-size: 0.9em;
 }
 
-.badge.fail {
-  background: var(--fail-bg);
-  color: var(--fail-ink);
-}
-
-.badge.skip {
-  background: var(--skip-bg);
-  color: var(--skip-ink);
-}
-
-.note {
-  border-left: 3px solid var(--line);
-  padding-left: 0.6rem;
-  color: var(--muted);
-}
-
-.warn-note {
-  border-left-color: var(--warn-ink);
-  color: var(--warn-ink);
-}
-
-.fail-text {
-  color: var(--fail-ink);
+pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: var(--well);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font: 13px/1.4 var(--mono);
+  /* A Windows launch line is one long absolute path. Scroll it rather than break
+     it: a copy-pasteable command must stay one line. */
+  white-space: pre;
+  overflow-x: auto;
 }
 
 .msg {
-  font-size: 0.92rem;
+  font: 13px/1.5 var(--mono);
 }
 
-#dead-banner {
-  background: var(--fail-bg);
-  color: var(--fail-ink);
-  border: 1px solid var(--fail-ink);
-  border-radius: 8px;
-  padding: 0.75rem 1rem;
-  margin-top: 1rem;
-  font-weight: 600;
+/* Working. Muted until it resolves - the pulsing lamp is what carries the state. */
+.msg.in-flight {
+  color: var(--muted);
 }
 
-#dead-banner code {
-  background: transparent;
-  border: 1px solid var(--fail-ink);
+.fail-text {
+  color: var(--fail);
+}
+
+.note {
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.warn-note {
+  border-left-color: var(--warn);
+  color: var(--warn);
+}
+
+/* ---- narrow ---------------------------------------------------------------- */
+
+@media (max-width: 480px) {
+  #page-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  nav {
+    margin-left: 0;
+  }
+
+  /* The badge stops being a leader and becomes a heading: at this width the
+     column left beside it is too narrow to read a diagnosis in. Buttons are left
+     to wrap on their own - stretching them would make Remove the widest target
+     on the row. */
+  .db-check-out > .msg {
+    flex-wrap: wrap;
+  }
 }

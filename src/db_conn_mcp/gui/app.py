@@ -3,8 +3,10 @@
 Security model (spec: 2026-08-11 GUI design): loopback bind, Host-header
 allowlist (DNS-rebinding defence), a per-start bearer token checked on every
 request including ``/``, no CORS ever, CSP ``default-src 'self'`` on every
-response. API responses use a fixed field vocabulary — a DSN cannot appear in
-any response by construction (Rule 6).
+response — the single exception being the unauthenticated hint page, which is
+served under a strictly tighter policy (see :data:`_HINT_CSP`). API responses use
+a fixed field vocabulary — a DSN cannot appear in any response by construction
+(Rule 6).
 """
 
 import asyncio
@@ -41,6 +43,12 @@ from ..verify import verify_client, verify_http
 
 GUI_PORT = 31415
 TOKEN_HEADER = "X-GUI-Token"
+#: Set on the page hand-off only, so a bookmark keeps working for the rest of the
+#: server run. It is accepted for *safe* methods alone — see :class:`_Guard`.
+SESSION_COOKIE = "db_conn_mcp_gui"
+#: The methods the cookie may authenticate. A cookie travels on a request the user
+#: did not compose, so it must never be enough to spawn a process or write a file.
+_SAFE_METHODS = frozenset({"GET", "HEAD"})
 _ALLOWED_HOSTS = frozenset({f"127.0.0.1:{GUI_PORT}", f"localhost:{GUI_PORT}"})
 _CSP = "default-src 'self'"
 #: Every guarded URL carries ``?token=<secret>`` (the page and its assets), so nothing
@@ -51,6 +59,73 @@ _NO_STORE = "no-store"
 #: behind the same guard, so the page's own CSS and JS would 403 without this. The
 #: token is not new information in that HTML — it is already in the address bar.
 _ASSET_TOKEN_MARKER = "__GUI_TOKEN__"
+#: The body an unauthenticated *browser* gets from ``GET /``. It is a 403 like every
+#: other refusal — only the representation differs, because the one visitor who
+#: navigates here by hand is overwhelmingly the owner, and a bare ``{"error":
+#: "forbidden"}`` leaves them with no way in. It names the tool and the command that
+#: opens the dashboard and nothing else (Rule 6): the port is documented, so what runs
+#: here is already public, and none of it helps without the token. It carries the
+#: dashboard's identity in miniature — wordmark, one idle lamp, one sentence, the
+#: command — from a small inline stylesheet, because the real stylesheet lives behind
+#: the guard and an unauthenticated fetch of it would itself be a 403. See
+#: :data:`_HINT_CSP` for the policy that inline block is served under.
+_HINT_PAGE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>db-conn-mcp dashboard</title>
+<style>
+:root {
+  --paper: #f6f7f9; --panel: #ffffff; --ink: #1b2432;
+  --muted: #5c6879; --line: #d9dee6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #141a23; --panel: #1a2230; --ink: #dee5ef;
+    --muted: #96a1b3; --line: #28323f;
+  }
+}
+body {
+  margin: 0; padding: 15vh 20px 0; background: var(--paper); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 540px; margin: 0 auto; }
+h1 {
+  display: flex; align-items: center; gap: 9px; margin: 0 0 14px;
+  font: 600 20px/1.2 ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace;
+  letter-spacing: -0.01em;
+}
+h1::before {
+  content: ""; flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
+  border: 1.5px solid var(--muted);
+}
+p { margin: 0 0 14px; color: var(--muted); }
+pre {
+  margin: 0; padding: 8px 10px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 3px; overflow-x: auto;
+  font: 13px/1.4 ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace;
+}
+</style>
+</head>
+<body>
+<main>
+<h1>db-conn-mcp</h1>
+<p>This dashboard needs a session token, and this request did not carry one. Run:</p>
+<pre>db-conn-mcp gui</pre>
+</main>
+</body>
+</html>
+"""
+#: The one response served under a policy other than :data:`_CSP`, and it is a
+#: *stricter* one in every direction except its own ``<style>`` block: ``'none'``
+#: rather than ``'self'`` as the default, so this page may not fetch a script, an
+#: image, a font, a frame or an XHR — not even from this origin. The trade is
+#: deliberate. The body is a module-level constant with no interpolation and no
+#: script of any kind, so ``'unsafe-inline'`` here can only ever apply the CSS
+#: written above; and the alternative — an external stylesheet — is impossible,
+#: because every asset sits behind the guard that just refused this request.
+_HINT_CSP = "default-src 'none'; style-src 'unsafe-inline'"
 
 
 def token_path() -> Path:
@@ -74,6 +149,52 @@ def _forbidden() -> JSONResponse:
     response.headers["content-security-policy"] = _CSP
     response.headers["cache-control"] = _NO_STORE
     return response
+
+
+def _hint_response() -> HTMLResponse:
+    """The same 403, rendered for a human: :data:`_HINT_PAGE`, no-store like the rest.
+
+    Both headers are set here for the reason :func:`_forbidden` sets them — this
+    response replaces the call to the next app, so nothing downstream stamps them.
+
+    The exception is the policy: this is the only response served under
+    :data:`_HINT_CSP` rather than :data:`_CSP`, so that its inline ``<style>`` block
+    applies. Read that constant for why the swap is a tightening, not a loosening.
+    """
+    response = HTMLResponse(_HINT_PAGE, status_code=403)
+    response.headers["content-security-policy"] = _HINT_CSP
+    response.headers["cache-control"] = _NO_STORE
+    return response
+
+
+def _prefers_html(accept: str) -> bool:
+    """Whether the caller asked for HTML ahead of JSON — i.e. a browser navigating.
+
+    Quality values are ignored on purpose (KISS): every browser lists ``text/html``
+    first and no programmatic caller asks for it at all, so position is signal
+    enough. A missing or ``*/*`` header is not a browser navigation.
+    """
+    for part in accept.split(","):
+        media = part.split(";")[0].strip().lower()
+        if media == "text/html":
+            return True
+        if media == "application/json":
+            return False
+    return False
+
+
+def _refuse(request: Request) -> Response:
+    """The 403 for one unauthenticated request: the hint page, or the fixed JSON.
+
+    Only a browser navigation to ``/`` earns the readable body. Every other path,
+    method and Accept keeps the opaque refusal, so nothing is disclosed to a prober
+    that scans routes rather than opening the dashboard.
+    """
+    if request.method != "GET" or request.url.path != "/":
+        return _forbidden()
+    if not _prefers_html(request.headers.get("accept", "")):
+        return _forbidden()
+    return _hint_response()
 
 
 def _no_config() -> JSONResponse:
@@ -167,19 +288,35 @@ class _Guard(BaseHTTPMiddleware):
         super().__init__(app)
         self._token = token.encode("utf-8", "surrogateescape")
 
+    def _supplied(self, request: Request) -> str:
+        """The credential this request offers: header, then query, then the cookie.
+
+        The cookie is read for safe methods only. It is *ambient* — the browser
+        attaches it to a request the user never composed — so letting it authorize a
+        POST would make every mutating route reachable by cross-site request forgery
+        the moment a browser's ``SameSite`` handling slipped. Header and query are
+        explicit and keep working for every method.
+        """
+        explicit = request.headers.get(TOKEN_HEADER) or request.query_params.get("token")
+        if explicit:
+            return explicit
+        if request.method in _SAFE_METHODS:
+            return request.cookies.get(SESSION_COOKIE, "")
+        return ""
+
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         """Reject anything not loopback-addressed or not carrying the token."""
         if request.headers.get("host", "") not in _ALLOWED_HOSTS:
             return _forbidden()
-        supplied = request.headers.get(TOKEN_HEADER) or request.query_params.get("token") or ""
+        supplied = self._supplied(request)
         # Compared as bytes: compare_digest raises TypeError on non-ASCII *str*, and a
         # crash inside the security boundary would escape to ServerErrorMiddleware —
         # a 500 with no CSP and a traceback on the terminal. surrogateescape keeps any
         # undecodable byte sequence comparable instead of raising a second time.
         if not hmac.compare_digest(supplied.encode("utf-8", "surrogateescape"), self._token):
-            return _forbidden()
+            return _refuse(request)
         response = await call_next(request)
         response.headers["content-security-policy"] = _CSP
         response.headers["cache-control"] = _NO_STORE
@@ -239,14 +376,23 @@ def create_app(
     config_lock = asyncio.Lock()
 
     async def index(request: Request) -> HTMLResponse:
-        """Serve the dashboard page, stamping the token into its asset URLs.
+        """Serve the dashboard page, stamping the token into its asset URLs and meta tag.
 
         The one templated value is :data:`_ASSET_TOKEN_MARKER`; everything else in
         the file is static. It is percent-encoded on the way in so a token can never
         break out of the attribute it lands in.
+
+        This is also the only response that mints the session cookie, so the URL
+        survives a reload or a bookmark for the rest of the server run. It is
+        ``HttpOnly`` (script cannot read it), ``SameSite=Strict`` (no cross-site
+        request carries it), session-lifetime (a restart mints a new token anyway),
+        and not ``Secure`` — the dashboard is plain http on loopback, so a ``Secure``
+        cookie would simply never be sent back.
         """
         html = (_static_dir() / "index.html").read_text(encoding="utf-8")
-        return HTMLResponse(html.replace(_ASSET_TOKEN_MARKER, quote(token, safe="")))
+        response = HTMLResponse(html.replace(_ASSET_TOKEN_MARKER, quote(token, safe="")))
+        response.set_cookie(SESSION_COOKIE, token, path="/", httponly=True, samesite="strict")
+        return response
 
     async def summary(request: Request) -> JSONResponse:
         """Report the app identity, whether a config was found, and client state."""

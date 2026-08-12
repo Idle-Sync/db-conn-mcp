@@ -11,7 +11,43 @@ the time of that release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **The dashboard has been restyled as a bench instrument.** It now reads like a piece of
+  diagnostic equipment sitting next to your terminal rather than a web app: one column,
+  engraved section labels, dense bordered rows instead of floating cards, quiet outlined
+  buttons, and colour spent only on state. Every row carries a **status lamp** next to its
+  title — hollow when idle, pulsing while an action is in flight, and green / amber / red
+  once it settles — so you can see what your plumbing is doing without reading a word. The
+  "your host process stopped" notice is now a mains-warning strip, and the whole page
+  follows your system light/dark setting with contrast checked in both. Nothing you click
+  behaves differently; only the appearance changed.
+- **The "you need a token" page you get from visiting `http://127.0.0.1:31415` by hand now
+  looks like part of the tool** instead of an unstyled browser default. It styles itself
+  from a small inline block, because the real stylesheet sits behind the same guard that
+  refused you — so that one response is served under a *stricter* policy than the rest of
+  the dashboard (`default-src 'none'; style-src 'unsafe-inline'`): it may not fetch a
+  script, image, font, frame or request of any kind, from anywhere. It still refuses you,
+  still with a 403, and still discloses nothing but the tool's name and `db-conn-mcp gui`.
+
+### Added
+
+- **Opening `http://127.0.0.1:31415` without a token now tells you how to get in.** Instead
+  of a raw `{"error": "forbidden"}` with no way forward, a browser navigating to the
+  dashboard gets a small page saying it needs a token and to run `db-conn-mcp gui`. The
+  request is still refused (it is still a 403, and it still discloses nothing else) — only
+  what a human sees changed. Every other unauthenticated request keeps the same opaque JSON
+  refusal it always had.
+- **The dashboard URL is now bookmarkable for the life of the server run.** Opening the page
+  with its token also sets a session cookie, so reloading the tab — or visiting the bare
+  `http://127.0.0.1:31415` after the `?token=` is gone — keeps working instead of dropping
+  you back to a 403. The cookie is `HttpOnly` and `SameSite=Strict`, it disappears when you
+  close the browser, and it authorises **reads only**: anything that spawns a process,
+  edits `connections.json`, or writes a client config still requires the real token. As
+  before, restarting the server mints a new token and retires every existing session.
+- **An empty Databases list now explains itself** instead of rendering nothing: it points
+  you at the Add form below, and says outright when adding one will create
+  `connections.json` in your home directory.
 
 ## [0.6.1] — 2026-08-12
 

@@ -11,6 +11,12 @@
   No inline <style> or <script> may be added here - CSP is `default-src 'self'`,
   which is not `unsafe-inline`, so an inline block would silently never run.
 -->
+<!--
+  The same token, for the page's own fetches. A visit authenticated by the session
+  cookie arrives with no query string for app.js to read - the cookie is HttpOnly,
+  so script cannot read that either - and this tag is what keeps such a page working.
+-->
+<meta name="gui-token" content="__GUI_TOKEN__">
 <link rel="stylesheet" href="/static/style.css?token=__GUI_TOKEN__">
 <script src="/static/app.js?token=__GUI_TOKEN__" defer></script>
 </head>
@@ -40,6 +46,9 @@
   </p>
   <p id="db-status" class="note" hidden></p>
   <div id="db-list" class="cards"></div>
+  <!-- The empty slot. app.js clears #db-list on every render, so this sits outside
+       it and is shown only when that render produced no rows. -->
+  <p id="db-empty" hidden></p>
 
   <details id="add-panel">
     <summary>Add a database</summary>
