@@ -396,9 +396,26 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
     return app
 
 
-def run(transport: Transport = "stdio", config_path: str | None = None) -> None:
-    """Launch the server over the chosen transport (``stdio`` default, or ``http``/SSE)."""
+def _run_fastmcp(transport: Transport, config_path: str | None) -> None:
+    """Build the MCP app and enter FastMCP's loop (split out so ``run`` is testable)."""
     app = build_server(config_path)
     # Map our public "http" name to FastMCP's SSE transport (design: http == SSE).
     fastmcp_transport = "sse" if transport == "http" else "stdio"
     app.run(transport=fastmcp_transport)
+
+
+def run(transport: Transport = "stdio", config_path: str | None = None, gui: bool = True) -> None:
+    """Launch the server over the chosen transport (``stdio`` default, or ``http``/SSE).
+
+    Unless ``gui=False`` (the CLI's ``--no-gui``), also tries to host the local
+    dashboard on 127.0.0.1:31415 from a background thread, silently skipping when
+    another process already holds the port — the first server started wins it.
+    """
+    if gui:
+        try:
+            from .gui.app import start_in_thread
+
+            start_in_thread(config_path)
+        except Exception:  # noqa: BLE001 — MCP must start regardless of any GUI failure
+            pass
+    _run_fastmcp(transport, config_path)

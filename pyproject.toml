@@ -33,6 +33,11 @@ dependencies = [
     # hand-maintained file — tomlkit is the only option that preserves the user's
     # comments and layout on a read-merge-write. Pure Python, no transitive deps.
     "tomlkit>=0.13.0",
+    # The GUI imports these directly; today they arrive via mcp, but our own import
+    # must not depend on a transitive pin.
+    "starlette>=0.40",
+    "uvicorn>=0.30",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]

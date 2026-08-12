@@ -66,7 +66,7 @@ def test_main_launches_server(monkeypatch):
     monkeypatch.setattr(cli.server, "run", lambda **kw: calls.update(kw))
     rc = cli.main(["--transport", "http", "--config", "/tmp/c.json"])
     assert rc == 0
-    assert calls == {"transport": "http", "config_path": "/tmp/c.json"}
+    assert calls == {"transport": "http", "config_path": "/tmp/c.json", "gui": True}
 
 
 def test_main_stdio_on_tty_explains_instead_of_hanging(monkeypatch, capsys):
@@ -89,7 +89,7 @@ def test_main_stdio_with_piped_stdin_launches_server(monkeypatch):
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
     rc = cli.main([])
     assert rc == 0
-    assert calls == {"transport": "stdio", "config_path": None}
+    assert calls == {"transport": "stdio", "config_path": None, "gui": True}
 
 
 def test_main_http_on_tty_still_runs_server(monkeypatch):
@@ -99,7 +99,7 @@ def test_main_http_on_tty_still_runs_server(monkeypatch):
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     rc = cli.main(["--transport", "http"])
     assert rc == 0
-    assert calls == {"transport": "http", "config_path": None}
+    assert calls == {"transport": "http", "config_path": None, "gui": True}
 
 
 def test_star_cta_prints_only_when_called(capsys):
@@ -986,6 +986,97 @@ def test_uninject_never_echoes_the_broken_config_contents(tmp_path, monkeypatch,
     monkeypatch.setattr(cli, "detected_clients", lambda: [spec])
     assert cli.cmd_clients(remove=True) == 0
     assert "secret-token-abc123" not in capsys.readouterr().out
+
+
+def test_cli_has_gui_subcommand_and_no_gui_flag():
+    parser = cli.build_parser()
+    args = parser.parse_args(["--no-gui"])
+    assert args.no_gui is True
+    args = parser.parse_args(["gui"])
+    assert args.command == "gui"
+
+
+def test_gui_command_starts_the_dashboard_standalone(tmp_path, monkeypatch):
+    """With nothing on the port, `gui` runs the standalone server with --config."""
+    seen = []
+    monkeypatch.setattr("db_conn_mcp.gui.app.token_path", lambda: tmp_path / "absent-token")
+    monkeypatch.setattr(
+        "db_conn_mcp.gui.app.run_standalone", lambda config_arg=None: seen.append(config_arg) or 0
+    )
+    assert cli.main(["gui", "--config", "somewhere.json"]) == 0
+    assert seen == ["somewhere.json"]
+
+
+def test_gui_command_reports_a_foreign_holder_of_the_port(tmp_path, monkeypatch, capsys):
+    """run_standalone's exit code 2 becomes a human instruction, not a traceback."""
+    monkeypatch.setattr("db_conn_mcp.gui.app.token_path", lambda: tmp_path / "absent-token")
+    monkeypatch.setattr("db_conn_mcp.gui.app.run_standalone", lambda config_arg=None: 2)
+    assert cli.main(["gui"]) == 2
+    out = capsys.readouterr().out
+    assert "31415" in out and "db-conn-mcp gui" in out
+
+
+def test_gui_command_reuses_a_live_dashboard_without_the_token_in_the_url(
+    tmp_path, monkeypatch, capsys
+):
+    """Rule 6 / I-3: the probe carries the token in a HEADER and prints it nowhere."""
+    from db_conn_mcp.gui.app import TOKEN_HEADER
+
+    (tmp_path / "gui-token").write_text("s3cret-token\n", encoding="utf-8")
+    monkeypatch.setattr("db_conn_mcp.gui.app.token_path", lambda: tmp_path / "gui-token")
+    monkeypatch.setattr(
+        "db_conn_mcp.gui.app.run_standalone",
+        lambda config_arg=None: pytest.fail("a live dashboard must be reused, not restarted"),
+    )
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"app": "db-conn-mcp-gui"}
+
+    def _get(url, headers=None, timeout=None):
+        seen.update(url=url, headers=headers or {}, timeout=timeout)
+        return _Resp()
+
+    monkeypatch.setattr("httpx.get", _get)
+    monkeypatch.setattr("webbrowser.open", lambda url: seen.update(opened=url))
+    assert cli.main(["gui"]) == 0
+    assert seen["headers"][TOKEN_HEADER] == "s3cret-token"
+    assert "s3cret-token" not in seen["url"]
+    assert seen["timeout"] == 2.0
+    assert "s3cret-token" not in capsys.readouterr().out
+
+
+def test_gui_command_ignores_a_stranger_on_the_port(tmp_path, monkeypatch):
+    """A 200 from something that is not our dashboard is not ours — fall through."""
+    (tmp_path / "gui-token").write_text("s3cret-token", encoding="utf-8")
+    monkeypatch.setattr("db_conn_mcp.gui.app.token_path", lambda: tmp_path / "gui-token")
+    started = []
+    monkeypatch.setattr(
+        "db_conn_mcp.gui.app.run_standalone", lambda config_arg=None: started.append(1) or 2
+    )
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"app": "something-else"}
+
+    monkeypatch.setattr("httpx.get", lambda *a, **k: _Resp())
+    monkeypatch.setattr("webbrowser.open", lambda url: pytest.fail("not our dashboard"))
+    assert cli.main(["gui"]) == 2
+    assert started == [1]
+
+
+def test_no_gui_flag_reaches_server_run(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli.server, "run", lambda **kwargs: seen.update(kwargs))
+    assert cli.main(["--transport", "http", "--no-gui"]) == 0
+    assert seen["gui"] is False
+    assert cli.main(["--transport", "http"]) == 0
+    assert seen["gui"] is True
 
 
 def test_status_marks_an_unreadable_config(tmp_path, monkeypatch, capsys):

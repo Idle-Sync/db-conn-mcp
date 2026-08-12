@@ -99,12 +99,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="stdio",
         help="MCP transport to launch when no subcommand is given (default: stdio).",
     )
+    parser.add_argument(
+        "--no-gui",
+        action="store_true",
+        help="Do not host the local dashboard on 127.0.0.1:31415 alongside the server.",
+    )
 
     sub = parser.add_subparsers(dest="command")
 
     def _add(name: str, help_text: str) -> argparse.ArgumentParser:
         return sub.add_parser(name, parents=[common], help=help_text)
 
+    _add("gui", "Open the local dashboard (starts it if not already running).")
     _add("setup", "Guided setup; shows status if already configured.")
     _add("status", "Show configured databases and MCP client injection state.")
     _add("add", "Add another database connection.")
@@ -363,12 +369,16 @@ def run_setup_wizard(config_arg: str | None = None) -> int:
 
 
 def _print_star_cta() -> None:
-    """Print a one-line star nudge after setup finishes successfully.
+    """Print the star nudge and the dashboard tip after setup finishes successfully.
 
     The honest version of "grow the repo": ask at the moment the tool just
     worked for someone. Never gates, blocks, or touches their GitHub account.
+    The tip rides along here — right where a first-time user has just learned
+    the CLI and would otherwise never discover the dashboard. Plain ASCII: this
+    line also has to survive a cp1252 Windows console.
     """
     print(f"⭐ Find db-conn-mcp useful? A star helps others find it: {REPO_URL}")
+    print("Tip: `db-conn-mcp gui` opens a browser dashboard for setup and verification.")
 
 
 def _setup_menu(path: Path) -> int:
@@ -581,7 +591,46 @@ def cmd_yolo(config_arg: str | None, name: str, state: str) -> int:
     return 0
 
 
+def cmd_gui(config_arg: str | None = None) -> int:
+    """Show the dashboard: reuse the one a running server already hosts, else start it.
+
+    The imports are local so ``import db_conn_mcp.cli`` never drags in starlette,
+    uvicorn and httpx — the CLI's other commands (and the MCP server's own launch
+    path) have no use for them.
+    """
+    import webbrowser
+
+    import httpx
+
+    from .gui.app import GUI_PORT, TOKEN_HEADER, run_standalone, token_path
+
+    url = f"http://127.0.0.1:{GUI_PORT}"
+    try:
+        token = token_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        token = ""
+    if token:
+        try:
+            # The token goes in a HEADER, never the query string: a URL is what ends
+            # up in logs and process listings (Rule 6). It is only ever put in a URL
+            # for the browser hand-off below, which is the one consumer that needs it.
+            r = httpx.get(f"{url}/api/summary", headers={TOKEN_HEADER: token}, timeout=2.0)
+            # Anything but our own summary means the port is somebody else's.
+            if r.status_code == 200 and r.json().get("app") == "db-conn-mcp-gui":
+                webbrowser.open(f"{url}/?token={token}")
+                print(f"Dashboard already running - opened {url}")
+                return 0
+        except httpx.HTTPError:
+            pass
+    code = run_standalone(config_arg)
+    if code == 2:
+        print(f"Port {GUI_PORT} is in use by something that is not the db-conn-mcp dashboard.")
+        print("Free the port, then re-run `db-conn-mcp gui`.")
+    return code
+
+
 _COMMANDS = {
+    "gui": lambda a: cmd_gui(a.config),
     "setup": lambda a: run_setup_wizard(a.config),
     "status": lambda a: cmd_status(a.config),
     "add": lambda a: cmd_add(a.config),
@@ -632,7 +681,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.transport == "stdio" and sys.stdin.isatty():
         return _explain_stdio_misuse()
     try:
-        server.run(transport=args.transport, config_path=args.config)
+        server.run(transport=args.transport, config_path=args.config, gui=not args.no_gui)
     except KeyboardInterrupt:
         return 130
     except config.ConfigError as exc:

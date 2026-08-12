@@ -106,6 +106,40 @@ def test_start_in_thread_skips_when_port_taken(tmp_path, monkeypatch, capfd):
     assert capfd.readouterr().out == ""  # stdout is sacred
 
 
+def test_server_run_skips_gui_when_disabled(monkeypatch):
+    """--no-gui reaches the hook: the dashboard is only offered when gui=True."""
+    from db_conn_mcp import server as server_mod
+
+    calls = []
+    monkeypatch.setattr(
+        "db_conn_mcp.gui.app.start_in_thread", lambda config_arg=None: calls.append(1)
+    )
+    # run()'s refactor exposes _run_fastmcp for exactly this seam: it owns building
+    # the MCP app, so this test never needs a real connections.json.
+    monkeypatch.setattr(server_mod, "_run_fastmcp", lambda transport, config_path: None)
+    server_mod.run(transport="stdio", config_path=None, gui=False)
+    assert calls == []
+    server_mod.run(transport="stdio", config_path=None, gui=True)
+    assert calls == [1]
+
+
+def test_server_run_survives_a_broken_gui(monkeypatch):
+    """A GUI failure must never stop the MCP server from starting."""
+    from db_conn_mcp import server as server_mod
+
+    started = []
+
+    def _boom(config_arg=None):
+        raise RuntimeError("gui exploded")
+
+    monkeypatch.setattr("db_conn_mcp.gui.app.start_in_thread", _boom)
+    monkeypatch.setattr(
+        server_mod, "_run_fastmcp", lambda transport, config_path: started.append(transport)
+    )
+    server_mod.run(transport="stdio", config_path=None, gui=True)
+    assert started == ["stdio"]
+
+
 def test_start_in_thread_serves_and_writes_token(tmp_path, monkeypatch, capfd):
     import httpx
 
