@@ -39,6 +39,17 @@ class Dialect(ABC):
         """Return columns, types, nullability, and PK/FK for one table."""
 
     @abstractmethod
+    async def table_indexes(self, conn: Any, table: str) -> list[dict]:
+        """Return one table's indexes as ``[{name, columns, unique, method}]``.
+
+        ``columns`` is the index's key list *in index order* (an expression index
+        reports its expression); ``unique`` says whether it enforces uniqueness;
+        ``method`` is the access method (``btree``, ``gin``, ...). ``table`` may be
+        schema-qualified and MUST be resolved with bound parameters — the same
+        resolution :meth:`get_schema` uses — never interpolated (Rule 9).
+        """
+
+    @abstractmethod
     async def get_database_schema(self, conn: Any) -> dict:
         """Return the whole database's schema in one deterministic pass.
 

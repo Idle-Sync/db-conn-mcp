@@ -268,12 +268,22 @@ class Handlers:
         finally:
             await db.close()
 
-    async def get_table_schema(self, database: str, table: str) -> dict:
-        """Return columns/types and PK/FK for one table."""
+    async def get_table_schema(
+        self, database: str, table: str, include_indexes: bool = False
+    ) -> dict:
+        """Return columns/types and PK/FK for one table.
+
+        ``include_indexes=True`` adds an ``indexes`` key (name, columns, unique,
+        method) from the same connection. The default answer is unchanged and does
+        not carry the key at all — purely additive for existing consumers.
+        """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            return await dialect.get_schema(db, table)
+            schema = await dialect.get_schema(db, table)
+            if include_indexes:
+                schema["indexes"] = await dialect.table_indexes(db, table)
+            return schema
         finally:
             await db.close()
 

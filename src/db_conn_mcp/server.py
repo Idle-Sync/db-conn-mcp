@@ -192,9 +192,16 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         return await handlers.list_tables(database, pattern, limit)
 
     @app.tool()
-    async def get_table_schema(database: str, table: str) -> dict:
-        """Get columns, types, and primary/foreign keys for a table."""
-        return await handlers.get_table_schema(database, table)
+    async def get_table_schema(database: str, table: str, include_indexes: bool = False) -> dict:
+        """Get columns, types, and primary/foreign keys for a table.
+
+        Pass include_indexes=true to also get the table's indexes (name, the columns
+        each one covers in order, whether it is unique, and its method — btree, gin,
+        ...). Use it before writing a filter or a JOIN, or when a query is slow and you
+        want to know what is actually indexed. Omitted by default, so the plain answer
+        stays small.
+        """
+        return await handlers.get_table_schema(database, table, include_indexes)
 
     @app.tool()
     async def get_database_schema(

@@ -83,6 +83,28 @@ _KEYS_SQL = """
 """
 
 
+# Indexes on one table, from the native catalogs. The table is resolved exactly like
+# _COLUMNS_SQL/_KEYS_SQL do it — bound name plus optional bound schema (Rule 9). Each
+# key column is rendered by Postgres itself via pg_get_indexdef(oid, ordinal, pretty),
+# so an expression index reports its expression rather than a missing name.
+_INDEXES_SQL = """
+    SELECT i.relname AS name,
+           ARRAY(
+               SELECT pg_get_indexdef(ix.indexrelid, k.ordinal, true)
+               FROM generate_series(1, ix.indnatts) AS k(ordinal)
+               ORDER BY k.ordinal
+           ) AS columns,
+           ix.indisunique AS unique,
+           am.amname AS method
+    FROM pg_index ix
+    JOIN pg_class t ON t.oid = ix.indrelid
+    JOIN pg_class i ON i.oid = ix.indexrelid
+    JOIN pg_am am ON am.oid = i.relam
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE t.relname = $1 AND ($2::text IS NULL OR n.nspname = $2)
+    ORDER BY i.relname
+"""
+
 #: Every column of every non-system base table, ordered for byte-stable output.
 _DB_COLUMNS_SQL = """
     SELECT c.table_schema AS schema,
@@ -740,6 +762,11 @@ class PostgresDialect(Dialect):
             "primary_key": primary_key,
             "foreign_keys": foreign_keys,
         }
+
+    async def table_indexes(self, conn: Any, table: str) -> list[dict]:
+        name, schema = _split_schema_table(table)
+        rows = await conn.fetch(_INDEXES_SQL, name, schema)
+        return [dict(r) for r in rows]
 
     async def get_database_schema(self, conn: Any) -> dict:
         """Assemble the whole-database schema from two ordered catalog scans.

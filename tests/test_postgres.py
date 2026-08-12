@@ -13,6 +13,7 @@ import asyncpg
 import pytest
 
 from db_conn_mcp.dialects import postgres as pg
+from db_conn_mcp.dialects.base import Dialect
 from db_conn_mcp.dialects.postgres import (
     PostgresDialect,
     _assemble_ddl,
@@ -225,6 +226,36 @@ async def test_get_schema_shape():
     assert result["columns"] == columns
     assert result["primary_key"] == ["id"]
     assert result["foreign_keys"] == [{"column": "org_id", "references": "orgs.id"}]
+
+
+async def test_table_indexes_shape():
+    rows = [
+        {"name": "users_pkey", "columns": ["id"], "unique": True, "method": "btree"},
+        {
+            "name": "users_lower_email_idx",
+            "columns": ["lower(email)"],
+            "unique": False,
+            "method": "btree",
+        },
+    ]
+    conn = FakeConn([rows])
+    result = await PostgresDialect().table_indexes(conn, "users")
+    assert result == rows
+    assert all(set(r) == {"name", "columns", "unique", "method"} for r in result)
+    assert conn.fetch_args[0] == ("users", None)  # identifier bound, never interpolated
+    assert "pg_index" in conn.fetched[0]
+
+
+async def test_table_indexes_resolves_a_schema_qualified_table():
+    conn = FakeConn([[]])
+    await PostgresDialect().table_indexes(conn, "app.users")
+    # Same (name, schema) resolution get_schema uses for the very same table string.
+    assert conn.fetch_args[0] == ("users", "app")
+
+
+def test_table_indexes_is_part_of_the_dialect_contract():
+    """The ABC enforces it, so a future dialect cannot forget indexes."""
+    assert "table_indexes" in Dialect.__abstractmethods__
 
 
 async def test_get_database_schema_groups_columns_and_keys():

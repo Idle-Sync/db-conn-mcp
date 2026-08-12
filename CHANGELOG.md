@@ -62,6 +62,18 @@ the time of that release.
   `list_tables` and `find_columns` still return a plain list of rows, simply a shorter
   one. Omit the new arguments and every one of these tools answers exactly as before.
 
+- **`explain_query` now takes `params`, and `get_table_schema` can list a table's
+  indexes.** `explain_query(sql, params=[…])` binds `$1`/`$2` values through the driver
+  exactly like `execute_read_query`, so you get the plan for the query you are actually
+  about to run instead of having to rewrite it with literals — which can plan
+  differently — and it composes with `analyze=true`. `get_table_schema(...,
+  include_indexes=true)` adds an `indexes` list to the answer: each index's name, the
+  columns it covers in order (expression indexes report their expression), whether it is
+  unique, and its method (btree, gin, …) — so "is this column indexed?" no longer needs a
+  hand-written catalog query. Both are additive: without `params` the plan is exactly
+  what it was, and without `include_indexes` the schema response has no `indexes` key at
+  all.
+
 ## [0.6.2] — 2026-08-12
 
 The dashboard grows a front door and a face: a bare visit now tells you how in, a

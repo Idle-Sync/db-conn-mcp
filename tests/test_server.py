@@ -93,6 +93,7 @@ class FakeDialect:
         self.table_stats_calls: list[dict] = []
         self.list_tables_calls: list[dict] = []
         self.find_columns_calls: list[dict] = []
+        self.index_calls: list[str] = []
         self.sequences_behind_only = None
 
     async def connect(self, dsn, *, read_only):
@@ -108,6 +109,10 @@ class FakeDialect:
 
     async def get_schema(self, conn, table):
         return {"table": table, "columns": [], "primary_key": [], "foreign_keys": []}
+
+    async def table_indexes(self, conn, table):
+        self.index_calls.append(table)
+        return [{"name": f"{table}_pkey", "columns": ["id"], "unique": True, "method": "btree"}]
 
     async def get_database_schema(self, conn):
         if self.db_schema is not None:
@@ -264,6 +269,45 @@ async def test_list_tables_and_find_columns_tools_accept_the_new_arguments(cfg_p
     assert columns["result"][0]["column"] == "email"
     assert dialect.list_tables_calls == [{"pattern": "user", "limit": 1}]
     assert dialect.find_columns_calls == [{"pattern": "email", "limit": 1}]
+
+
+async def test_get_table_schema_omits_indexes_by_default(cfg_path, monkeypatch):
+    """Additive only: an existing consumer sees exactly the old keys, and no index query runs."""
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.get_table_schema("prod", "users")
+    assert set(result) == {"table", "columns", "primary_key", "foreign_keys"}
+    assert "indexes" not in result
+    assert dialect.index_calls == []
+
+
+async def test_get_table_schema_include_indexes_adds_the_key(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.get_table_schema("prod", "users", include_indexes=True)
+    assert dialect.connected_read_only is True
+    assert dialect.index_calls == ["users"]
+    assert result["indexes"] == [
+        {"name": "users_pkey", "columns": ["id"], "unique": True, "method": "btree"}
+    ]
+    assert dialect.conn.closed is True
+
+
+async def test_get_table_schema_tool_accepts_include_indexes(cfg_path, monkeypatch):
+    """`include_indexes` is declared on the tool, so the unknown-parameter seam lets it by."""
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    app = server.build_server(cfg_path)
+
+    blocks = await app.call_tool(
+        "get_table_schema", {"database": "prod", "table": "users", "include_indexes": True}
+    )
+    assert _fenced_payload(blocks[0])["indexes"][0]["name"] == "users_pkey"
+
+    default = await app.call_tool("get_table_schema", {"database": "prod", "table": "users"})
+    assert "indexes" not in _fenced_payload(default[0])
 
 
 async def test_get_database_schema_connects_read_only(cfg_path, monkeypatch):
