@@ -284,6 +284,17 @@ main > section > p.muted {
   margin: 0;
 }
 
+/* The unfilled slot where the first database row will sit: same box as a row, drawn
+   dashed so it reads as a space waiting to be used rather than a row that failed. */
+#db-empty {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .card {
   padding: 12px 14px;
   background: var(--panel);

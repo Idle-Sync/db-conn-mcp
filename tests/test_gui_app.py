@@ -658,6 +658,21 @@ def test_page_has_all_three_sections_and_no_inline_handlers(client):
     assert "onclick=" not in html  # all behaviour lives in app.js listeners
 
 
+def test_the_databases_section_ships_an_empty_state(client):
+    """A first run lands on an empty list, and must be told what to do about it.
+
+    Without this the section renders nothing at all — an empty list above a collapsed
+    disclosure — which reads as a page that failed rather than as a setup step.
+    """
+    html = client.get(f"/?token={TOKEN}").text
+    assert 'id="db-empty"' in html
+    js = client.get(f"/static/app.js?token={TOKEN}").text
+    assert "db-empty" in js
+    # The no-config wording is the one that names what the Add form is about to do.
+    assert "creates connections.json" in js
+    assert "innerHTML" not in js
+
+
 def test_static_js_never_uses_innerhtml(client):
     js = client.get(f"/static/app.js?token={TOKEN}").text
     assert "innerHTML" not in js

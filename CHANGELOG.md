@@ -45,6 +45,9 @@ the time of that release.
   close the browser, and it authorises **reads only**: anything that spawns a process,
   edits `connections.json`, or writes a client config still requires the real token. As
   before, restarting the server mints a new token and retires every existing session.
+- **An empty Databases list now explains itself** instead of rendering nothing: it points
+  you at the Add form below, and says outright when adding one will create
+  `connections.json` in your home directory.
 
 ## [0.6.1] — 2026-08-12
 

@@ -46,6 +46,9 @@
   </p>
   <p id="db-status" class="note" hidden></p>
   <div id="db-list" class="cards"></div>
+  <!-- The empty slot. app.js clears #db-list on every render, so this sits outside
+       it and is shown only when that render produced no rows. -->
+  <p id="db-empty" hidden></p>
 
   <details id="add-panel">
     <summary>Add a database</summary>
