@@ -9,12 +9,13 @@ We use FastMCP — the official high-level SDK API — over the lower-level
 remaining the same SDK.
 """
 
+import difflib
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ContentBlock
+from mcp.types import ContentBlock, TextContent
 
 from . import __version__
 from . import doctor as doctor_mod
@@ -24,22 +25,77 @@ from .handlers import Handlers
 
 Transport = Literal["stdio", "http"]
 
-#: What ``FastMCP.call_tool`` may return: the text blocks alone, or — for a tool
-#: with an output schema (all 23 of ours) — ``(text blocks, structured content)``.
-ToolResult = Sequence[ContentBlock] | tuple[Sequence[ContentBlock], dict[str, Any]]
+#: What ``FastMCP.call_tool`` may return: the text blocks alone, or
+#: ``(text blocks, structured content)`` — where the structured half is ``None`` for
+#: the value-bearing tools below.
+ToolResult = Sequence[ContentBlock] | tuple[Sequence[ContentBlock], dict[str, Any] | None]
+
+#: Tools that return raw row VALUES — the most attacker-controllable content this server
+#: emits, since anyone who can write a row chooses the text. Their payload must reach the
+#: agent ONLY inside the untrusted-data banner, so these four emit no ``structuredContent``
+#: at all: a client that renders only the structured channel would otherwise read raw row
+#: data with no fence around it. Metadata tools (schemas, stats, diagnostics, config) keep
+#: their structured output.
+VALUE_BEARING_TOOLS = frozenset(
+    {"sample_table_rows", "execute_read_query", "fetch_rows", "search_value"}
+)
+
+#: What a value-bearing tool says when its result carries no rows at all. FastMCP turns
+#: a list into one text block PER row, so an empty list becomes ZERO content blocks —
+#: and with the structured channel dropped, the response would say nothing whatsoever:
+#: "this table is empty" and "the call did nothing" would look identical to the agent.
+#: An empty JSON array is what the same result minus its rows parses as.
+EMPTY_VALUE_PAYLOAD = "[]"
 
 
 class GuardedFastMCP(FastMCP):
-    """FastMCP that fences every tool's *text* output as untrusted database data.
+    """FastMCP that rejects unknown arguments and fences every tool's *text* output.
 
-    One seam guards all 23 tools (Rule 1: no per-tool boilerplate). Only the text
-    channel is wrapped — ``structuredContent`` is passed through **untouched** so it
+    One seam covers all 23 tools (Rule 1: no per-tool boilerplate). Only the text
+    channel is wrapped; for the tools in :data:`VALUE_BEARING_TOOLS` the structured
+    channel is dropped entirely, so raw row values cannot reach a client outside the
+    banner. Every other tool's ``structuredContent`` passes through **untouched** so it
     stays valid against the tool's output schema, which clients rely on.
     """
 
+    def _reject_unknown_arguments(self, name: str, arguments: dict[str, Any]) -> None:
+        """Raise if ``arguments`` carries a key the tool's input schema never declared.
+
+        FastMCP silently drops undeclared arguments, so a mistargeted call looked like it
+        worked — issue #29: ``check_database(connection="prod")`` probed *every* database
+        with no signal that the targeting was ignored. Only parameter **names** appear in
+        the message; a value could be a DSN (Rule 6).
+        """
+        tool = self._tool_manager.get_tool(name)
+        if tool is None:  # unknown tool — leave FastMCP's own error untouched
+            return
+        accepted = sorted(tool.parameters.get("properties", {}))
+        unknown = sorted(set(arguments) - set(accepted))
+        if not unknown:
+            return
+        closest = difflib.get_close_matches(unknown[0], accepted, n=1)
+        hint = f" (did you mean '{closest[0]}'?)" if closest else ""
+        raise ValueError(
+            f"unknown parameter(s) for {name}: {', '.join(unknown)}"
+            f" - accepted: {', '.join(accepted)}{hint}"
+        )
+
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
-        """Run the tool, then wrap its text blocks with the untrusted-data guard."""
+        """Reject unknown arguments, run the tool, then wrap its text blocks in the guard.
+
+        A value-bearing tool answers ``(guarded blocks, None)``: its rows are served on
+        the fenced text channel only. Their output schemas are un-declared at build time
+        (see :func:`_drop_value_bearing_output_schemas`), which is what lets ``None``
+        through the SDK's output validation. A result with no blocks at all (a row list
+        that came back empty) is given one saying so — see :data:`EMPTY_VALUE_PAYLOAD`.
+        """
+        self._reject_unknown_arguments(name, arguments)
         result = await super().call_tool(name, arguments)
+        if name in VALUE_BEARING_TOOLS:
+            blocks = result[0] if isinstance(result, tuple) else result
+            if not blocks:
+                blocks = [TextContent(type="text", text=EMPTY_VALUE_PAYLOAD)]
+            return guard_content_blocks(blocks), None
         if isinstance(result, tuple):
             unstructured, structured = result
             return guard_content_blocks(unstructured), structured
@@ -87,13 +143,35 @@ If they don't want to install anything, fall back to get_database_schema(format=
 """
 
 
+def _drop_value_bearing_output_schemas(app: GuardedFastMCP) -> None:
+    """Un-declare the output schema of every :data:`VALUE_BEARING_TOOLS` entry.
+
+    The SDK's low-level handler rejects a result whose ``structuredContent`` is ``None``
+    while the tool still advertises an ``outputSchema`` ("Output validation error"), so
+    suppressing the structured channel means the schema must go with it — and a client
+    then sees the honest surface: these tools promise text only.
+
+    Today only ``sample_table_rows`` actually declares one (FastMCP derives a schema from
+    a ``list[dict]`` return annotation but not from a bare ``dict``); the loop covers all
+    four so a future annotation change cannot silently re-open the gap.
+    """
+    for name in VALUE_BEARING_TOOLS:
+        tool = app._tool_manager.get_tool(name)
+        if tool is None:  # pragma: no cover — every name above is registered below
+            continue
+        tool.fn_metadata.output_schema = None
+        tool.fn_metadata.output_model = None
+
+
 def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
     """Construct the guarded FastMCP app with all 23 tools and 2 prompts."""
     resolved = resolve_path(str(config_path) if config_path else None)
     handlers = Handlers(resolved)
     # 23 tools + 2 prompts registered below. `instructions` reaches the client in the
-    # initialize response — the durable half of the prompt-injection defence, since a
-    # client reading only structuredContent never sees the per-response text guard.
+    # initialize response — the standing half of the prompt-injection defence, covering
+    # the metadata tools, whose structuredContent a client may read without ever seeing
+    # the per-response text guard. The row-value tools close that gap outright: they
+    # emit no structuredContent, so their data exists only inside the fence.
     app = GuardedFastMCP("db-conn-mcp", instructions=UNTRUSTED_DATA_POLICY)
     # FastMCP takes no `version`, and the low-level server then advertises the *SDK's*
     # version in the initialize response's serverInfo. Stamp our own instead, so a
@@ -112,14 +190,28 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         return await handlers.list_databases()
 
     @app.tool()
-    async def list_tables(database: str) -> list[dict]:
-        """List all tables and views in the named database."""
-        return await handlers.list_tables(database)
+    async def list_tables(
+        database: str, pattern: str | None = None, limit: int | None = None
+    ) -> list[dict]:
+        """List all tables and views in the named database.
+
+        Narrow instead of listing everything: `pattern` keeps only names containing it
+        (fuzzy, case-insensitive — "order" matches ORDERS, order_items). `limit` returns
+        at most that many rows, so a huge database can't flood the answer.
+        """
+        return await handlers.list_tables(database, pattern, limit)
 
     @app.tool()
-    async def get_table_schema(database: str, table: str) -> dict:
-        """Get columns, types, and primary/foreign keys for a table."""
-        return await handlers.get_table_schema(database, table)
+    async def get_table_schema(database: str, table: str, include_indexes: bool = False) -> dict:
+        """Get columns, types, and primary/foreign keys for a table.
+
+        Pass include_indexes=true to also get the table's indexes (name, its KEY columns
+        in index order — an INCLUDE payload is not listed — whether it is unique, and its
+        method: btree, gin, ...). Use it before writing a filter or a JOIN, or when a
+        query is slow and you want to know what is actually indexed. Omitted by default,
+        so the plain answer stays small.
+        """
+        return await handlers.get_table_schema(database, table, include_indexes)
 
     @app.tool()
     async def get_database_schema(
@@ -154,18 +246,23 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
     @app.tool()
     async def sample_table_rows(database: str, table: str, n: int = 10) -> list[dict]:
-        """Fetch the first N rows of a table to learn its data shape."""
+        """Fetch the first N rows of a table to learn its data shape.
+
+        Rows arrive on the text channel only, inside the untrusted-data banner: this
+        tool emits no structuredContent.
+        """
         return await handlers.sample_table_rows(database, table, n)
 
     # ---- Discovery / search tools --------------------------------------------
     @app.tool()
-    async def find_columns(database: str, pattern: str) -> list[dict]:
+    async def find_columns(database: str, pattern: str, limit: int | None = None) -> list[dict]:
         """Find columns by name across all tables (fuzzy, case-insensitive substring).
 
         e.g. pattern "email" matches user_email, EMAIL_ADDRESS. Use this to locate where
-        a concept lives before querying.
+        a concept lives before querying. `limit` returns at most that many rows — set it
+        when a broad pattern would otherwise match half the database.
         """
-        return await handlers.find_columns(database, pattern)
+        return await handlers.find_columns(database, pattern, limit)
 
     @app.tool()
     async def search_value(
@@ -180,6 +277,9 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         For speed on large databases, first narrow with list_tables/find_columns and pass
         a `tables` shortlist; otherwise it scans all non-system tables (bounded, may
         return partial results flagged `truncated`).
+
+        Matches arrive on the text channel only, inside the untrusted-data banner: this
+        tool emits no structuredContent.
         """
         return await handlers.search_value(database, value, tables, limit_per_column)
 
@@ -201,6 +301,9 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         ALWAYS pass user-supplied values via `params` with $1/$2/... placeholders in the
         SQL (real driver bind parameters — no quoting/injection pitfalls), not by pasting
         them into the SQL string. Optional timeout_ms cancels an overrunning query.
+
+        Rows arrive on the text channel only, inside the untrusted-data banner: this
+        tool emits no structuredContent.
         """
         return await handlers.execute_read_query(database, sql, params, timeout_ms)
 
@@ -249,13 +352,21 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         )
 
     @app.tool()
-    async def explain_query(database: str, sql: str, analyze: bool = False) -> dict:
+    async def explain_query(
+        database: str, sql: str, analyze: bool = False, params: list[Any] | None = None
+    ) -> dict:
         """Show the execution plan for a read-only query (EXPLAIN; optionally ANALYZE).
 
         Use to confirm index usage or diagnose a slow query. analyze=true actually runs
         the (read-only, validated) query to collect real timings and buffer stats.
+
+        EXPLAIN the query you will ACTUALLY run: a plan for bound parameters can differ
+        from the plan for the same SQL with the values pasted in. Pass `params` with the
+        $1/$2/... placeholders exactly as you would to execute_read_query (real driver
+        binds), instead of rewriting the query with literals just to explain it.
+        `params` composes with analyze=true.
         """
-        return await handlers.explain_query(database, sql, analyze)
+        return await handlers.explain_query(database, sql, analyze, params)
 
     @app.tool()
     async def cancel_query(database: str, pid: int) -> dict:
@@ -283,6 +394,9 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Returns {rows, row_count, exhausted, cursor_closed}; the cursor closes itself
         once fully drained.
+
+        Rows arrive on the text channel only, inside the untrusted-data banner: this
+        tool emits no structuredContent.
         """
         return await handlers.fetch_rows(cursor_id, n)
 
@@ -318,22 +432,36 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         return await handlers.diff_schemas(database_a, database_b)
 
     @app.tool()
-    async def check_sequences(database: str) -> dict:
+    async def check_sequences(database: str, behind_only: bool = True) -> dict:
         """Find sequences lagging behind their column's max value (stale after migrations).
 
         A `behind: true` sequence would hand out an id that already exists — fix with
-        setval(). Run this after any bulk copy or logical-replication migration.
+        setval(). Run this after any bulk copy or logical-replication migration. By
+        default only the problem sequences are listed, with `total_sequences` reporting
+        how many were checked — so `behind_count: 0` means "all clear". Pass
+        `behind_only=false` for the full census; on a large schema that is one row per
+        sequence (hundreds), so ask for it only when you need every sequence's state.
         """
-        return await handlers.check_sequences(database)
+        return await handlers.check_sequences(database, behind_only)
 
     @app.tool()
-    async def table_stats(database: str) -> dict:
+    async def table_stats(
+        database: str,
+        limit: int | None = None,
+        min_size_bytes: int | None = None,
+        table: str | None = None,
+    ) -> dict:
         """Approximate row counts and disk/index sizes per table, largest first.
 
         Uses the database's own statistics — fast, no table scans. Useful for planning
-        migration copy order and spotting anomalies.
+        migration copy order and spotting anomalies. One row per table, so the full
+        answer may be large on a big database — ask the narrower question instead of
+        filtering afterwards: `table` for one table (optionally schema-qualified),
+        `min_size_bytes` to skip anything smaller, `limit` for the top N by total size.
+        With `limit` set the result carries `truncated: true` when more tables matched
+        than were returned.
         """
-        return await handlers.table_stats(database)
+        return await handlers.table_stats(database, limit, min_size_bytes, table)
 
     @app.tool()
     async def show_activity(database: str, include_query: bool = False) -> dict:
@@ -372,10 +500,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         with a credential-free fallback-port identity probe. Returns findings as
         {check, status: ok|warn|fail|skipped, detail, suggested_action} where
         suggested_action is machine-actionable: reconnect_client, upgrade_package,
-        swap_primary_port, fix_permissions, fix_config, repair_client_config, or
-        none. Fix what you can; report the rest to the user verbatim. Output is
-        sanitized — never contains DSNs, hosts, or credentials. offline=true skips
-        the PyPI lookup.
+        swap_primary_port, fix_permissions, fix_config, repair_client_config,
+        fix_connection, install_doctor_extra, run_setup, report_bug, or none —
+        every finding that states a remedy names one. Fix what you can; report the
+        rest to the user verbatim. Output is sanitized — never contains DSNs, hosts,
+        or credentials. offline=true skips the PyPI lookup.
         """
         # Existence is re-evaluated per call (like the CLI): the config file can be
         # deleted after startup, and run_checks() reads None as "no configuration".
@@ -393,6 +522,7 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         """How to export a schema: self-contained SQL vs. faithful pg_dump (+ installing it)."""
         return FAITHFUL_SCHEMA_GUIDANCE
 
+    _drop_value_bearing_output_schemas(app)
     return app
 
 

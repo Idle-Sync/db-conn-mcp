@@ -296,8 +296,108 @@ def test_pypi_same_version_ok(monkeypatch):
     monkeypatch.setattr(
         urllib.request, "urlopen", _fake_urlopen({"info": {"version": __version__}})
     )
+    monkeypatch.setattr(doctor_mod, "_scan_stale_processes", lambda: doctor_mod.StalenessScan())
     (f,) = check_pypi_latest(CheckContext(config_path=None, offline=False))
     assert f["status"] == "ok"
+    assert f["detail"] == f"v{__version__} is the latest published version"
+
+
+def test_pypi_latest_does_not_read_as_all_clear_beside_a_stale_process(monkeypatch):
+    """Use case 1+2 together: upgraded, but the old process is still serving.
+
+    "v0.5.6 is the latest published version" alone reads as "you're fine" at exactly
+    the moment the user is NOT fine, so the ok detail must name the divergence.
+    """
+    monkeypatch.setattr(
+        urllib.request, "urlopen", _fake_urlopen({"info": {"version": __version__}})
+    )
+    monkeypatch.setattr(
+        doctor_mod, "_scan_stale_processes", lambda: doctor_mod.StalenessScan(stale_pids=(111,))
+    )
+    (f,) = check_pypi_latest(CheckContext(config_path=None, offline=False))
+    assert f["status"] == "ok"
+    assert f["detail"] == (
+        f"v{__version__} is the latest published version — but a running process "
+        "predates this install; see process_staleness"
+    )
+
+
+def test_pypi_latest_wording_unchanged_when_psutil_is_missing(monkeypatch):
+    """No psutil means staleness is UNKNOWN — never assert or hint at it."""
+    monkeypatch.setattr(
+        urllib.request, "urlopen", _fake_urlopen({"info": {"version": __version__}})
+    )
+    monkeypatch.setitem(sys.modules, "psutil", None)  # import psutil -> ImportError
+    (f,) = check_pypi_latest(CheckContext(config_path=None, offline=False))
+    assert f["status"] == "ok"
+    assert f["detail"] == f"v{__version__} is the latest published version"
+
+
+def test_pypi_newer_version_does_not_scan_processes(monkeypatch):
+    """The stale-process caveat belongs to the up-to-date branch only."""
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen({"info": {"version": "99.0.0"}}))
+
+    def _never():
+        raise AssertionError("must not scan processes when an upgrade is already advised")
+
+    monkeypatch.setattr(doctor_mod, "_scan_stale_processes", _never)
+    (f,) = check_pypi_latest(CheckContext(config_path=None, offline=False))
+    assert f["status"] == "warn"
+
+
+def _counting_scan(monkeypatch, scan):
+    """Replace the process scan with one that records how often it ran."""
+    calls: list[int] = []
+
+    def _scan():
+        calls.append(1)
+        return scan
+
+    monkeypatch.setattr(doctor_mod, "_scan_stale_processes", _scan)
+    return calls
+
+
+def _only_staleness_checks(monkeypatch):
+    """Run just the two checks that consume the stale-process scan."""
+    monkeypatch.setattr(
+        doctor_mod,
+        "_CHECKS",
+        [("process_staleness", check_process_staleness), ("pypi_latest", check_pypi_latest)],
+    )
+
+
+async def test_processes_are_scanned_only_once_per_doctor_run(monkeypatch):
+    """Both consumers of the scan share it — process_iter must not walk the box twice."""
+    calls = _counting_scan(monkeypatch, doctor_mod.StalenessScan(stale_pids=(111,)))
+    monkeypatch.setattr(
+        urllib.request, "urlopen", _fake_urlopen({"info": {"version": __version__}})
+    )
+    _only_staleness_checks(monkeypatch)
+
+    findings = await run_checks(None, offline=False)
+
+    assert len(calls) == 1
+    # Both checks still saw it: the pid is reported, and it caveats the version line.
+    assert any("pid 111" in f["detail"] for f in findings)
+    assert any("see process_staleness" in f["detail"] for f in findings)
+
+
+async def test_the_process_scan_is_never_reused_across_doctor_runs(monkeypatch):
+    """The memo lives on the per-run context only: a second call rescans, always.
+
+    Caching across runs would let a long-lived server keep answering from a scan taken
+    before the user restarted anything — the exact lie this check exists to prevent.
+    """
+    calls = _counting_scan(monkeypatch, doctor_mod.StalenessScan())
+    monkeypatch.setattr(
+        urllib.request, "urlopen", _fake_urlopen({"info": {"version": __version__}})
+    )
+    _only_staleness_checks(monkeypatch)
+
+    await run_checks(None, offline=False)
+    await run_checks(None, offline=False)
+
+    assert len(calls) == 2
 
 
 def test_pypi_network_error_skips(monkeypatch):
@@ -337,6 +437,7 @@ def test_staleness_skipped_without_psutil(monkeypatch):
     (f,) = check_process_staleness(CheckContext(config_path=None, offline=True))
     assert f["status"] == "skipped"
     assert "pipx inject" in f["detail"]
+    assert f["suggested_action"] == "install_doctor_extra"
 
 
 def test_staleness_flags_process_older_than_install(monkeypatch):
@@ -478,6 +579,64 @@ async def test_connectivity_does_not_probe_identity_when_a_fallback_rejected_aut
     findings = await check_connectivity(CheckContext(config_path=path, offline=True))
     assert [f["check"] for f in findings] == ["connectivity"]
     assert findings[0]["status"] == "fail"
+
+
+async def _site_psutil_missing(monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "psutil", None)  # import psutil -> ImportError
+    (f,) = check_process_staleness(CheckContext(config_path=None, offline=True))
+    return f
+
+
+async def _site_no_configuration(monkeypatch, tmp_path):
+    (f,) = check_config_schema(CheckContext(config_path=None, offline=True))
+    return f
+
+
+async def _site_connectivity_failure(monkeypatch, tmp_path):
+    path = _write_cfg(tmp_path)
+
+    async def fake_check_database(self, database=None):
+        return [
+            {
+                "database": "db",
+                "status": "UNREACHABLE",
+                "category": "REFUSED",
+                "detail": "Connection refused. Check the port and that the server is running.",
+            }
+        ]
+
+    from db_conn_mcp.handlers import Handlers
+
+    monkeypatch.setattr(Handlers, "check_database", fake_check_database)
+    (f,) = await check_connectivity(CheckContext(config_path=path, offline=True))
+    return f
+
+
+async def _site_crashing_check(monkeypatch, tmp_path):
+    def _boom(ctx):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(doctor, "_CHECKS", [("exploding", _boom)])
+    (f,) = await run_checks(None, offline=True)
+    return f
+
+
+@pytest.mark.parametrize(
+    "site, expected_action",
+    [
+        (_site_psutil_missing, "install_doctor_extra"),
+        (_site_no_configuration, "run_setup"),
+        (_site_connectivity_failure, "fix_connection"),
+        (_site_crashing_check, "report_bug"),
+    ],
+    ids=["psutil_missing", "no_configuration", "connectivity_failure", "crashing_check"],
+)
+async def test_a_finding_with_a_remedy_carries_a_machine_actionable_suggestion(
+    site, expected_action, monkeypatch, tmp_path
+):
+    """A remedy buried in prose is not machine-actionable — every such site names it."""
+    f = await site(monkeypatch, tmp_path)
+    assert f["suggested_action"] == expected_action
 
 
 def test_registry_order_and_membership():

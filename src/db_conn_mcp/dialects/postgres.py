@@ -41,14 +41,18 @@ _SSL_REQUEST = (8).to_bytes(4, "big") + (80877103).to_bytes(4, "big")
 # more than one command. So banning non-read leaders also bans a trailing "; DELETE".
 _READ_ONLY_LEADERS = frozenset({"select", "with", "values", "table", "show", "explain"})
 
-_LIST_TABLES_SQL = """
+#: Tables and views. Split so :func:`_build_list_tables_sql` can add a name filter
+#: between the two halves; the unfiltered text is :data:`_LIST_TABLES_SQL`.
+_LIST_TABLES_SELECT = """
     SELECT table_schema AS schema,
            table_name   AS name,
            CASE table_type WHEN 'VIEW' THEN 'view' ELSE 'table' END AS kind
     FROM information_schema.tables
-    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-    ORDER BY table_schema, table_name
-"""
+    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"""
+
+_LIST_TABLES_ORDER = "\n    ORDER BY table_schema, table_name\n"
+
+_LIST_TABLES_SQL = _LIST_TABLES_SELECT + _LIST_TABLES_ORDER
 
 _COLUMNS_SQL = """
     SELECT column_name                   AS name,
@@ -78,6 +82,30 @@ _KEYS_SQL = """
       AND tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY')
 """
 
+
+# Indexes on one table, from the native catalogs. The table is resolved exactly like
+# _COLUMNS_SQL/_KEYS_SQL do it — bound name plus optional bound schema (Rule 9). Each
+# key column is rendered by Postgres itself via pg_get_indexdef(oid, ordinal, pretty),
+# so an expression index reports its expression rather than a missing name.
+# indnkeyatts, not indnatts: the latter counts INCLUDE payload columns as well, and
+# listing those among the key columns would claim a lookup they cannot serve.
+_INDEXES_SQL = """
+    SELECT i.relname AS name,
+           ARRAY(
+               SELECT pg_get_indexdef(ix.indexrelid, k.ordinal, true)
+               FROM generate_series(1, ix.indnkeyatts) AS k(ordinal)
+               ORDER BY k.ordinal
+           ) AS columns,
+           ix.indisunique AS unique,
+           am.amname AS method
+    FROM pg_index ix
+    JOIN pg_class t ON t.oid = ix.indrelid
+    JOIN pg_class i ON i.oid = ix.indexrelid
+    JOIN pg_am am ON am.oid = i.relam
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE t.relname = $1 AND ($2::text IS NULL OR n.nspname = $2)
+    ORDER BY i.relname
+"""
 
 #: Every column of every non-system base table, ordered for byte-stable output.
 _DB_COLUMNS_SQL = """
@@ -316,17 +344,24 @@ _OWNED_SEQUENCES_SQL = """
     ORDER BY sn.nspname, s.relname
 """
 
-#: Per-table size/row statistics from the statistics collector (no table scans).
-_TABLE_STATS_SQL = """
+#: Per-table size/row statistics from the statistics collector (no table scans). Split
+#: so :func:`_build_table_stats_sql` can slot a WHERE between the two halves.
+_TABLE_STATS_SELECT = """
     SELECT s.schemaname AS schema,
            s.relname AS table,
            s.n_live_tup AS approx_rows,
            pg_table_size(s.relid) AS table_bytes,
            pg_indexes_size(s.relid) AS index_bytes,
            pg_total_relation_size(s.relid) AS total_bytes
-    FROM pg_stat_user_tables s
-    ORDER BY pg_total_relation_size(s.relid) DESC, s.schemaname, s.relname
-"""
+    FROM pg_stat_user_tables s"""
+
+#: The total-size expression the rows report — also what ``min_size_bytes`` filters on.
+_TABLE_STATS_SIZE = "pg_total_relation_size(s.relid)"
+
+_TABLE_STATS_ORDER = f"\n    ORDER BY {_TABLE_STATS_SIZE} DESC, s.schemaname, s.relname\n"
+
+#: The unfiltered query — what an argument-free ``table_stats`` still runs, verbatim.
+_TABLE_STATS_SQL = _TABLE_STATS_SELECT + _TABLE_STATS_ORDER
 
 #: Sanitized activity view — no user names, no client addresses; query text is
 #: opt-in ($1) and truncated so secrets embedded in SQL can't leak by default.
@@ -346,8 +381,10 @@ _SHOW_ACTIVITY_SQL = """
 """
 
 
-#: Fuzzy column-name search (Tool A). ``$1`` is the parameterized pattern.
-_FIND_COLUMNS_SQL = """
+#: Fuzzy column-name search (Tool A). ``$1`` is the parameterized pattern. Split so
+#: :func:`_build_find_columns_sql` can append a LIMIT; unbounded it is
+#: :data:`_FIND_COLUMNS_SQL`.
+_FIND_COLUMNS_SELECT = """
     SELECT table_schema AS schema,
            table_name   AS table,
            column_name  AS column,
@@ -355,9 +392,11 @@ _FIND_COLUMNS_SQL = """
            (is_nullable = 'YES') AS nullable
     FROM information_schema.columns
     WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-      AND column_name ILIKE '%' || $1 || '%'
-    ORDER BY table_schema, table_name, ordinal_position
-"""
+      AND column_name ILIKE '%' || $1 || '%'"""
+
+_FIND_COLUMNS_ORDER = "\n    ORDER BY table_schema, table_name, ordinal_position\n"
+
+_FIND_COLUMNS_SQL = _FIND_COLUMNS_SELECT + _FIND_COLUMNS_ORDER
 
 #: Base-table columns (excludes views/system schemas); ``$1::text[]`` (NULL = all)
 #: restricts to specific table names for a scoped value search.
@@ -403,6 +442,86 @@ def _build_table_search_sql(schema: str, table: str, columns: list[str], limit: 
         parts.append(f"count(*) FILTER (WHERE {cond}) AS m_{i}")
         parts.append(f"(array_agg(DISTINCT {qc}) FILTER (WHERE {cond}))[1:{limit}] AS s_{i}")
     return f"SELECT {', '.join(parts)} FROM {qtable}"
+
+
+def _limit_clause(args: list[Any], limit: int | None) -> str:
+    """Append ``limit`` to ``args`` and return the matching ``LIMIT $n`` line (or "").
+
+    The bound value is coerced to a non-negative int; the number itself is never
+    interpolated into the SQL text (Rule 9).
+    """
+    if limit is None:
+        return ""
+    args.append(max(0, int(limit)))
+    return f"    LIMIT ${len(args)}\n"
+
+
+def _build_list_tables_sql(
+    pattern: str | None = None, limit: int | None = None
+) -> tuple[str, list[Any]]:
+    """Compose the table listing with an optional name filter and bound; ``(sql, args)``.
+
+    ``pattern`` is a case-insensitive containment match on the table name — the exact
+    form :data:`_FIND_COLUMNS_SQL` uses for column names, so the two name searches behave
+    identically — and is bound, never interpolated (Rule 9). ``limit`` caps the rows
+    returned; the caller gets a plain list, so exactly ``limit`` rows are fetched. With
+    neither argument the text is exactly :data:`_LIST_TABLES_SQL`.
+    """
+    args: list[Any] = []
+    sql = _LIST_TABLES_SELECT
+    if pattern is not None:
+        args.append(pattern)
+        sql += f"\n      AND table_name ILIKE '%' || ${len(args)} || '%'"
+    sql += _LIST_TABLES_ORDER + _limit_clause(args, limit)
+    return sql, args
+
+
+def _build_find_columns_sql(pattern: str, limit: int | None = None) -> tuple[str, list[Any]]:
+    """Compose the column-name search with an optional bound; returns ``(sql, args)``.
+
+    ``pattern`` is always bound as ``$1``; ``limit``, when given, is bound as ``$2``.
+    Without a limit the text is exactly :data:`_FIND_COLUMNS_SQL`.
+    """
+    args: list[Any] = [pattern]
+    return _FIND_COLUMNS_SQL + _limit_clause(args, limit), args
+
+
+def _build_table_stats_sql(
+    table: str | None = None,
+    min_size_bytes: int | None = None,
+    limit: int | None = None,
+) -> tuple[str, list[Any]]:
+    """Compose the table-stats query with optional filters; return ``(sql, args)``.
+
+    Every filter *value* is bound through a placeholder (Rule 9) — nothing is
+    interpolated. ``table`` matches the table name and may be schema-qualified
+    (``analytics.events`` binds both parts); ``min_size_bytes`` filters on the same
+    total-size expression the rows report; ``limit`` caps the answer but binds
+    ``limit + 1`` so one row *beyond* the limit comes back and the caller can tell a
+    truncated answer from a complete one. With no filters the text is exactly
+    :data:`_TABLE_STATS_SQL`, so the default answer is unchanged.
+    """
+    conditions: list[str] = []
+    args: list[Any] = []
+    if table is not None:
+        name, schema = _split_schema_table(table)
+        args.append(name)
+        conditions.append(f"s.relname = ${len(args)}")
+        if schema is not None:
+            args.append(schema)
+            conditions.append(f"s.schemaname = ${len(args)}")
+    if min_size_bytes is not None:
+        args.append(int(min_size_bytes))
+        conditions.append(f"{_TABLE_STATS_SIZE} >= ${len(args)}")
+
+    sql = _TABLE_STATS_SELECT
+    if conditions:
+        sql += "\n    WHERE " + "\n      AND ".join(conditions)
+    sql += _TABLE_STATS_ORDER
+    if limit is not None:
+        args.append(max(0, int(limit)) + 1)
+        sql += f"    LIMIT ${len(args)}\n"
+    return sql, args
 
 
 def _assemble_ddl(
@@ -622,8 +741,11 @@ class PostgresDialect(Dialect):
             await conn.execute(_READ_ONLY_SQL)
         return conn
 
-    async def list_tables(self, conn: Any) -> list[dict]:
-        rows = await conn.fetch(_LIST_TABLES_SQL)
+    async def list_tables(
+        self, conn: Any, pattern: str | None = None, limit: int | None = None
+    ) -> list[dict]:
+        sql, args = _build_list_tables_sql(pattern, limit)
+        rows = await conn.fetch(sql, *args)
         return [dict(r) for r in rows]
 
     async def get_schema(self, conn: Any, table: str) -> dict:
@@ -642,6 +764,11 @@ class PostgresDialect(Dialect):
             "primary_key": primary_key,
             "foreign_keys": foreign_keys,
         }
+
+    async def table_indexes(self, conn: Any, table: str) -> list[dict]:
+        name, schema = _split_schema_table(table)
+        rows = await conn.fetch(_INDEXES_SQL, name, schema)
+        return [dict(r) for r in rows]
 
     async def get_database_schema(self, conn: Any) -> dict:
         """Assemble the whole-database schema from two ordered catalog scans.
@@ -796,14 +923,26 @@ class PostgresDialect(Dialect):
         row = await conn.fetchrow(_CANCEL_BACKEND_SQL, int(pid))
         return {"pid": int(pid), "cancelled": bool(row["cancelled"]) if row else False}
 
-    async def explain(self, conn: Any, sql: str, analyze: bool = False) -> dict:
+    async def explain(
+        self,
+        conn: Any,
+        sql: str,
+        analyze: bool = False,
+        params: list[Any] | None = None,
+    ) -> dict:
         prefix = "EXPLAIN (ANALYZE, BUFFERS) " if analyze else "EXPLAIN "
-        rows = await conn.fetch(prefix + sql)
+        # Same bind path as execute(): asyncpg's $1/$2 positional arguments, so the
+        # planner sees the real values rather than a query mangled by interpolation.
+        rows = await conn.fetch(prefix + sql, *(params or []))
         # Each row is one plan line under a single "QUERY PLAN" column.
         return {"plan": [next(iter(dict(r).values())) for r in rows]}
 
-    async def check_sequences(self, conn: Any) -> list[dict]:
+    async def check_sequences(self, conn: Any, behind_only: bool = True) -> dict:
+        # "behind" needs the sequence's own last_value/is_called next to the column's
+        # max, which is one probe pair per sequence — the catalog query can't decide it,
+        # so the filtering happens here, over the rows we inspected.
         report: list[dict] = []
+        scanned = 0
         for r in await conn.fetch(_OWNED_SEQUENCES_SQL):
             d = dict(r)
             qseq = f"{_quote_identifier(d['sequence_schema'])}.{_quote_identifier(d['sequence'])}"
@@ -820,19 +959,30 @@ class PostgresDialect(Dialect):
             # An uncalled sequence hands out last_value itself next, so its safe
             # ceiling is one lower than a called one.
             ceiling = last_value if is_called else last_value - 1
+            behind = max_id is not None and max_id > ceiling
+            scanned += 1
+            if behind_only and not behind:
+                continue
             report.append(
                 {
                     **d,
                     "last_value": last_value,
                     "is_called": is_called,
                     "max_id": max_id,
-                    "behind": max_id is not None and max_id > ceiling,
+                    "behind": behind,
                 }
             )
-        return report
+        return {"total_sequences": scanned, "sequences": report}
 
-    async def table_stats(self, conn: Any) -> list[dict]:
-        return [dict(r) for r in await conn.fetch(_TABLE_STATS_SQL)]
+    async def table_stats(
+        self,
+        conn: Any,
+        limit: int | None = None,
+        min_size_bytes: int | None = None,
+        table: str | None = None,
+    ) -> list[dict]:
+        sql, args = _build_table_stats_sql(table, min_size_bytes, limit)
+        return [dict(r) for r in await conn.fetch(sql, *args)]
 
     async def show_activity(self, conn: Any, include_query: bool = False) -> list[dict]:
         rows = await conn.fetch(_SHOW_ACTIVITY_SQL, bool(include_query))
@@ -862,8 +1012,9 @@ class PostgresDialect(Dialect):
                 "execute_write_query for INSERT/UPDATE/DELETE/DDL or SET."
             )
 
-    async def find_columns(self, conn: Any, pattern: str) -> list[dict]:
-        rows = await conn.fetch(_FIND_COLUMNS_SQL, pattern)
+    async def find_columns(self, conn: Any, pattern: str, limit: int | None = None) -> list[dict]:
+        sql, args = _build_find_columns_sql(pattern, limit)
+        rows = await conn.fetch(sql, *args)
         return [dict(r) for r in rows]
 
     async def search_value(

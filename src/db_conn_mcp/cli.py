@@ -17,13 +17,14 @@ Only the connection *name* is ever echoed — never the DSN (Rule 6).
 
 import argparse
 import asyncio
+import os
 import re
 import shutil
 import sys
 from pathlib import Path
 from typing import Literal
 
-from . import __commit__, __version__, config, doctor, server
+from . import __commit__, __version__, config, doctor, server, update_check
 from .clients import (
     ClientConfigError,
     ClientSpec,
@@ -683,12 +684,56 @@ def _explain_stdio_misuse() -> int:
     return 1
 
 
+#: Set this to any non-empty value to silence the "a newer release exists" line.
+NO_UPDATE_CHECK_ENV = "DB_CONN_MCP_NO_UPDATE_CHECK"
+
+
+def _start_update_check() -> update_check.UpdateCheck | None:
+    """Kick off the background version lookup, or return None when it must not run.
+
+    Only interactive humans get nudged, so the check is skipped unless stdout is a
+    TTY and :data:`NO_UPDATE_CHECK_ENV` is unset/empty. Callers must invoke this
+    *only* on the subcommand path — the MCP serve path never checks (its stdout is
+    the JSON-RPC channel, and a client's launch should make no network calls of ours).
+    """
+    if not sys.stdout.isatty() or os.environ.get(NO_UPDATE_CHECK_ENV):
+        return None
+    try:
+        return update_check.start_check()
+    except Exception:  # noqa: BLE001 — a nudge may never break a command
+        return None
+
+
+def _print_update_nudge(check: update_check.UpdateCheck | None) -> None:
+    """Print the one-line upgrade hint, if the lookup already found something newer.
+
+    Never blocks (the check answers from what its thread has produced so far) and
+    never raises: the command has already run, and its result must not be spoiled.
+    """
+    if check is None:
+        return
+    try:
+        latest = check.newer_version()
+        if latest:
+            print(
+                f"db-conn-mcp {latest} is available (you have {__version__}) - "
+                "upgrade: pipx upgrade db-conn-mcp"
+            )
+    except Exception:  # noqa: BLE001 — a nudge may never break a command
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point (declared in ``pyproject.toml`` as ``db-conn-mcp``)."""
     args = build_parser().parse_args(argv)
     args.config = getattr(args, "config", None)  # SUPPRESS means it may be absent
     if args.command in _COMMANDS:
-        return _COMMANDS[args.command](args)
+        # Started first so the lookup overlaps the command's own work; read after it,
+        # at the single seam every handler (success or failure) returns through.
+        check = _start_update_check()
+        code = _COMMANDS[args.command](args)
+        _print_update_nudge(check)
+        return code
     # No subcommand -> run the server. An interactive terminal means a human ran it by
     # hand; the stdio server would hang silently on stdin, so explain instead (http is a
     # legitimate long-running foreground server and never reads stdin).

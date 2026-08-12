@@ -23,12 +23,32 @@ class Dialect(ABC):
         """
 
     @abstractmethod
-    async def list_tables(self, conn: Any) -> list[dict]:
-        """Return tables and views as ``[{schema, name, kind}]``."""
+    async def list_tables(
+        self, conn: Any, pattern: str | None = None, limit: int | None = None
+    ) -> list[dict]:
+        """Return tables and views as ``[{schema, name, kind}]``.
+
+        ``pattern`` narrows to names containing it (case-insensitive) — the same
+        containment match :meth:`find_columns` applies to column names — and ``limit``
+        returns at most that many rows. Both MUST be bound, never interpolated (Rule 9).
+        The return shape never changes: a bare list, with no truncation marker.
+        """
 
     @abstractmethod
     async def get_schema(self, conn: Any, table: str) -> dict:
         """Return columns, types, nullability, and PK/FK for one table."""
+
+    @abstractmethod
+    async def table_indexes(self, conn: Any, table: str) -> list[dict]:
+        """Return one table's indexes as ``[{name, columns, unique, method}]``.
+
+        ``columns`` is the index's key list *in index order* (an expression index
+        reports its expression) — key columns only, so an INCLUDE payload is not
+        listed; ``unique`` says whether it enforces uniqueness;
+        ``method`` is the access method (``btree``, ``gin``, ...). ``table`` may be
+        schema-qualified and MUST be resolved with bound parameters — the same
+        resolution :meth:`get_schema` uses — never interpolated (Rule 9).
+        """
 
     @abstractmethod
     async def get_database_schema(self, conn: Any) -> dict:
@@ -132,31 +152,58 @@ class Dialect(ABC):
         """
 
     @abstractmethod
-    async def explain(self, conn: Any, sql: str, analyze: bool = False) -> dict:
+    async def explain(
+        self,
+        conn: Any,
+        sql: str,
+        analyze: bool = False,
+        params: list[Any] | None = None,
+    ) -> dict:
         """Return the query plan as ``{"plan": [str, ...]}``.
 
         With ``analyze=True`` the statement is actually executed to collect real
         timings — callers must only pass validated read-only SQL, and the
         read-only session blocks any write natively as defense-in-depth.
+
+        ``params`` bind through the driver's native parameterization — the same
+        mechanism :meth:`execute` uses — so the plan is the one the *bound* query
+        gets, which can differ from the plan for the same SQL with literals.
         """
 
     @abstractmethod
-    async def check_sequences(self, conn: Any) -> list[dict]:
-        """Report every column-owned sequence vs. the max value in its column.
+    async def check_sequences(self, conn: Any, behind_only: bool = True) -> dict:
+        """Compare every column-owned sequence with the max value in its column.
 
-        Returns ``[{sequence_schema, sequence, table_schema, table, column,
-        last_value, is_called, max_id, behind}]`` where ``behind=True`` means the
-        next sequence value would collide with existing data (the classic
-        post-migration stale-sequence problem).
+        Returns ``{"total_sequences": int, "sequences": [{sequence_schema, sequence,
+        table_schema, table, column, last_value, is_called, max_id, behind}]}`` where
+        ``behind=True`` means the next sequence value would collide with existing data
+        (the classic post-migration stale-sequence problem).
+
+        ``behind_only=True`` (the default) keeps only the problem rows in
+        ``sequences``; ``False`` returns the full census. ``total_sequences`` always
+        counts every sequence actually inspected, so a filtered answer still says how
+        much was checked.
         """
 
     @abstractmethod
-    async def table_stats(self, conn: Any) -> list[dict]:
+    async def table_stats(
+        self,
+        conn: Any,
+        limit: int | None = None,
+        min_size_bytes: int | None = None,
+        table: str | None = None,
+    ) -> list[dict]:
         """Approximate row counts and on-disk sizes per user table.
 
         Returns ``[{schema, table, approx_rows, table_bytes, index_bytes,
         total_bytes}]`` ordered largest-first. Row counts come from the
         database's own statistics (fast, approximate) — no table scans.
+
+        ``table`` narrows to one table (may be schema-qualified), ``min_size_bytes``
+        drops anything smaller than that total size, and ``limit`` caps the scan.
+        Filter values MUST be bound, never interpolated (Rule 9). With ``limit`` set,
+        implementations return up to ``limit + 1`` rows — the extra row is how the
+        caller detects truncation; capping to ``limit`` is the caller's job.
         """
 
     @abstractmethod
@@ -180,11 +227,12 @@ class Dialect(ABC):
         """
 
     @abstractmethod
-    async def find_columns(self, conn: Any, pattern: str) -> list[dict]:
+    async def find_columns(self, conn: Any, pattern: str, limit: int | None = None) -> list[dict]:
         """Fuzzy (case-insensitive substring) search for columns by name across tables.
 
         Returns ``[{schema, table, column, type, nullable}]`` for columns whose name
-        matches ``pattern``.
+        matches ``pattern``, at most ``limit`` of them when given. Both values MUST be
+        bound, never interpolated (Rule 9); the return shape never changes.
         """
 
     @abstractmethod

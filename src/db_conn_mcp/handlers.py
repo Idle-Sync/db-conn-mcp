@@ -252,21 +252,38 @@ class Handlers:
             rows.append(view)
         return rows
 
-    async def list_tables(self, database: str) -> list[dict]:
-        """Return tables and views for one database."""
+    async def list_tables(
+        self, database: str, pattern: str | None = None, limit: int | None = None
+    ) -> list[dict]:
+        """Return tables and views for one database.
+
+        ``pattern`` keeps only names containing it (case-insensitive, the same match
+        :meth:`find_columns` uses); ``limit`` returns at most that many rows. The shape is
+        always a plain list — a bounded answer is simply shorter.
+        """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            return await dialect.list_tables(db)
+            return await dialect.list_tables(db, pattern, limit)
         finally:
             await db.close()
 
-    async def get_table_schema(self, database: str, table: str) -> dict:
-        """Return columns/types and PK/FK for one table."""
+    async def get_table_schema(
+        self, database: str, table: str, include_indexes: bool = False
+    ) -> dict:
+        """Return columns/types and PK/FK for one table.
+
+        ``include_indexes=True`` adds an ``indexes`` key (name, columns, unique,
+        method) from the same connection. The default answer is unchanged and does
+        not carry the key at all — purely additive for existing consumers.
+        """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            return await dialect.get_schema(db, table)
+            schema = await dialect.get_schema(db, table)
+            if include_indexes:
+                schema["indexes"] = await dialect.table_indexes(db, table)
+            return schema
         finally:
             await db.close()
 
@@ -374,12 +391,17 @@ class Handlers:
         finally:
             await db.close()
 
-    async def find_columns(self, database: str, pattern: str) -> list[dict]:
-        """Fuzzy-search for columns by name across all tables in a database."""
+    async def find_columns(
+        self, database: str, pattern: str, limit: int | None = None
+    ) -> list[dict]:
+        """Fuzzy-search for columns by name across all tables in a database.
+
+        ``limit`` returns at most that many rows; the shape stays a plain list.
+        """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            return await dialect.find_columns(db, pattern)
+            return await dialect.find_columns(db, pattern, limit)
         finally:
             await db.close()
 
@@ -484,17 +506,26 @@ class Handlers:
         finally:
             await db.close()
 
-    async def explain_query(self, database: str, sql: str, analyze: bool = False) -> dict:
+    async def explain_query(
+        self,
+        database: str,
+        sql: str,
+        analyze: bool = False,
+        params: list[Any] | None = None,
+    ) -> dict:
         """Return the query plan for a read-only statement (optionally ANALYZE).
 
         The SQL is validated read-only first; ``analyze=True`` really executes the
         statement to gather timings, which the read-only session keeps safe.
+        ``params`` bind through the same driver mechanism ``execute_read_query``
+        uses (Postgres ``$1``/``$2``), so the plan explained is the plan the query
+        an agent is about to run will actually get.
         """
         conn = config.get(self._load(), database)
         dialect_for(conn.dsn).validate_read_only(sql)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            return await dialect.explain(db, sql, analyze)
+            return await dialect.explain(db, sql, analyze, params)
         finally:
             await db.close()
 
@@ -626,29 +657,57 @@ class Handlers:
             **_diff_schemas(schemas[0], schemas[1]),
         }
 
-    async def check_sequences(self, database: str) -> dict:
-        """Report sequences whose next value would collide with existing rows."""
+    async def check_sequences(self, database: str, behind_only: bool = True) -> dict:
+        """Report sequences whose next value would collide with existing rows.
+
+        By default only the problem sequences are listed; ``behind_only=False`` returns
+        the full census. Either way ``total_sequences`` says how many were inspected, so
+        ``behind_count: 0`` is an affirmative "nothing is stale" answer rather than an
+        empty one.
+        """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            sequences = await dialect.check_sequences(db)
+            report = await dialect.check_sequences(db, behind_only)
         finally:
             await db.close()
+        sequences = report["sequences"]
         return {
             "database": database,
             "sequences": sequences,
             "behind_count": sum(1 for s in sequences if s["behind"]),
+            "total_sequences": report["total_sequences"],
         }
 
-    async def table_stats(self, database: str) -> dict:
-        """Approximate row counts and disk/index sizes per table, largest first."""
+    async def table_stats(
+        self,
+        database: str,
+        limit: int | None = None,
+        min_size_bytes: int | None = None,
+        table: str | None = None,
+    ) -> dict:
+        """Approximate row counts and disk/index sizes per table, largest first.
+
+        ``table`` narrows to one table (optionally schema-qualified), ``min_size_bytes``
+        drops anything smaller, and ``limit`` returns only the top N by total size. When
+        ``limit`` is set the result also carries ``truncated`` — ``True`` when more tables
+        matched than were returned. Without ``limit`` the payload is exactly as before.
+        """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            tables = await dialect.table_stats(db)
+            tables = await dialect.table_stats(db, limit, min_size_bytes, table)
         finally:
             await db.close()
-        return {"database": database, "tables": tables}
+        if limit is None:
+            return {"database": database, "tables": tables}
+        # The dialect fetched one row past the limit; its presence is the truncation signal.
+        capped = max(0, int(limit))
+        return {
+            "database": database,
+            "tables": tables[:capped],
+            "truncated": len(tables) > capped,
+        }
 
     async def show_activity(self, database: str, include_query: bool = False) -> dict:
         """Sanitized server activity — what is holding connections right now."""

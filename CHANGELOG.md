@@ -11,7 +11,99 @@ the time of that release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Breaking / Behaviour changes
+
+- **The four tools that return raw row values no longer send a `structuredContent`
+  channel.** `sample_table_rows`, `execute_read_query`, `fetch_rows`, and `search_value`
+  now answer on the text channel only — the same JSON as before, inside the
+  `<<<UNTRUSTED DATABASE DATA …>>>` banner — and they no longer advertise an output
+  schema. If you parsed `structuredContent` from any of these, read the text channel
+  instead. A result with no rows is still an explicit answer: the banner contains an
+  empty JSON list `[]`, so "the table is empty" never arrives as an empty response. Why: that banner is the prompt-injection defence, and row values are the most
+  attacker-controllable thing this server emits; a client that renders only the
+  structured channel was seeing exactly that data with no fence around it. Every other
+  tool (schemas, table stats, diagnostics, config) keeps its `structuredContent`
+  unchanged.
+
+- **`check_sequences` now returns only the problem sequences by default — pass
+  `behind_only=false` for the full census.** A database with 130 healthy sequences used
+  to send all 130 rows back just to report the one that was stale; the default answer is
+  now the stale ones alone, plus a new `total_sequences` field saying how many were
+  checked, so `behind_count: 0` still reads as an affirmative "all clear" rather than an
+  empty result. `behind_only=false` restores exactly the previous list (also with
+  `total_sequences` added). If you consumed `sequences` as a complete inventory of every
+  sequence, pass `behind_only=false`.
+
+- **A tool call carrying a parameter the tool doesn't have is now rejected instead of
+  quietly ignored.** Previously the unknown argument was dropped and the tool ran anyway
+  — calling `check_database(connection="prod")` probed *every* configured database while
+  looking like it had targeted one. Such a call now comes back as an error naming the
+  unknown parameter(s), listing the ones the tool accepts, and suggesting the closest
+  match for a near-miss spelling. Only parameter *names* appear in the message, never
+  their values. If a client of yours passes extra arguments, it will now see errors where
+  it previously saw (wrong) results — fix the argument name. Some clients also send stray
+  or dummy arguments of their own, including to tools that take no parameters at all (for
+  example `list_databases`); those calls now error too, and the error names the offending
+  argument alongside the parameters the tool accepts.
+
+### Added
+
+- **Interactive commands now tell you when a newer release is out.** After a command
+  like `db-conn-mcp status` or `doctor` finishes, a single line points at the newer
+  version and how to upgrade. It only ever appears in a real terminal, is looked up in
+  the background so it can never slow a command down (offline just means no line), and
+  never changes the command's exit code. Set `DB_CONN_MCP_NO_UPDATE_CHECK=1` to turn it
+  off. The MCP server path never checks — a client launching db-conn-mcp makes no
+  network calls of ours.
+
+- **Three exploration tools can now be asked the narrower question directly.**
+  `table_stats` takes `table` (one table, optionally schema-qualified), `min_size_bytes`
+  (skip anything smaller), and `limit` (top N by total size); `list_tables` takes
+  `pattern` (fuzzy, case-insensitive name match, the same one `find_columns` uses) and
+  `limit`; `find_columns` takes `limit`. All filtering happens in the database, so a huge
+  schema no longer has to come back in full just to answer "which is the biggest table".
+  When you pass `limit` to `table_stats` the result carries `truncated: true`/`false`;
+  `list_tables` and `find_columns` still return a plain list of rows, simply a shorter
+  one. Omit the new arguments and every one of these tools answers exactly as before.
+
+- **`explain_query` now takes `params`, and `get_table_schema` can list a table's
+  indexes.** `explain_query(sql, params=[…])` binds `$1`/`$2` values through the driver
+  exactly like `execute_read_query`, so you get the plan for the query you are actually
+  about to run instead of having to rewrite it with literals — which can plan
+  differently — and it composes with `analyze=true`. `get_table_schema(...,
+  include_indexes=true)` adds an `indexes` list to the answer: each index's name, its key
+  columns in index order (expression indexes report their expression; an INCLUDE payload
+  is not a key column, so it is not listed), whether it is
+  unique, and its method (btree, gin, …) — so "is this column indexed?" no longer needs a
+  hand-written catalog query. Both are additive: without `params` the plan is exactly
+  what it was, and without `include_indexes` the schema response has no `indexes` key at
+  all.
+
+### Changed
+
+- **`doctor` no longer says "you're up to date" beside a server process that isn't.**
+  After a `pipx upgrade`, a still-running client process keeps serving the *old* build —
+  yet the release check happily reported `v0.5.6 is the latest published version`, which
+  reads as an all-clear at exactly the wrong moment. When a pre-upgrade process is still
+  running, that line now ends `— but a running process predates this install; see
+  process_staleness`. Nothing changes when no stale process is found, and when `psutil`
+  is missing (staleness is unknowable) the wording is untouched.
+
+- **Doctor findings that tell you what to do now say it in `suggested_action` too.**
+  Failing checks used to ship `suggested_action: "none"` with the actual remedy buried in
+  prose. Four sites now carry a machine-actionable verb: an unreachable database →
+  `fix_connection`, a check that crashed → `report_bug`, the process check with no
+  `psutil` installed → `install_doctor_extra`, and "no configuration found" →
+  `run_setup`. If you match on the action vocabulary, add those four values; details and
+  statuses are unchanged.
+
+- **The tool descriptions your agent reads now state the size and the channel up front.**
+  Every tool whose answer grows with your database (`list_tables`, `find_columns`,
+  `table_stats`, `check_sequences`) says so in its description and names the argument
+  that bounds it, so an agent reaches for `limit`/`pattern` instead of pulling a whole
+  schema back to filter it in context; and the four tools that return raw row values say
+  outright that their rows come back on the text channel only, inside the untrusted-data
+  banner. Descriptions only — no tool's behaviour changed because of this entry.
 
 ## [0.6.2] — 2026-08-12
 

@@ -13,10 +13,14 @@ import asyncpg
 import pytest
 
 from db_conn_mcp.dialects import postgres as pg
+from db_conn_mcp.dialects.base import Dialect
 from db_conn_mcp.dialects.postgres import (
     PostgresDialect,
     _assemble_ddl,
+    _build_find_columns_sql,
+    _build_list_tables_sql,
     _build_table_search_sql,
+    _build_table_stats_sql,
     _is_junk_table,
     _leading_keyword,
     _pg_env_from_dsn,
@@ -167,6 +171,47 @@ async def test_list_tables_shape():
     conn = FakeConn([rows])
     result = await PostgresDialect().list_tables(conn)
     assert result == rows
+    assert conn.fetch_args[0] == ()  # unfiltered: nothing bound
+
+
+def test_build_list_tables_sql_unfiltered_is_the_plain_query():
+    sql, args = _build_list_tables_sql()
+    assert sql == pg._LIST_TABLES_SQL
+    assert args == []
+
+
+def test_build_list_tables_sql_mirrors_the_find_columns_pattern_form():
+    """One containment form across the two name searches — same ILIKE, same binding."""
+    sql, args = _build_list_tables_sql(pattern="user")
+    assert "table_name ILIKE '%' || $1 || '%'" in sql
+    assert "column_name ILIKE '%' || $1 || '%'" in pg._FIND_COLUMNS_SQL
+    assert "user" not in sql.replace("table_name", "").replace("column_name", "")
+    assert args == ["user"]
+
+
+def test_build_list_tables_sql_binds_the_limit_after_the_pattern():
+    sql, args = _build_list_tables_sql(pattern="user", limit=5)
+    assert args == ["user", 5]  # exactly the limit — the list shape carries no marker
+    assert "LIMIT $2" in sql
+    assert sql.index("ORDER BY") < sql.index("LIMIT")
+
+
+def test_build_list_tables_sql_limit_without_pattern_is_first_placeholder():
+    sql, args = _build_list_tables_sql(limit=2)
+    assert args == [2] and "LIMIT $1" in sql
+
+
+async def test_list_tables_applies_pattern_and_limit():
+    conn = FakeConn([[]])
+    await PostgresDialect().list_tables(conn, pattern="user", limit=3)
+    assert conn.fetch_args[0] == ("user", 3)
+    assert "ILIKE" in conn.fetched[0].upper()
+
+
+async def test_list_tables_coerces_a_negative_limit():
+    conn = FakeConn([[]])
+    await PostgresDialect().list_tables(conn, limit=-1)
+    assert conn.fetch_args[0] == (0,)
 
 
 async def test_get_schema_shape():
@@ -181,6 +226,46 @@ async def test_get_schema_shape():
     assert result["columns"] == columns
     assert result["primary_key"] == ["id"]
     assert result["foreign_keys"] == [{"column": "org_id", "references": "orgs.id"}]
+
+
+async def test_table_indexes_shape():
+    rows = [
+        {"name": "users_pkey", "columns": ["id"], "unique": True, "method": "btree"},
+        {
+            "name": "users_lower_email_idx",
+            "columns": ["lower(email)"],
+            "unique": False,
+            "method": "btree",
+        },
+        # An INCLUDE index reports its KEY columns only — the payload column (`email`)
+        # is not part of the key and must not be listed as if it were.
+        {"name": "users_org_incl_idx", "columns": ["org_id"], "unique": False, "method": "btree"},
+    ]
+    conn = FakeConn([rows])
+    result = await PostgresDialect().table_indexes(conn, "users")
+    assert result == rows
+    assert all(set(r) == {"name", "columns", "unique", "method"} for r in result)
+    assert conn.fetch_args[0] == ("users", None)  # identifier bound, never interpolated
+    assert "pg_index" in conn.fetched[0]
+
+
+async def test_table_indexes_lists_key_columns_not_include_payload():
+    """`indnatts` counts INCLUDE payload columns too; the contract promises the KEY list."""
+    sql = pg._INDEXES_SQL
+    assert "indnkeyatts" in sql
+    assert "generate_series(1, ix.indnatts)" not in sql
+
+
+async def test_table_indexes_resolves_a_schema_qualified_table():
+    conn = FakeConn([[]])
+    await PostgresDialect().table_indexes(conn, "app.users")
+    # Same (name, schema) resolution get_schema uses for the very same table string.
+    assert conn.fetch_args[0] == ("users", "app")
+
+
+def test_table_indexes_is_part_of_the_dialect_contract():
+    """The ABC enforces it, so a future dialect cannot forget indexes."""
+    assert "table_indexes" in Dialect.__abstractmethods__
 
 
 async def test_get_database_schema_groups_columns_and_keys():
@@ -439,6 +524,30 @@ async def test_explain_analyze_adds_options():
     assert conn.fetched[0].startswith("EXPLAIN (ANALYZE, BUFFERS) SELECT")
 
 
+async def test_explain_without_params_binds_nothing():
+    """The no-params call keeps exactly today's shape: the SQL and no bind arguments."""
+    conn = FakeConn([[]])
+    await PostgresDialect().explain(conn, "SELECT 1")
+    assert conn.fetch_args[0] == ()
+
+
+async def test_explain_binds_params_like_execute_does():
+    conn = FakeConn([[{"QUERY PLAN": "Index Scan using users_pkey on users"}]])
+    result = await PostgresDialect().explain(conn, "SELECT * FROM users WHERE id = $1", params=[7])
+    assert conn.fetched[0] == "EXPLAIN SELECT * FROM users WHERE id = $1"
+    assert conn.fetch_args[0] == (7,)  # bound by the driver, never interpolated
+    assert result == {"plan": ["Index Scan using users_pkey on users"]}
+
+
+async def test_explain_analyze_and_params_compose():
+    conn = FakeConn([[]])
+    await PostgresDialect().explain(
+        conn, "SELECT * FROM t WHERE a = $1 AND b = $2", analyze=True, params=[1, "x"]
+    )
+    assert conn.fetched[0].startswith("EXPLAIN (ANALYZE, BUFFERS) SELECT")
+    assert conn.fetch_args[0] == (1, "x")
+
+
 # ---- check_sequences ---------------------------------------------------------------
 
 
@@ -457,8 +566,9 @@ async def test_check_sequences_flags_behind():
         fetchrow_results=[{"last_value": 10, "is_called": True}, {"max_id": 25}],
     )
     report = await PostgresDialect().check_sequences(conn)
-    assert report[0]["behind"] is True
-    assert report[0]["last_value"] == 10 and report[0]["max_id"] == 25
+    assert report["total_sequences"] == 1
+    assert report["sequences"][0]["behind"] is True
+    assert report["sequences"][0]["last_value"] == 10 and report["sequences"][0]["max_id"] == 25
     # identifiers are quoted in the per-sequence probes
     assert '"public"."users_id_seq"' in conn.fetchrow_calls[0]
     assert '"public"."users"' in conn.fetchrow_calls[1]
@@ -480,25 +590,80 @@ async def test_check_sequences_uncalled_sequence_collides_at_equal_value():
         fetchrow_results=[{"last_value": 5, "is_called": False}, {"max_id": 5}],
     )
     report = await PostgresDialect().check_sequences(conn)
-    assert report[0]["behind"] is True
+    assert report["sequences"][0]["behind"] is True
+
+
+def _owned(name="s", table="t"):
+    return {
+        "sequence_schema": "public",
+        "sequence": name,
+        "table_schema": "public",
+        "table": table,
+        "column": "id",
+    }
 
 
 async def test_check_sequences_healthy_and_empty_table():
-    owned = [
-        {
-            "sequence_schema": "public",
-            "sequence": "s",
-            "table_schema": "public",
-            "table": "t",
-            "column": "id",
-        }
-    ]
+    # Empty table can't be ahead of the sequence — and a healthy row is filtered out
+    # of the default (behind_only) answer, while still being counted as scanned.
+    def conn():
+        return FakeConn(
+            fetch_results=[[_owned()]],
+            fetchrow_results=[{"last_value": 100, "is_called": True}, {"max_id": None}],
+        )
+
+    default = await PostgresDialect().check_sequences(conn())
+    assert default == {"total_sequences": 1, "sequences": []}
+
+    census = await PostgresDialect().check_sequences(conn(), behind_only=False)
+    assert census["total_sequences"] == 1
+    assert census["sequences"][0]["behind"] is False
+
+
+async def test_check_sequences_default_keeps_only_problems():
     conn = FakeConn(
-        fetch_results=[owned],
-        fetchrow_results=[{"last_value": 100, "is_called": True}, {"max_id": None}],
+        fetch_results=[[_owned("bad_seq", "bad"), _owned("good_seq", "good")]],
+        fetchrow_results=[
+            {"last_value": 10, "is_called": True},
+            {"max_id": 25},
+            {"last_value": 99, "is_called": True},
+            {"max_id": 3},
+        ],
     )
     report = await PostgresDialect().check_sequences(conn)
-    assert report[0]["behind"] is False  # empty table can't be ahead of the sequence
+    assert report["total_sequences"] == 2
+    assert [s["sequence"] for s in report["sequences"]] == ["bad_seq"]
+
+
+async def test_check_sequences_census_returns_every_sequence():
+    conn = FakeConn(
+        fetch_results=[[_owned("bad_seq", "bad"), _owned("good_seq", "good")]],
+        fetchrow_results=[
+            {"last_value": 10, "is_called": True},
+            {"max_id": 25},
+            {"last_value": 99, "is_called": True},
+            {"max_id": 3},
+        ],
+    )
+    report = await PostgresDialect().check_sequences(conn, behind_only=False)
+    assert report["total_sequences"] == 2
+    assert [s["sequence"] for s in report["sequences"]] == ["bad_seq", "good_seq"]
+
+
+async def test_check_sequences_skips_unprobeable_sequence_and_excludes_it_from_total():
+    class Boom(FakeConn):
+        async def fetchrow(self, sql, *args):
+            if "bad" in sql:
+                raise asyncpg.PostgresError("no privilege")
+            return await super().fetchrow(sql, *args)
+
+    conn = Boom(
+        fetch_results=[[_owned("bad_seq", "bad"), _owned("good_seq", "good")]],
+        fetchrow_results=[{"last_value": 1, "is_called": True}, {"max_id": 9}],
+    )
+    report = await PostgresDialect().check_sequences(conn)
+    assert report["total_sequences"] == 1  # only the sequences actually inspected
+    assert [s["sequence"] for s in report["sequences"]] == ["good_seq"]
 
 
 # ---- table_stats / show_activity ---------------------------------------------------
@@ -517,6 +682,47 @@ async def test_table_stats_maps_rows():
     ]
     conn = FakeConn([rows])
     assert await PostgresDialect().table_stats(conn) == rows
+    assert conn.fetch_args[0] == ()  # unfiltered: nothing bound
+
+
+def test_build_table_stats_sql_unfiltered_is_the_plain_query():
+    """No filters must produce exactly today's query, so the default answer is unchanged."""
+    sql, args = _build_table_stats_sql()
+    assert sql == pg._TABLE_STATS_SQL
+    assert args == []
+
+
+def test_build_table_stats_sql_binds_every_filter_value():
+    sql, args = _build_table_stats_sql(table="users", min_size_bytes=1024, limit=5)
+    assert "users" not in sql and "1024" not in sql  # values are bound, not interpolated
+    assert "$1" in sql and "$2" in sql and "$3" in sql
+    assert args == ["users", 1024, 6]  # limit+1: one row beyond reveals truncation
+    assert sql.index("WHERE") < sql.index("ORDER BY") < sql.index("LIMIT")
+
+
+def test_build_table_stats_sql_splits_a_schema_qualified_table():
+    sql, args = _build_table_stats_sql(table="analytics.events")
+    assert args == ["events", "analytics"]
+    assert "s.relname = $1" in sql and "s.schemaname = $2" in sql
+
+
+def test_build_table_stats_sql_filters_on_the_reported_size_expression():
+    sql, _args = _build_table_stats_sql(min_size_bytes=1)
+    assert "pg_total_relation_size(s.relid) >= $1" in sql
+
+
+async def test_table_stats_fetches_one_row_beyond_the_limit():
+    rows = [{"schema": "public", "table": f"t{i}", "total_bytes": i} for i in range(3)]
+    conn = FakeConn([rows])
+    result = await PostgresDialect().table_stats(conn, limit=2)
+    assert result == rows  # the dialect hands back what it fetched; the handler caps
+    assert conn.fetch_args[0] == (3,)
+
+
+async def test_table_stats_coerces_a_negative_limit():
+    conn = FakeConn([[]])
+    await PostgresDialect().table_stats(conn, limit=-5)
+    assert conn.fetch_args[0] == (1,)
 
 
 async def test_show_activity_strips_query_by_default():
@@ -612,6 +818,26 @@ async def test_find_columns_ilike_and_maps():
     assert result == rows
     assert "ILIKE" in conn.fetched[0].upper()  # fuzzy match
     assert conn.fetch_args[0] == ("mail",)  # pattern is parameterized, not concatenated
+    assert conn.fetched[0] == pg._FIND_COLUMNS_SQL  # unbounded call is unchanged
+
+
+def test_build_find_columns_sql_without_limit_is_the_plain_query():
+    sql, args = _build_find_columns_sql("mail")
+    assert sql == pg._FIND_COLUMNS_SQL
+    assert args == ["mail"]
+
+
+async def test_find_columns_binds_the_limit():
+    conn = FakeConn(fetch_results=[[]])
+    await PostgresDialect().find_columns(conn, "mail", limit=3)
+    assert conn.fetch_args[0] == ("mail", 3)  # bound, never interpolated
+    assert "LIMIT $2" in conn.fetched[0]
+
+
+async def test_find_columns_coerces_a_negative_limit():
+    conn = FakeConn(fetch_results=[[]])
+    await PostgresDialect().find_columns(conn, "mail", limit=-4)
+    assert conn.fetch_args[0] == ("mail", 0)
 
 
 # ---- junk-table filter (pure) ------------------------------------------------
