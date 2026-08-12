@@ -45,7 +45,7 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 | `diagnostics.py` | Classify **one driver error** → sanitized cause + fix (the per-connection diagnostic) | No |
 | `doctor.py` | The whole-setup diagnostic engine: the check registry, the `Finding` shape, and the crash guard. Composes `clients.py`, `config.py`, `handlers.py`, and the dialect seam | No |
 | `handlers.py` | The 22 database-facing tool handlers as plain async methods (transport-free, unit-testable) + the open-cursor registry + the dry-run grant registry (`_dry_run_grants`) | No |
-| `server.py` | `GuardedFastMCP` app (a `FastMCP` subclass): registers the 23 tools + 2 prompts (22 onto `handlers`, `doctor` onto `doctor.py`), applies `guard.py` at the `call_tool` seam, transport wiring, and the ride-along GUI start (`gui=True` unless `--no-gui`) | No |
+| `server.py` | `GuardedFastMCP` app (a `FastMCP` subclass): registers the 23 tools + 2 prompts (22 onto `handlers`, `doctor` onto `doctor.py`), rejects unknown arguments and applies `guard.py` at the `call_tool` seam, transport wiring, and the ride-along GUI start (`gui=True` unless `--no-gui`) | No |
 | `verify.py` | Live MCP verification: spawn a launch line and complete `initialize` → `tools/list` → `list_databases` as a *client*, returning one of a fixed verdict vocabulary. Always a separate process | No |
 | `gui/app.py` | The local dashboard: a token-guarded Starlette app on 127.0.0.1:31415, its JSON API over `config.py`/`clients.py`/`doctor.py`/`verify.py`, and both lifecycles (ride-along thread, standalone runner) | No |
 | `gui/static/` | The single page — hand-written HTML/CSS/JS, no build step, no external requests | No |
@@ -167,6 +167,10 @@ sequenceDiagram
 ```
 
 Read-only is enforced **natively by the database** — even a `read`-mode connection physically cannot mutate data, regardless of what SQL is sent.
+
+### Strict argument validation — the call path
+
+The same `GuardedFastMCP.call_tool` seam checks arguments **before** delegating to FastMCP. FastMCP builds each tool's argument model from its signature and silently drops keys the model doesn't declare, so a mistargeted call ran anyway and looked successful — issue #29: `check_database(connection="prod")` probed every configured database. The override compares `arguments.keys()` against the registered tool's input-schema `properties` (`self._tool_manager.get_tool(name).parameters`) and raises `ValueError` on any unknown key; the low-level SDK turns that into an `isError` result carrying the message verbatim. The message names the unknown parameter(s), lists the accepted ones, and adds a `difflib` did-you-mean for a near-miss spelling — **names only, never argument values**, since a value can be a DSN (Rule 6). An unknown *tool* name is left to FastMCP's own error, and the check runs ahead of every gate, so a malformed write call can never be answered with a consent/dry-run error instead.
 
 ### The untrusted-data guard (`guard.py`) — the return path
 

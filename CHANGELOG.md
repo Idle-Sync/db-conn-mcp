@@ -11,6 +11,17 @@ the time of that release.
 
 ## [Unreleased]
 
+### Breaking / Behaviour changes
+
+- **A tool call carrying a parameter the tool doesn't have is now rejected instead of
+  quietly ignored.** Previously the unknown argument was dropped and the tool ran anyway
+  — calling `check_database(connection="prod")` probed *every* configured database while
+  looking like it had targeted one. Such a call now comes back as an error naming the
+  unknown parameter(s), listing the ones the tool accepts, and suggesting the closest
+  match for a near-miss spelling. Only parameter *names* appear in the message, never
+  their values. If a client of yours passes extra arguments, it will now see errors where
+  it previously saw (wrong) results — fix the argument name.
+
 ### Added
 
 - **Interactive commands now tell you when a newer release is out.** After a command

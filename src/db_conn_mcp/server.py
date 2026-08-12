@@ -9,6 +9,7 @@ We use FastMCP — the official high-level SDK API — over the lower-level
 remaining the same SDK.
 """
 
+import difflib
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
@@ -30,15 +31,38 @@ ToolResult = Sequence[ContentBlock] | tuple[Sequence[ContentBlock], dict[str, An
 
 
 class GuardedFastMCP(FastMCP):
-    """FastMCP that fences every tool's *text* output as untrusted database data.
+    """FastMCP that rejects unknown arguments and fences every tool's *text* output.
 
-    One seam guards all 23 tools (Rule 1: no per-tool boilerplate). Only the text
+    One seam covers all 23 tools (Rule 1: no per-tool boilerplate). Only the text
     channel is wrapped — ``structuredContent`` is passed through **untouched** so it
     stays valid against the tool's output schema, which clients rely on.
     """
 
+    def _reject_unknown_arguments(self, name: str, arguments: dict[str, Any]) -> None:
+        """Raise if ``arguments`` carries a key the tool's input schema never declared.
+
+        FastMCP silently drops undeclared arguments, so a mistargeted call looked like it
+        worked — issue #29: ``check_database(connection="prod")`` probed *every* database
+        with no signal that the targeting was ignored. Only parameter **names** appear in
+        the message; a value could be a DSN (Rule 6).
+        """
+        tool = self._tool_manager.get_tool(name)
+        if tool is None:  # unknown tool — leave FastMCP's own error untouched
+            return
+        accepted = sorted(tool.parameters.get("properties", {}))
+        unknown = sorted(set(arguments) - set(accepted))
+        if not unknown:
+            return
+        closest = difflib.get_close_matches(unknown[0], accepted, n=1)
+        hint = f" (did you mean '{closest[0]}'?)" if closest else ""
+        raise ValueError(
+            f"unknown parameter(s) for {name}: {', '.join(unknown)}"
+            f" - accepted: {', '.join(accepted)}{hint}"
+        )
+
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
-        """Run the tool, then wrap its text blocks with the untrusted-data guard."""
+        """Reject unknown arguments, run the tool, then wrap its text blocks in the guard."""
+        self._reject_unknown_arguments(name, arguments)
         result = await super().call_tool(name, arguments)
         if isinstance(result, tuple):
             unstructured, structured = result

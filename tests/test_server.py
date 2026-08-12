@@ -13,6 +13,7 @@ from pathlib import Path
 
 import asyncpg
 import pytest
+from mcp import types
 from mcp.types import TextContent
 
 from db_conn_mcp import clients as clients_mod
@@ -403,6 +404,35 @@ async def test_check_database_all(cfg_path, monkeypatch):
     assert {r["database"] for r in result} == {"prod", "dev", "trusted"}
 
 
+async def test_check_database_narrows_to_the_named_database(tmp_path, monkeypatch):
+    """Naming a database probes exactly that one connection; None probes them all."""
+    cfg = {
+        "connections": [
+            {"name": "one", "dsn": "postgresql://u:SECRET@h/one", "mode": "read"},
+            {"name": "two", "dsn": "postgresql://u:SECRET@h/two", "mode": "read"},
+        ]
+    }
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    probed: list[str] = []
+
+    async def counting_connect(self, conn, *, read_only):
+        probed.append(conn.name)
+        return conn.dsn, FakeConn()
+
+    monkeypatch.setattr(Handlers, "_connect", counting_connect)
+    h = Handlers(path)
+
+    narrowed = await h.check_database("two")
+    assert probed == ["two"]
+    assert [r["database"] for r in narrowed] == ["two"]
+
+    probed.clear()
+    everything = await h.check_database()
+    assert probed == ["one", "two"]
+    assert [r["database"] for r in everything] == ["one", "two"]
+
+
 # ---- connect failure on a normal tool surfaces a sanitized diagnostic --------
 
 
@@ -706,6 +736,113 @@ async def test_server_advertises_the_untrusted_data_policy(cfg_path):
     app = server.build_server(cfg_path)
     assert app.instructions == guard.UNTRUSTED_DATA_POLICY
     assert "untrusted" in app.instructions.lower()
+
+
+# ---- unknown tool parameters are rejected loudly (issue #29) --------------------
+
+
+async def _call_over_the_wire(app, name, arguments):
+    """Drive the low-level CallToolRequest handler — the surface a real client sees."""
+    handler = app._mcp_server.request_handlers[types.CallToolRequest]
+    request = types.CallToolRequest(
+        method="tools/call",
+        params=types.CallToolRequestParams(name=name, arguments=arguments),
+    )
+    return (await handler(request)).root
+
+
+async def test_unknown_parameter_is_rejected_instead_of_silently_dropped(cfg_path, monkeypatch):
+    """Issue #29: `check_database(connection="prod")` silently probed EVERY database.
+
+    FastMCP drops arguments a tool never declared, so a mistargeted call looked like it
+    worked. The seam now refuses it, naming the offender and the accepted parameters.
+    """
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    app = server.build_server(cfg_path)
+
+    with pytest.raises(ValueError) as exc:
+        await app.call_tool("check_database", {"connection": "prod"})
+
+    message = str(exc.value)
+    assert "unknown parameter(s) for check_database: connection" in message
+    assert "accepted: database" in message
+    assert dialect.connected_read_only is None  # refused before a single probe ran
+
+
+async def test_unknown_parameter_reaches_the_client_as_an_error_result(cfg_path, monkeypatch):
+    """The ValueError surfaces as isError=true carrying the message verbatim."""
+    _patch_dialect(monkeypatch, FakeDialect())
+    app = server.build_server(cfg_path)
+
+    result = await _call_over_the_wire(app, "check_database", {"connection": "prod"})
+
+    assert result.isError is True
+    assert result.structuredContent is None
+    assert "unknown parameter(s) for check_database: connection" in result.content[0].text
+
+
+async def test_unknown_parameter_suggests_the_closest_accepted_name(cfg_path, monkeypatch):
+    """A near-miss spelling gets a did-you-mean pointing at the real parameter."""
+    _patch_dialect(monkeypatch, FakeDialect())
+    app = server.build_server(cfg_path)
+
+    with pytest.raises(ValueError) as exc:
+        await app.call_tool("list_tables", {"databse": "prod"})
+
+    assert "did you mean 'database'?" in str(exc.value)
+
+
+async def test_valid_arguments_are_unaffected_by_the_parameter_check(cfg_path, monkeypatch):
+    """Three different tools with correct arguments still answer normally."""
+    _patch_dialect(monkeypatch, FakeDialect())
+    app = server.build_server(cfg_path)
+
+    _blocks, databases = await app.call_tool("list_databases", {})
+    assert {row["name"] for row in databases["result"]} == {"prod", "dev", "trusted"}
+
+    _blocks, tables = await app.call_tool("list_tables", {"database": "prod"})
+    assert tables["result"][0]["name"] == "users"
+
+    _blocks, checked = await app.call_tool("check_database", {"database": "prod"})
+    assert [row["database"] for row in checked["result"]] == ["prod"]
+
+
+async def test_unknown_parameter_is_rejected_before_the_write_gate(cfg_path, monkeypatch):
+    """The check runs first, so no consent/dry-run error can mask a malformed call."""
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    app = server.build_server(cfg_path)
+
+    with pytest.raises(ValueError) as exc:  # not WriteRejected, which is a plain Exception
+        await app.call_tool(
+            "execute_write_query",
+            {"database": "prod", "sql": "DELETE FROM users", "confirm": True},
+        )
+
+    message = str(exc.value)
+    assert "unknown parameter(s) for execute_write_query: confirm" in message
+    assert "read-only" not in message  # not the mode gate's WriteRejected
+    assert dialect.exec_calls == [] and dialect.dry_run_calls == []
+
+
+async def test_the_rejection_never_echoes_argument_values(cfg_path, monkeypatch):
+    """Rule 6: parameter NAMES only — an unknown argument's value could be a DSN."""
+    _patch_dialect(monkeypatch, FakeDialect())
+    app = server.build_server(cfg_path)
+    secret_dsn = "postgresql://u:SUPERSECRET@db.internal:5432/prod"
+
+    with pytest.raises(ValueError) as exc:
+        await app.call_tool("check_database", {"dsn": secret_dsn})
+
+    message = str(exc.value)
+    assert "dsn" in message
+    for leak in ("SUPERSECRET", "db.internal", secret_dsn):
+        assert leak not in message
+
+    result = await _call_over_the_wire(app, "check_database", {"dsn": secret_dsn})
+    assert result.isError is True
+    assert "SUPERSECRET" not in result.content[0].text
 
 
 # ---- _dsn_with_port (pure, issue #10) ------------------------------------------
