@@ -11,6 +11,17 @@ the time of that release.
 
 ## [Unreleased]
 
+### Changed
+
+- **The dashboard has been restyled as a bench instrument.** It now reads like a piece of
+  diagnostic equipment sitting next to your terminal rather than a web app: one column,
+  engraved section labels, dense bordered rows instead of floating cards, quiet outlined
+  buttons, and colour spent only on state. Every row carries a **status lamp** next to its
+  title — hollow when idle, pulsing while an action is in flight, and green / amber / red
+  once it settles — so you can see what your plumbing is doing without reading a word. The
+  "your host process stopped" notice is now a mains-warning strip, and the whole page
+  follows your system light/dark setting with contrast checked in both. Nothing you click
+  behaves differently; only the appearance changed.
 ### Added
 
 - **Opening `http://127.0.0.1:31415` without a token now tells you how to get in.** Instead

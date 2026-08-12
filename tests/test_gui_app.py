@@ -663,6 +663,18 @@ def test_static_js_never_uses_innerhtml(client):
     assert "innerHTML" not in js
 
 
+def test_static_css_fetches_nothing_from_the_network(client):
+    """CSP is ``default-src 'self'``, so an external asset would not fail loudly.
+
+    A webfont or a CDN reset in here is simply blocked, and the page quietly renders
+    wrong. Pin it the same way the JS greps are pinned: no absolute URL at all.
+    """
+    css = client.get(f"/static/style.css?token={TOKEN}").text
+    assert "http://" not in css
+    assert "https://" not in css
+    assert "url(" not in css  # no @font-face, no background image, no @import target
+
+
 def test_static_js_handles_an_expired_session(client):
     """A restart mints a new token; a tab holding the old one must be told so.
 
@@ -710,8 +722,17 @@ def test_unauthenticated_browser_root_gets_the_hint_page(client):
     assert r.status_code == 403
     assert r.headers["content-type"].startswith("text/html")
     assert "db-conn-mcp gui" in r.text
-    assert r.headers.get("content-security-policy") == "default-src 'self'"
+    # The one response not served under `default-src 'self'`. It styles itself from
+    # an inline block because the real stylesheet is behind the guard that just
+    # refused this request, so the policy pays for that with a tighter default:
+    # 'none' means this page may not fetch a script, image, font, frame or XHR at
+    # all — not even same-origin, which `'self'` would have allowed.
+    assert (
+        r.headers.get("content-security-policy") == "default-src 'none'; style-src 'unsafe-inline'"
+    )
     assert r.headers.get("cache-control") == "no-store"
+    # ...and 'unsafe-inline' is only ever paying for CSS: there is no script here.
+    assert "<script" not in r.text
 
 
 def test_the_hint_page_discloses_nothing(client):
