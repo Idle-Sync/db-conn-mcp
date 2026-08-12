@@ -43,6 +43,9 @@ GUI_PORT = 31415
 TOKEN_HEADER = "X-GUI-Token"
 _ALLOWED_HOSTS = frozenset({f"127.0.0.1:{GUI_PORT}", f"localhost:{GUI_PORT}"})
 _CSP = "default-src 'self'"
+#: Every guarded URL carries ``?token=<secret>`` (the page and its assets), so nothing
+#: this app serves may be written to the browser's on-disk cache.
+_NO_STORE = "no-store"
 #: Replaced with the session token when ``index.html`` is served. A browser does not
 #: copy the page's ``?token=`` onto its subresource requests, and ``/static`` sits
 #: behind the same guard, so the page's own CSS and JS would 403 without this. The
@@ -61,9 +64,15 @@ def _static_dir() -> Path:
 
 
 def _forbidden() -> JSONResponse:
-    """A sanitized 403 that still carries the CSP — no reason is disclosed."""
+    """A sanitized 403 that still carries the CSP and no-store — no reason is disclosed.
+
+    Both headers are set here rather than relied on from :class:`_Guard`: this
+    response is *returned instead of* calling the next app, so it never reaches the
+    lines that stamp them on a served response.
+    """
     response = JSONResponse({"error": "forbidden"}, status_code=403)
     response.headers["content-security-policy"] = _CSP
+    response.headers["cache-control"] = _NO_STORE
     return response
 
 
@@ -124,6 +133,18 @@ def _parse_connection(data: object) -> Connection | list[str]:
     return conn
 
 
+def _unaddressable_name(name: str) -> bool:
+    """Whether a name could never be reached again through ``/api/databases/{name}``.
+
+    A name that is empty, that is not its own ``.strip()``, or that carries a ``/``
+    saves a row the dashboard can create but never edit, test or delete: the path
+    either fails to match the route at all or matches a *different* string, so every
+    follow-up 404s and only hand-editing ``connections.json`` can undo it. Refusing
+    it up front is the only way the editor stays honest about what it can undo.
+    """
+    return not name or name != name.strip() or "/" in name
+
+
 def _load_or_empty(path: Path) -> Config | None:
     """Read the stored config; ``None`` means "exists but unusable".
 
@@ -161,9 +182,7 @@ class _Guard(BaseHTTPMiddleware):
             return _forbidden()
         response = await call_next(request)
         response.headers["content-security-policy"] = _CSP
-        # Every guarded URL carries ``?token=<secret>`` (the page and its assets), so
-        # nothing here may be written to the browser's on-disk cache.
-        response.headers["cache-control"] = "no-store"
+        response.headers["cache-control"] = _NO_STORE
         return response
 
 
@@ -315,10 +334,16 @@ def create_app(
         The body is read *before* the config is loaded: an ``await`` between the
         load and the save would let a second request load the same file, and the
         later save would drop the earlier request's connection despite its 201.
+
+        This is also the only route a *new* name enters by — the name is the identity
+        and is not renameable, so ``edit_database`` merges the stored one and never
+        needs the same check.
         """
         parsed = _parse_connection(await _body(request))
         if not isinstance(parsed, Connection):
             return _invalid_connection(parsed)
+        if _unaddressable_name(parsed.name):
+            return _invalid_connection(["name"])
         path = _config_path_for_writes()
         async with config_lock:
             cfg = _load_or_empty(path)

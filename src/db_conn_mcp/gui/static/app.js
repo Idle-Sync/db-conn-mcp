@@ -39,7 +39,14 @@ const STATUS_CLASS = { ok: "ok", warn: "warn", fail: "fail", skipped: "skip", sk
 
 // ---- plumbing -------------------------------------------------------------
 
-/** Fetch with the session token; a transport failure means the host process died. */
+/** Shown when the token this page carries is no longer the server's. ASCII on purpose. */
+const EXPIRED_TEXT = "This dashboard session expired - run db-conn-mcp gui to open a fresh one.";
+
+/**
+ * Fetch with the session token. Two distinct terminal states, two distinct banners:
+ * a transport failure means the host process died, and a 401/403 means the process
+ * is alive but minted a new token (every restart does) while this tab kept the old.
+ */
 async function api(path, opts = {}) {
   let resp;
   try {
@@ -48,6 +55,9 @@ async function api(path, opts = {}) {
     deadPage();
     throw err;
   }
+  if (resp.status === 401 || resp.status === 403) {
+    expiredPage();
+  }
   return resp;
 }
 
@@ -55,6 +65,19 @@ async function api(path, opts = {}) {
 function deadPage() {
   const banner = byId("dead-banner");
   if (banner) {
+    banner.hidden = false;
+  }
+}
+
+/**
+ * Reveal the same banner with the expired-session text. Also one-way, and it only
+ * writes while the banner is still hidden, so whichever state was reached first
+ * stays on screen. Assigned as textContent, like everything else on this page.
+ */
+function expiredPage() {
+  const banner = byId("dead-banner");
+  if (banner && banner.hidden) {
+    banner.textContent = EXPIRED_TEXT;
     banner.hidden = false;
   }
 }

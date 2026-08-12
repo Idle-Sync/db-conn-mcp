@@ -60,6 +60,12 @@ def test_csp_header_on_every_response(client):
         assert r.headers.get("content-security-policy") == "default-src 'self'"
 
 
+def test_no_store_on_every_response(client):
+    """Every guarded URL carries ``?token=``; none of it may reach the disk cache."""
+    for r in (_get(client, "/api/summary"), _get(client, "/"), _get(client, "/static/app.js")):
+        assert r.headers.get("cache-control") == "no-store"
+
+
 def test_summary_shape(client, monkeypatch):
     from db_conn_mcp import clients as clients_mod
 
@@ -105,9 +111,18 @@ def test_no_cors_headers_anywhere(client):
 
 
 def test_forbidden_body_discloses_nothing(client):
-    """The 403 body is a fixed token — never a reason, path, or credential echo."""
+    """The 403 body is a fixed token — never a reason, path, or credential echo.
+
+    Its headers are pinned here too: the 403 is returned *instead of* calling the
+    next app, so it misses the lines that stamp them on a served response. "On every
+    response, 403s included" is what the docs promise.
+    """
     r = client.get("/api/summary", headers={"host": "evil.example:31415"})
     assert r.json() == {"error": "forbidden"}
+    assert r.headers.get("content-security-policy") == "default-src 'self'"
+    assert r.headers.get("cache-control") == "no-store"
+    # The unauthenticated page request is the one a browser would actually cache.
+    assert client.get("/").headers.get("cache-control") == "no-store"
 
 
 def test_verify_client_endpoint_calls_engine(client, monkeypatch):
@@ -266,6 +281,43 @@ def test_duplicate_name_409(cfg_client):
     payload = {"name": "s", "dsn": SECRET_DSN, "mode": "read"}
     client.post("/api/databases", json=payload, headers=_hdr())
     assert client.post("/api/databases", json=payload, headers=_hdr()).status_code == 409
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", "  ", " padded", "padded ", "a/b", "../evil"],
+    ids=["empty", "blank", "leading-space", "trailing-space", "slash", "traversal"],
+)
+def test_unaddressable_name_is_a_400(cfg_client, name):
+    """A name the URL cannot carry back must never be written.
+
+    Accepting one creates a row whose PATCH/DELETE/check 404 forever — state the
+    dashboard made and only hand-editing ``connections.json`` can remove.
+    """
+    client, cfg = cfg_client
+    r = client.post(
+        "/api/databases",
+        json={"name": name, "dsn": SECRET_DSN, "mode": "read"},
+        headers=_hdr(),
+    )
+    assert r.status_code == 400
+    assert r.json() == {"error": "invalid connection", "fields": ["name"]}
+    assert "hunter2-secret" not in r.text
+    assert not cfg.exists()  # rejected before anything reached the disk
+
+
+def test_an_ordinary_name_still_round_trips(cfg_client):
+    """The guard is narrow: spaces, dots and dashes inside a name are all fine."""
+    client, _ = cfg_client
+    r = client.post(
+        "/api/databases",
+        json={"name": "prod db.1-eu", "dsn": SECRET_DSN, "mode": "read"},
+        headers=_hdr(),
+    )
+    assert r.status_code == 201
+    edited = client.patch("/api/databases/prod db.1-eu", json={"yolo": True}, headers=_hdr())
+    assert edited.status_code == 200
+    assert client.delete("/api/databases/prod db.1-eu", headers=_hdr()).status_code == 200
 
 
 def test_malformed_body_is_a_sanitized_400(cfg_client):
@@ -609,6 +661,17 @@ def test_page_has_all_three_sections_and_no_inline_handlers(client):
 def test_static_js_never_uses_innerhtml(client):
     js = client.get(f"/static/app.js?token={TOKEN}").text
     assert "innerHTML" not in js
+
+
+def test_static_js_handles_an_expired_session(client):
+    """A restart mints a new token; a tab holding the old one must be told so.
+
+    Without this the page only shows each panel failing generically, and the one
+    action that fixes it — reopening the dashboard — is never suggested.
+    """
+    js = client.get(f"/static/app.js?token={TOKEN}").text
+    assert "401" in js and "403" in js
+    assert "expired" in js
 
 
 def test_doctor_endpoint_returns_findings(cfg_client, monkeypatch):

@@ -19,7 +19,9 @@ the time of that release.
     `connections.json`. A stored DSN is **never shown**, by anything, ever: the field is
     write-only, so an edit form starts blank and leaving it blank keeps the DSN already
     saved. A connection's name is fixed once created (to rename, remove and re-add), and
-    fallback ports can be set or changed from here.
+    fallback ports can be set or changed from here. A name that is blank, padded with
+    spaces, or contains a `/` is refused: the dashboard could save one, but could never
+    edit, test or remove it again.
   - **Clients** — the same nine MCP clients the wizard knows, each with inject/uninject
     buttons and the **exact command and arguments that client would launch**. A client
     whose config file cannot be parsed is listed and explained, never written to — the same
@@ -46,6 +48,10 @@ the time of that release.
   hosting, or starts a standalone one (which shuts itself down after 15 idle minutes) and
   opens your browser at it. `db-conn-mcp setup` now ends with a tip pointing at the command,
   so a first-time user discovers the dashboard instead of never hearing about it.
+
+- **A dashboard tab left open from before a restart says so.** Each start mints a fresh
+  token, so an old tab's requests are refused; the page now shows a single banner asking
+  you to run `db-conn-mcp gui` again, instead of every panel failing for no stated reason.
 
 ### Breaking / Behaviour changes
 
