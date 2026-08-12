@@ -1,0 +1,288 @@
+/* db-conn-mcp dashboard.
+   One stylesheet, no external assets: CSP is `default-src 'self'`, so a webfont
+   or a CDN reset would simply be blocked. Colours live in custom properties and
+   are re-declared once under prefers-color-scheme: dark. */
+
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --ink: #1b1f24;
+  --muted: #5b6472;
+  --line: #d7dce3;
+  --accent: #1f6feb;
+  --ok-bg: #d8f3df;
+  --ok-ink: #145c2e;
+  --warn-bg: #fdf0cf;
+  --warn-ink: #6b4a05;
+  --fail-bg: #fbdcdc;
+  --fail-ink: #8a1c1c;
+  --skip-bg: #e6e9ee;
+  --skip-ink: #4a525e;
+  --code-bg: #eef1f5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c;
+    --panel: #1c2027;
+    --ink: #e6e9ee;
+    --muted: #99a3b1;
+    --line: #2e343d;
+    --accent: #64a0ff;
+    --ok-bg: #16351f;
+    --ok-ink: #86e0a3;
+    --warn-bg: #3a2f10;
+    --warn-ink: #f0cf7a;
+    --fail-bg: #3d1a1a;
+    --fail-ink: #ff9d9d;
+    --skip-bg: #262b33;
+    --skip-ink: #aab3bf;
+    --code-bg: #10131a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* The page hides and shows everything with the `hidden` property, and any author
+   rule that sets `display` (every .badge, .actions, .cards below) would otherwise
+   beat the user-agent's `[hidden] { display: none }`. */
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  padding: 0 1rem 4rem;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, "Noto Sans", sans-serif;
+}
+
+main,
+#page-head,
+#dead-banner {
+  max-width: 60rem;
+  margin: 0 auto;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 1.25rem 0 0.25rem;
+}
+
+h2 {
+  font-size: 1.2rem;
+  margin: 0 0 0.25rem;
+}
+
+h3 {
+  font-size: 1rem;
+  margin: 0;
+}
+
+code,
+pre {
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas,
+    "Liberation Mono", monospace;
+  font-size: 0.85em;
+}
+
+code {
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  margin: 0.25rem 0;
+  /* Windows launch lines are long absolute paths; wrap rather than scroll. */
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+a {
+  color: var(--accent);
+}
+
+nav {
+  display: flex;
+  gap: 1rem;
+  margin: 0.75rem 0 0;
+}
+
+section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.75rem;
+  background: var(--bg);
+}
+
+.card > header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.4rem;
+}
+
+.card p {
+  margin: 0.3rem 0;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.5rem 0 0;
+}
+
+button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+button.danger {
+  color: var(--fail-ink);
+}
+
+form label {
+  display: block;
+  margin: 0.6rem 0;
+}
+
+form label.inline {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+input[type="text"],
+input:not([type]),
+input[type="password"],
+select {
+  display: block;
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  margin-top: 0.2rem;
+  width: 100%;
+  max-width: 34rem;
+}
+
+input[readonly] {
+  color: var(--muted);
+  background: var(--code-bg);
+}
+
+summary {
+  cursor: pointer;
+}
+
+.badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.05rem 0.55rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  background: var(--skip-bg);
+  color: var(--skip-ink);
+  white-space: nowrap;
+}
+
+.badge.ok {
+  background: var(--ok-bg);
+  color: var(--ok-ink);
+}
+
+.badge.warn {
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+}
+
+.badge.fail {
+  background: var(--fail-bg);
+  color: var(--fail-ink);
+}
+
+.badge.skip {
+  background: var(--skip-bg);
+  color: var(--skip-ink);
+}
+
+.note {
+  border-left: 3px solid var(--line);
+  padding-left: 0.6rem;
+  color: var(--muted);
+}
+
+.warn-note {
+  border-left-color: var(--warn-ink);
+  color: var(--warn-ink);
+}
+
+.fail-text {
+  color: var(--fail-ink);
+}
+
+.msg {
+  font-size: 0.92rem;
+}
+
+#dead-banner {
+  background: var(--fail-bg);
+  color: var(--fail-ink);
+  border: 1px solid var(--fail-ink);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-top: 1rem;
+  font-weight: 600;
+}
+
+#dead-banner code {
+  background: transparent;
+  border: 1px solid var(--fail-ink);
+}

@@ -11,7 +11,74 @@ the time of that release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **A browser dashboard — the CLI's equal, clickable.** One page on
+  `http://127.0.0.1:31415`, in three sections:
+  - **Databases** — add, edit, remove and test your connections without hand-editing
+    `connections.json`. A stored DSN is **never shown**, by anything, ever: the field is
+    write-only, so an edit form starts blank and leaving it blank keeps the DSN already
+    saved. A connection's name is fixed once created (to rename, remove and re-add), and
+    fallback ports can be set or changed from here. A name that is blank, padded with
+    spaces, or contains a `/` is refused: the dashboard could save one, but could never
+    edit, test or remove it again.
+  - **Clients** — the same nine MCP clients the wizard knows, each with inject/uninject
+    buttons and the **exact command and arguments that client would launch**. A client
+    whose config file cannot be parsed is listed and explained, never written to — the same
+    refusal `setup` and `clients` make.
+  - **Verify & Doctor** — the live verification below, plus the full `doctor` sweep with the
+    same `ok` / `warn` / `fail` / `skipped` findings the CLI prints.
+
+- **Live MCP verification — "does the binary my client launches actually answer?"** For each
+  detected client, the dashboard spawns the *exact* command and arguments stored in that
+  client's own config and holds a real MCP conversation with it using the SDK's own client
+  library: `initialize`, then `tools/list` (23 expected), then a real `list_databases` call.
+  The verdict is one of `answers`, `launch_failed`, `handshake_failed`, `wrong_tool_count`,
+  `timeout` — evidence, not a guess. The dashboard never answers from its own process, so a
+  client pointed at a *different* install is caught rather than masked. One more button runs
+  the same check over the HTTP (SSE) transport (`port_in_use` when port 8000 is already
+  taken).
+
+- **Stale-install detection.** When the server a client launches reports a different version
+  than the dashboard itself is running, the result is flagged as stale with the upgrade
+  command — the "you upgraded but that client still starts the old copy" case, now visible
+  per client rather than inferred.
+
+- **`db-conn-mcp gui`** opens the dashboard: it reuses the one a running server is already
+  hosting, or starts a standalone one (which shuts itself down after 15 idle minutes) and
+  opens your browser at it. `db-conn-mcp setup` now ends with a tip pointing at the command,
+  so a first-time user discovers the dashboard instead of never hearing about it.
+
+- **A dashboard tab left open from before a restart says so.** Each start mints a fresh
+  token, so an old tab's requests are refused; the page now shows a single banner asking
+  you to run `db-conn-mcp gui` again, instead of every panel failing for no stated reason.
+
+### Breaking / Behaviour changes
+
+- **Starting the MCP server now also starts a local dashboard listener on
+  `127.0.0.1:31415`.** Every server start hosts the dashboard alongside the MCP protocol;
+  the first server process to start wins the port and the rest skip it silently, so several
+  clients running the server at once still means exactly one dashboard. It listens on
+  loopback only — no connection from another machine can reach it — and every request,
+  including the page itself, must carry a secret token generated at start-up and stored in a
+  user-only file at `~/.db-conn-mcp/gui-token`. To turn it off, add `--no-gui` to the
+  db-conn-mcp command in your client's config. If port 31415 is already taken by something
+  else on your machine, the server simply carries on without a dashboard.
+
+- **The server now reports its own version to your MCP client.** During the initialize
+  handshake, `serverInfo.version` used to be the version of the underlying MCP SDK (e.g.
+  `1.27.2`) because the SDK fills that in when a server does not supply one. It is now the
+  db-conn-mcp version (e.g. `0.5.6`). If you script against that field, expect our version
+  there from now on — and it finally lets a client tell which build of db-conn-mcp it is
+  talking to.
+
+### Changed
+
+- Three dependencies are now declared explicitly: **`starlette`**, **`uvicorn`** and
+  **`httpx`**. All three already arrived with `mcp`, but the dashboard imports them
+  directly, and an import of ours must not rest on somebody else's transitive pin.
+- `db_conn_mcp.server.run()` takes a new `gui=True` keyword (the CLI passes `not --no-gui`).
+  Calling it as before is unchanged apart from the listener described above.
 
 ## [0.5.6] — 2026-08-11
 

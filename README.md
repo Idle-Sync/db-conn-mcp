@@ -17,7 +17,7 @@ It does one thing well: let an agent **safely explore and query** a database you
 - **Read stays read.** A `read` database runs every query in a native read-only transaction, *and* the read tool only accepts a single read-only statement (`SELECT`/`WITH`/`VALUES`/`TABLE`/`SHOW`/`EXPLAIN`) — so an agent can't slip in a write or a `SET … READ WRITE` to flip the session. For a hard, privilege-level guarantee that holds no matter what, point the DSN at a **read-only database role** (see [Use a read-only role](#use-a-read-only-role-strongest-guarantee)).
 - **No secret leaks.** DSNs/passwords are never logged or returned by any tool. Connection failures come back as **sanitized diagnostics** (a category + fix), never a raw traceback with your host and credentials in it.
 - **Tiered write safety.** Writes are gated server-side: `mode` (hard, native) → **dry-run first** (a commit is refused unless that exact statement was previewed) → `yolo` (per-database trust) → `user_consent` (explicit per-operation approval).
-- **Zero-friction setup.** An interactive wizard registers your database and injects the server into your AI client's config for you — across 8 popular clients, each in its own format.
+- **Zero-friction setup.** An interactive wizard registers your database and injects the server into your AI client's config for you — across 9 popular clients, each in its own format. Prefer clicking? `db-conn-mcp gui` opens a [local dashboard](#browser-dashboard-db-conn-mcp-gui) that does the same, and proves each client can actually launch the server.
 
 ---
 
@@ -212,6 +212,8 @@ The server exposes **23 tools** and **2 prompts**:
 |---------|--------------|
 | `db-conn-mcp` | Run the server over **stdio** (the default an MCP client uses). Run directly in a terminal it prints guidance and exits — it does not hang. |
 | `db-conn-mcp --transport http` | Run over **HTTP (SSE)** instead. |
+| `db-conn-mcp --no-gui` | Run the server **without** hosting the [browser dashboard](#browser-dashboard-db-conn-mcp-gui) on `127.0.0.1:31415`. Works with either transport. |
+| `db-conn-mcp gui` | Open the [browser dashboard](#browser-dashboard-db-conn-mcp-gui) — reuses the one a running server already hosts, otherwise starts one and opens your browser at it. |
 | `db-conn-mcp setup` | Guided setup; shows status + an action menu if already configured. |
 | `db-conn-mcp status` | List configured databases (including `fallback_ports` where configured) and which clients have the server injected. |
 | `db-conn-mcp add` | Add another database connection. |
@@ -264,6 +266,68 @@ startup_timeout_sec = 30
 
 ---
 
+## Browser dashboard (`db-conn-mcp gui`)
+
+Everything the CLI does, clickable:
+
+```bash
+db-conn-mcp gui
+```
+
+That opens **`http://127.0.0.1:31415`** — one page, three sections:
+
+- **Databases** — add, edit, remove and test your connections without hand-editing `connections.json`. The DSN field is **write-only**: a stored DSN is never displayed, so an edit form starts blank and *leaving it blank keeps the DSN you already saved*. A connection's name is fixed once created (to rename one, remove it and add it again); mode, `yolo` and `fallback_ports` are editable. Each connection has its own **Test** button, which runs the same sanitized connectivity probe as `db-conn-mcp check`.
+- **Clients** — the nine MCP clients the wizard knows, each showing whether the server is injected and **the exact command and arguments that client would launch**. Inject or uninject with one click. A client whose config file doesn't parse is shown and explained, never written to — the same refusal `db-conn-mcp clients` makes.
+- **Verify & Doctor** — the verification story below, plus the whole `doctor` sweep with the same `ok` / `warn` / `fail` / `skipped` findings the CLI prints.
+
+### Does the binary my client launches actually answer?
+
+That is the question the dashboard exists to answer, and it answers it with evidence. For each detected client it **spawns the exact command and arguments stored in that client's own config** and holds a real MCP conversation with it — `initialize`, then `tools/list` (23 expected), then a real `list_databases` call — using the MCP SDK's own client library, the same one your AI client embeds. The verdict is one of:
+
+| Verdict | Meaning |
+|---------|---------|
+| `answers` | The handshake, `tools/list` and `list_databases` all came back. This client is genuinely wired up. |
+| `launch_failed` | The command in that client's config could not be started at all (wrong path, moved venv, uninstalled). |
+| `handshake_failed` | The process started but did not speak MCP — a broken or unrelated binary. |
+| `wrong_tool_count` | It answered, with a different number of tools than this build ships — usually an older copy. |
+| `timeout` | No complete conversation in time. |
+| `port_in_use` | HTTP check only: something already listens on port 8000. |
+
+A result also carries the **version the spawned server reported**, and flags it as **stale** when that differs from the dashboard's own — the "I upgraded, but that client still starts the old copy" case, now visible per client instead of guessed at. The dashboard **never** answers these questions from its own process: it always spawns a separate one, so a client pointed at a different install is caught rather than masked. A separate button runs the same check over the HTTP (SSE) transport.
+
+> One honest caveat about that HTTP button: the SSE port (8000) isn't configurable yet, so when the dashboard is riding along inside a server *you* started with `--transport http`, that server already holds port 8000 and the check can only ever report `port_in_use`. Run the HTTP check from a standalone `db-conn-mcp gui`, or from a dashboard hosted by a stdio server, to get a real verdict.
+
+### It starts with the server
+
+Starting the MCP server **also** hosts the dashboard on `127.0.0.1:31415`, from a background thread. The first server process to start wins the port; any others skip it silently, so five clients running the server still means one dashboard. If something else already holds the port, the server carries on without one — a dashboard problem can never take the MCP server down with it.
+
+To turn it off, add `--no-gui` to the db-conn-mcp command in your client's config:
+
+```json
+{
+  "mcpServers": {
+    "db-conn-mcp": {
+      "command": "db-conn-mcp",
+      "args": ["--no-gui", "--config", "/absolute/path/to/connections.json"]
+    }
+  }
+}
+```
+
+`db-conn-mcp gui` reuses whichever dashboard is already running; if none is, it starts one in the foreground that shuts itself down after 15 idle minutes.
+
+### The security posture
+
+It is a local tool, and it is built to stay local:
+
+- **Loopback only.** It binds `127.0.0.1`, so nothing from another machine can reach it — and it refuses any request that didn't address it as `127.0.0.1:31415` or `localhost:31415`, which is what stops a hostile web page from pointing a DNS name at your loopback and talking to it.
+- **A secret token on every request** — including the page itself and its CSS/JS, not just the API. The token is new on every start, compared in constant time, and stored user-only (mode `0600`) at `~/.db-conn-mcp/gui-token`. Someone else on your machine without read access to that file cannot use the dashboard.
+- **No CORS, ever**, and a `default-src 'self'` content-security policy: the page loads nothing from the internet and no other origin can read from it. Nothing it serves is written to your browser's disk cache.
+- **DSNs go in and never come out.** The API has no field that can carry a DSN outward, so it cannot leak one even by accident — and a rejected connection reports the *names* of the invalid fields, never the values you typed.
+- **Anything that spawns a process or writes a file is a POST**, never something a link or an image tag can trigger, and everything on the page is rendered as text — database and client names can't smuggle markup in.
+
+---
+
 ## Provider notes
 
 - **Railway / managed Postgres over a public proxy:** use the **public** connection URL (e.g. Railway's `DATABASE_PUBLIC_URL`, not the internal `*.railway.internal` one) and append **`?sslmode=require`** — these proxies require SSL with a self-signed cert, which `sslmode=require` accepts without verification.
@@ -282,7 +346,7 @@ ruff check . && ruff format --check .
 pytest -q
 ```
 
-`pyproject.toml` is the single source of dependency truth. The codebase is split into single-purpose layers (`config`, `models`, `dialects/`, `safety`, `diagnostics`, `doctor`, `clients`, `handlers`, `server`, `cli`); only the dialect layer knows a specific database exists. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md), [`docs/PRD.md`](./docs/PRD.md), and [`docs/PLAN.md`](./docs/PLAN.md).
+`pyproject.toml` is the single source of dependency truth. The codebase is split into single-purpose layers (`config`, `models`, `dialects/`, `safety`, `diagnostics`, `doctor`, `clients`, `verify`, `handlers`, `server`, `cli`, `gui/`); only the dialect layer knows a specific database exists. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md), [`docs/PRD.md`](./docs/PRD.md), and [`docs/PLAN.md`](./docs/PLAN.md).
 
 ---
 

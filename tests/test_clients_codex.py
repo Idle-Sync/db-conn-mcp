@@ -15,6 +15,7 @@ from db_conn_mcp.clients import (
     config_readable,
     inject_entry,
     injected_command,
+    injected_launch,
     is_injected,
     read_config,
     remove_entry,
@@ -276,3 +277,38 @@ def test_is_injected_and_injected_command_work_for_codex(tmp_path):
     write_config(spec, inject_entry(read_config(spec), "codex", "db-conn-mcp", NASTY_PATH, []))
     assert is_injected(spec) is True
     assert injected_command(spec) == NASTY_PATH
+
+
+def test_injected_launch_returns_command_and_args(tmp_path):
+    spec = _json_spec(tmp_path)
+    write_config(
+        spec,
+        inject_entry(
+            read_config(spec), "mcpServers", "db-conn-mcp", NASTY_PATH, ["--config", NASTY_ARG]
+        ),
+    )
+    assert injected_launch(spec) == (NASTY_PATH, ["--config", NASTY_ARG])
+
+
+def test_injected_launch_handles_zed_nesting(tmp_path):
+    spec = ClientSpec("zed", "Zed", tmp_path / "settings.json", "zed")
+    write_config(
+        spec,
+        inject_entry(read_config(spec), "zed", "db-conn-mcp", NASTY_PATH, ["--config", NASTY_ARG]),
+    )
+    assert injected_launch(spec) == (NASTY_PATH, ["--config", NASTY_ARG])
+
+
+def test_injected_launch_none_when_absent_or_unreadable(tmp_path):
+    spec = _json_spec(tmp_path)
+    assert injected_launch(spec) is None
+    spec.path.write_text("{ not json", encoding="utf-8")
+    assert injected_launch(spec) is None
+
+
+def test_injected_launch_missing_args_defaults_empty(tmp_path):
+    spec = _json_spec(tmp_path)
+    spec.path.write_text(
+        json.dumps({"mcpServers": {"db-conn-mcp": {"command": NASTY_PATH}}}), encoding="utf-8"
+    )
+    assert injected_launch(spec) == (NASTY_PATH, [])
