@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "db-conn-mcp",
   "display_name": "Database Connection MCP",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Safely query your databases (PostgreSQL) with AI agents — native read-only enforcement, sanitized errors, no DSN leaks.",
   "long_description": "A dead-simple, self-hosted MCP server for securely querying databases via AI agents. A database marked read is enforced read-only by PostgreSQL itself; writes are gated mode -> dry-run first -> yolo -> user_consent. DSNs are never logged or returned. Distributed on PyPI and launched here via uvx.",
   "author": {

@@ -11,6 +11,10 @@ the time of that release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.1] — 2026-08-13
+
 A security-hardening pass on the write-safety gate and the HTTP transport, from a full-repo
 audit. **Read the breaking changes first** — the HTTP transport now requires a token.
 
