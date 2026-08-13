@@ -11,7 +11,43 @@ the time of that release.
 
 ## [Unreleased]
 
-Nothing yet.
+A security-hardening pass on the write-safety gate and the HTTP transport, from a full-repo
+audit. **Read the breaking changes first** — the HTTP transport now requires a token.
+
+### Security fixes
+
+- **A dry-run can no longer permanently commit via a stacked statement.** Previously,
+  `execute_write_query(sql="DELETE FROM t; COMMIT;", dry_run=true)` sent both commands over
+  the driver's simple-query protocol; the embedded `COMMIT` ended the dry-run's wrapping
+  transaction before it could roll back, so the change was committed for real while the tool
+  reported `rolled_back: true` — bypassing the whole `mode → dry-run → yolo → user_consent`
+  gate. The write path now rejects multi-statement SQL before executing.
+
+- **Dry-run grants are scoped to the MCP session.** A dry-run preview under one session no
+  longer authorizes a commit of the identical statement from a *different* client. Under the
+  `http` transport a single server process serves many clients; a grant made by one is now
+  invisible to the others. `stdio` (one client per process) is unaffected.
+
+- **The `http`/SSE transport now requires authentication.** It previously served every tool,
+  including `execute_write_query`, on `127.0.0.1:8000` with no credential — any local process
+  could drive writes. Every request must now carry `Authorization: Bearer <token>`; the token
+  is minted on first start, printed to the terminal, and persisted owner-only at
+  `~/.db-conn-mcp/http-token`. Requests without a valid token get `401`; requests whose `Host`
+  header isn't loopback get `403` (a DNS-rebinding defense). `stdio` is unaffected.
+
+### Breaking / Behaviour changes
+
+- **`--transport http` clients must now send an auth token.** After upgrading, an HTTP/SSE
+  client that worked before will get `401 Unauthorized` until you configure it with the
+  header `Authorization: Bearer <token>`, where `<token>` is printed at server startup and
+  stored at `~/.db-conn-mcp/http-token`. Clients connecting from a non-loopback `Host` are
+  refused with `403`. `stdio` clients (the default) need no changes.
+
+- **`execute_write_query` now rejects SQL containing more than one statement.** If you relied
+  on sending several `;`-separated statements in one call, split them into separate calls;
+  you will otherwise get a sanitized `ValueError` (`Multiple SQL statements are not allowed;
+  submit a single statement.`). Semicolons inside string literals, dollar-quoted bodies, and
+  comments are fine — only actual statement boundaries are rejected.
 
 ## [0.7.0] — 2026-08-12
 

@@ -13,6 +13,7 @@ enforced natively here via session characteristics; introspection uses
 import asyncio
 import contextlib
 import os
+import re
 import shutil
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -729,6 +730,111 @@ def _leading_keyword(sql: str) -> str:
     return s.split(None, 1)[0].lower() if s else ""
 
 
+# Matches a dollar-quote delimiter at a given position: ``$$`` or ``$tag$`` where the
+# tag starts with a letter/underscore. ``$1`` (a parameter placeholder) never matches,
+# because a tag cannot start with a digit.
+_DOLLAR_TAG_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
+def _reject_multiple_statements(sql: str) -> None:
+    """Raise ``ValueError`` unless *sql* is a single top-level statement.
+
+    asyncpg runs an argument-free ``execute`` over the *simple* query protocol, which
+    executes several ``;``-separated commands in one call. On the write path that lets an
+    embedded ``COMMIT`` escape the dry-run wrapping transaction (issue #40), permanently
+    committing a change the tool reports as rolled back — bypassing the whole
+    ``mode`` → ``dry_run`` → ``yolo`` → ``user_consent`` gate. We close the hole by
+    rejecting stacked statements before dispatch.
+
+    This is a small single-pass character scanner, not an AST parser (project Rule 1). It
+    skips semicolons that live inside single-quoted literals (with ``''`` escapes),
+    ``E'...'`` escape strings (backslash escapes), double-quoted identifiers, dollar-quoted
+    bodies (``$tag$ ... $tag$``, empty tag ``$$`` included), line comments (``-- ...``) and
+    nested block comments (``/* ... */``). A single trailing semicolon, optionally followed
+    by whitespace or comments, is one statement and is allowed; two or more non-empty
+    statements are rejected.
+
+    The message names no SQL content (Rule 6): it states only the constraint.
+    """
+    statements = 0
+    has_content = False
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "-" and sql.startswith("--", i):  # line comment
+            newline = sql.find("\n", i)
+            i = n if newline == -1 else newline + 1
+            continue
+        if ch == "/" and sql.startswith("/*", i):  # nested block comment
+            depth = 1
+            i += 2
+            while i < n and depth:
+                if sql.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif sql.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            continue
+        if ch == "$":  # dollar-quoted string ($$...$$ or $tag$...$tag$)
+            match = _DOLLAR_TAG_RE.match(sql, i)
+            if match:
+                tag = match.group(0)
+                end = sql.find(tag, match.end())
+                i = n if end == -1 else end + len(tag)
+                has_content = True
+                continue
+        if ch == '"':  # double-quoted identifier ("" escapes an embedded quote)
+            i += 1
+            while i < n:
+                if sql[i] == '"':
+                    if sql.startswith('""', i):
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            has_content = True
+            continue
+        if ch == "'":  # single-quoted literal; E'...' allows backslash escapes
+            escaped = (
+                i > 0
+                and sql[i - 1] in "Ee"
+                and (i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] == "_"))
+            )
+            i += 1
+            while i < n:
+                cur = sql[i]
+                if escaped and cur == "\\":
+                    i += 2
+                    continue
+                if cur == "'":
+                    if sql.startswith("''", i):
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            has_content = True
+            continue
+        if ch == ";":  # top-level statement separator
+            if has_content:
+                statements += 1
+            has_content = False
+            i += 1
+            continue
+        if not ch.isspace():
+            has_content = True
+        i += 1
+    if has_content:
+        statements += 1
+    if statements > 1:
+        raise ValueError("Multiple SQL statements are not allowed; submit a single statement.")
+
+
 class PostgresDialect(Dialect):
     """``asyncpg``-backed PostgreSQL dialect."""
 
@@ -871,6 +977,10 @@ class PostgresDialect(Dialect):
         params: list[Any] | None = None,
         timeout_ms: int | None = None,
     ) -> dict:
+        # Defense-in-depth (issue #40): reject stacked statements up front, before either
+        # dispatch branch, so an embedded ``COMMIT`` can never escape the dry-run
+        # transaction regardless of the row-returning heuristic.
+        _reject_multiple_statements(sql)
         args = list(params or [])
         timeout = _timeout_seconds(timeout_ms)
         try:

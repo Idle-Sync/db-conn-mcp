@@ -25,6 +25,7 @@ from db_conn_mcp.dialects.postgres import (
     _leading_keyword,
     _pg_env_from_dsn,
     _quote_identifier,
+    _reject_multiple_statements,
     _sanitize_pg_error,
     _timeout_seconds,
 )
@@ -381,6 +382,61 @@ async def test_execute_write_returns_rows_affected():
     conn = FakeConn()
     result = await PostgresDialect().execute(conn, "UPDATE users SET x = 1")
     assert result == {"rows_affected": 3}
+
+
+# ---- multi-statement rejection (issue #40: dry-run bypass via embedded ;) ------
+
+
+def test_reject_multiple_statements_rejects_stacked_commit():
+    # The #40 payload: an embedded COMMIT would escape the dry-run transaction.
+    with pytest.raises(ValueError):
+        _reject_multiple_statements("DELETE FROM users; COMMIT;")
+
+
+def test_reject_multiple_statements_rejects_two_selects():
+    with pytest.raises(ValueError):
+        _reject_multiple_statements("SELECT 1; SELECT 2")
+
+
+def test_reject_multiple_statements_message_is_sanitized():
+    # The message must not echo any SQL content back.
+    with pytest.raises(ValueError) as exc:
+        _reject_multiple_statements("DELETE FROM users; COMMIT;")
+    msg = str(exc.value)
+    assert "DELETE" not in msg
+    assert "COMMIT" not in msg
+    assert "users" not in msg
+
+
+def test_reject_multiple_statements_allows_single():
+    # None of these should raise: each is exactly one statement.
+    _reject_multiple_statements("SELECT 1")
+    _reject_multiple_statements("DELETE FROM t;")  # single trailing semicolon
+    _reject_multiple_statements("DELETE FROM t;   ")  # trailing whitespace after ;
+    _reject_multiple_statements("DELETE FROM t; -- trailing comment")
+    _reject_multiple_statements("INSERT INTO t VALUES ('a;b')")  # ; in string literal
+    _reject_multiple_statements("INSERT INTO t VALUES ('a''; b')")  # '' escape
+    _reject_multiple_statements(r"SELECT E'a\'; b'")  # E'' backslash escape
+    _reject_multiple_statements('UPDATE "we;ird" SET x = 1')  # ; in quoted identifier
+    _reject_multiple_statements("SELECT $$a;b$$")  # dollar-quoted body
+    _reject_multiple_statements("SELECT $tag$a;b$tag$")  # tagged dollar-quote
+    _reject_multiple_statements("/* a /* b */ c */ SELECT 1")  # nested block comment
+    _reject_multiple_statements("SELECT 1 -- a; b\n")  # line comment with ;
+
+
+def test_reject_multiple_statements_ignores_empty_trailing():
+    # A trailing semicolon then only comments/whitespace is still one statement.
+    _reject_multiple_statements("DELETE FROM t; /* done */")
+    _reject_multiple_statements("DELETE FROM t;\n\n")
+
+
+async def test_execute_rejects_multi_statement_before_touching_db():
+    # The write path must reject stacked statements without ever calling the driver.
+    conn = FakeConn()
+    with pytest.raises(ValueError):
+        await PostgresDialect().execute(conn, "DELETE FROM users; COMMIT;")
+    assert conn.executed == []  # conn.execute never reached
+    assert conn.fetched == []  # conn.fetch never reached
 
 
 # ---- params, timeouts, dry-run (issue #8 primitives) --------------------------
