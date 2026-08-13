@@ -207,6 +207,8 @@ tool handler ─► FastMCP.call_tool ─► (text blocks, structuredContent)
 
 This is the heart of the safety model. The decision lives **in the server**, not in the agent's good intentions.
 
+> **Transport note.** The write gate assumes the caller is the client it claims to be. Over `stdio` that is the one process on the pipe. Over `http`/SSE, `_run_fastmcp` no longer serves FastMCP's default unauthenticated app: it wraps `app.sse_app()` in a loopback bind + a bearer-token guard (`Authorization: Bearer <token>`, constant-time compared) plus a loopback-only `Host` allowlist, and serves it on `127.0.0.1` via uvicorn. The token is minted on first start, printed to the terminal, and stored user-only at `~/.db-conn-mcp/http-token` — a separate secret from the dashboard's. Without it, every request is `401`; a non-loopback `Host` is `403`. So "which client is asking" is a real, per-session identity even on the shared HTTP transport, which is what makes the session-scoped dry-run grant below meaningful.
+
 The decision order is **`mode` → dry-run-first → `yolo` → `user_consent`**, and `execute_write_query` defaults to `dry_run=true` so the preview is what an agent gets unless it deliberately asks to commit:
 
 ```mermaid
@@ -224,7 +226,7 @@ flowchart TD
     D -- no --> R2[❌ REJECT:<br/>'Read the table & schema, show the<br/>exact SQL to the user, get a yes,<br/>then call again with user_consent=true']
 ```
 
-The dry-run grant is process-local state in `Handlers` (`_dry_run_grants`, TTL 600s, consumed by the commit attempt — popped *before* `dialect.execute`, so a raising commit consumes it too) — precedent: `_active_ports`.
+The dry-run grant is process-local state in `Handlers` (`_dry_run_grants`, TTL 600s, consumed by the commit attempt — popped *before* `dialect.execute`, so a raising commit consumes it too) — precedent: `_active_ports`. The grant key includes a per-session token (`_session_token`, a `WeakKeyDictionary` over the live MCP session object), so a grant never crosses from one client to another on a shared `http` server.
 
 The intended agent choreography for a non-yolo write:
 
@@ -261,7 +263,11 @@ Skipping step 2 is not a matter of etiquette: a commit with no matching unexpire
 
 `mode` is the **hard boundary** (native, unbypassable). Everything after it — the dry-run stage, `yolo`, `user_consent` — only decides *how much ceremony* a write needs on a DB that is *already* `write`; none of them, nor `skip_dry_run`, can ever make a `read` DB writable. And the two relaxations are scoped: `yolo` waives only the consent prompt (never the preview), `skip_dry_run` waives only the preview (never consent).
 
-**Dry-run writes** (`dry_run=true`, the default): the statement executes inside a transaction that is **always rolled back**, returning the `rows_affected` it *would* have had, and records a grant keyed on the exact `(database, sql, params)`. Because nothing commits, only the `mode` gate applies — no yolo or consent needed — which is exactly what lets the agent show the user the real impact *before* asking for consent to the real write. The grant expires after 10 minutes and is **consumed by the commit attempt** it authorizes — success *or* exception, because an ambiguous failure (statement timeout, connection dropped during COMMIT) may still have applied the write, and a blind retry on a live grant would double-apply it. Running the same statement twice means previewing it twice. Caveat (documented on the tool): a dry-run still executes server-side until the rollback, so it briefly takes locks, advances sequences, and fires triggers.
+**Dry-run writes** (`dry_run=true`, the default): the statement executes inside a transaction that is **always rolled back**, returning the `rows_affected` it *would* have had, and records a grant keyed on the exact `(session, database, sql, params)`. Because nothing commits, only the `mode` gate applies — no yolo or consent needed — which is exactly what lets the agent show the user the real impact *before* asking for consent to the real write. The grant expires after 10 minutes and is **consumed by the commit attempt** it authorizes — success *or* exception, because an ambiguous failure (statement timeout, connection dropped during COMMIT) may still have applied the write, and a blind retry on a live grant would double-apply it. Running the same statement twice means previewing it twice. Caveat (documented on the tool): a dry-run still executes server-side until the rollback, so it briefly takes locks, advances sequences, and fires triggers.
+
+The grant is **scoped to the originating MCP session**, not just the statement text: under the `http` transport one server process serves many clients, so a grant made by one client is invisible to the others (keyed by the live session object via a `WeakKeyDictionary`). Under `stdio` there is one session per process, so this changes nothing. The grant key alone is never a capability another connection can forge by resending identical SQL.
+
+**Single-statement enforcement.** The write path rejects SQL that contains more than one top-level statement *before* it runs, closing a bypass where a stacked `…; COMMIT;` rode the driver's simple-query protocol and committed the change the dry-run's own transaction was meant to roll back. The check is a small character scanner (Rule 1 — not an AST parser) that ignores `;` inside string literals, dollar-quoted bodies, and comments; only real statement boundaries are counted.
 
 ---
 

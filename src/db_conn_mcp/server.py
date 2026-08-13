@@ -10,16 +10,26 @@ remaining the same SDK.
 """
 
 import difflib
+import hmac
+import os
+import secrets
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ContentBlock, TextContent
+from starlette.applications import Starlette
+from starlette.datastructures import Headers
+from starlette.middleware import Middleware
+from starlette.responses import PlainTextResponse
+from starlette.routing import Mount
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__
 from . import doctor as doctor_mod
-from .config import resolve_path
+from .config import global_config_path, resolve_path
 from .guard import UNTRUSTED_DATA_POLICY, guard_content_blocks
 from .handlers import Handlers
 
@@ -311,6 +321,7 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
     async def execute_write_query(
         database: str,
         sql: str,
+        ctx: Context,
         params: list[Any] | None = None,
         user_consent: bool = False,
         dry_run: bool = True,
@@ -341,6 +352,15 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Pass values via `params` ($1/$2/... placeholders), not pasted into the SQL.
         """
+        # Scope the dry-run grant to THIS MCP session (issue #41): under --transport http
+        # one Handlers instance is shared by every client, so a grant must not be
+        # satisfiable by a different session. FastMCP injects `ctx` and keeps it out of
+        # the tool's input schema. During a real request `ctx.session` is always set;
+        # outside one (direct/unit calls) it raises — that is the single local session.
+        try:
+            session: object | None = ctx.session
+        except ValueError:
+            session = None
         return await handlers.execute_write_query(
             database,
             sql,
@@ -349,6 +369,7 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
             dry_run=dry_run,
             skip_dry_run=skip_dry_run,
             timeout_ms=timeout_ms,
+            session=session,
         )
 
     @app.tool()
@@ -526,12 +547,179 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
     return app
 
 
+# --------------------------------------------------------------------------------
+# HTTP/SSE transport authentication (issue #42)
+# --------------------------------------------------------------------------------
+#
+# FastMCP's built-in "sse" transport serves EVERY tool — writes included — with no
+# credential at all, on 127.0.0.1:8000, so any local process could open ``/sse`` and
+# drive writes. We instead build FastMCP's Starlette SSE app ourselves, wrap it in a
+# bearer-token + loopback-Host guard, and serve it over uvicorn bound to loopback.
+# The stdio transport is a single local pipe and is left completely unauthenticated.
+
+#: The request header the HTTP/SSE transport authenticates on (``<header>: Bearer <token>``).
+HTTP_TOKEN_HEADER = "Authorization"
+
+#: File (beside connections.json, owner-only) that persists the HTTP transport token.
+HTTP_TOKEN_FILENAME = "http-token"
+
+
+def _http_token_path() -> Path:
+    """Where the HTTP/SSE bearer token is persisted (user-only file, 0600).
+
+    Lives in the user config dir beside ``connections.json`` — a SEPARATE secret from
+    the GUI's ``gui-token``, so neither transport's credential ever grants the other.
+    """
+    return global_config_path().parent / HTTP_TOKEN_FILENAME
+
+
+def _http_token() -> str:
+    """Read the persisted HTTP token, or mint and persist a fresh one.
+
+    The token is a ``secrets.token_urlsafe(32)`` value written owner-only (0600). The
+    mode is passed to the *creation* call rather than chmod'ed afterwards, so the secret
+    is never briefly world-readable at the umask default (mirrors the GUI's
+    ``_write_token``). On Windows the bits are advisory — NTFS ignores them — but the
+    file sits under the user's profile directory, which is not world-readable there.
+    """
+    path = _http_token_path()
+    if path.is_file():
+        existing = path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    token = secrets.token_urlsafe(32)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(token)
+    path.chmod(0o600)
+    return token
+
+
+def _bearer_token(header_value: str) -> str:
+    """Extract ``<token>`` from an ``Authorization: Bearer <token>`` header value.
+
+    Returns ``""`` for a missing header or any non-Bearer scheme, which then fails the
+    constant-time comparison like any other mismatch.
+    """
+    scheme, _, value = header_value.partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    return value.strip()
+
+
+def _host_is_loopback(host_header: str) -> bool:
+    """Whether a ``Host`` header names the loopback interface (DNS-rebinding defence).
+
+    Accepts ``127.0.0.1``, ``localhost`` and IPv6 ``::1`` with or without a port, and
+    rejects everything else — mirroring the GUI's Host allowlist so what is served here
+    can only be reached as loopback, never through a rebound hostname.
+    """
+    host = host_header.strip().lower()
+    if not host:
+        return False
+    if host.startswith("["):  # bracketed IPv6, optionally with a port: [::1] / [::1]:8000
+        hostname = host[1 : host.index("]")] if "]" in host else host
+    elif host.count(":") == 1:  # host:port
+        hostname = host.rsplit(":", 1)[0]
+    else:  # bare host, or bare IPv6 such as ::1
+        hostname = host
+    return hostname in {"127.0.0.1", "localhost", "::1"}
+
+
+class _HttpAuthGuard:
+    """Pure-ASGI guard: constant-time bearer-token check, then loopback-Host check.
+
+    Pure ASGI rather than :class:`~starlette.middleware.base.BaseHTTPMiddleware` on
+    purpose — the latter buffers the response body, which would break the long-lived
+    ``/sse`` event stream. Every HTTP request must carry ``Authorization: Bearer
+    <token>`` (else 401) and a loopback ``Host`` (else 403); the token check runs first
+    so a probe from a rebound name still learns nothing beyond "unauthorized".
+    """
+
+    def __init__(self, app: ASGIApp, token: str) -> None:
+        self._app = app
+        # Compared as bytes: compare_digest raises on non-ASCII *str*, and a crash inside
+        # the boundary would surface as a 500 with a traceback. surrogateescape keeps any
+        # undecodable byte sequence comparable instead of raising.
+        self._token = token.encode("utf-8", "surrogateescape")
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Authenticate one HTTP request, then defer to the wrapped app."""
+        if scope["type"] != "http":  # lifespan/websocket: nothing to authenticate here
+            await self._app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        supplied = _bearer_token(headers.get("authorization", ""))
+        if not hmac.compare_digest(supplied.encode("utf-8", "surrogateescape"), self._token):
+            await PlainTextResponse("Unauthorized", status_code=401)(scope, receive, send)
+            return
+        if not _host_is_loopback(headers.get("host", "")):
+            await PlainTextResponse("Forbidden", status_code=403)(scope, receive, send)
+            return
+        await self._app(scope, receive, send)
+
+
+def _build_authenticated_sse_app(app: ASGIApp, token: str) -> Starlette:
+    """Wrap an SSE ASGI app in the bearer-token + loopback-Host guard.
+
+    ``app`` is FastMCP's ``sse_app()`` (a Starlette serving ``/sse`` and ``/messages``);
+    the returned Starlette mounts it behind :class:`_HttpAuthGuard`, so BOTH the GET
+    event stream and the POST message route require the token. Raises on an empty token
+    — an empty credential compares equal to a request that supplies none, which would
+    serve everything to anyone (the boundary refuses to be built unarmed).
+    """
+    if not token:
+        raise ValueError("A non-empty HTTP token is required.")
+    return Starlette(
+        routes=[Mount("/", app=app)],
+        middleware=[Middleware(_HttpAuthGuard, token=token)],
+    )
+
+
+def _print_http_startup(host: str, port: int, token: str) -> None:
+    """Print operator guidance for the authenticated HTTP/SSE server, to stderr.
+
+    The token is a local session secret (not a DSN or DB credential), so echoing it to
+    the operator's OWN terminal is intended — it is how they configure their MCP client
+    (the GUI prints its token the same way). Rule 6 governs DSNs/credentials, not this.
+    """
+    print(
+        f"db-conn-mcp HTTP/SSE server on http://{host}:{port}/sse\n"
+        f"Every request must send this header:\n"
+        f"    {HTTP_TOKEN_HEADER}: Bearer {token}\n"
+        f"Configure your MCP client with that header (token stored at "
+        f"{_http_token_path()}). Ctrl-C to stop.",
+        file=sys.stderr,
+    )
+
+
 def _run_fastmcp(transport: Transport, config_path: str | None) -> None:
-    """Build the MCP app and enter FastMCP's loop (split out so ``run`` is testable)."""
+    """Build the MCP app and serve it over the chosen transport (split out so ``run`` is testable).
+
+    ``stdio`` is one local pipe and stays unauthenticated. ``http`` maps to FastMCP's
+    SSE app, which we serve OURSELVES behind :class:`_HttpAuthGuard` (issue #42) rather
+    than via ``app.run(transport="sse")``, which served every tool — writes included —
+    with no credential on 127.0.0.1:8000.
+    """
     app = build_server(config_path)
-    # Map our public "http" name to FastMCP's SSE transport (design: http == SSE).
-    fastmcp_transport = "sse" if transport == "http" else "stdio"
-    app.run(transport=fastmcp_transport)
+    if transport == "stdio":
+        app.run(transport="stdio")
+        return
+    _run_http(app)
+
+
+def _run_http(app: GuardedFastMCP) -> None:
+    """Serve the SSE app behind the bearer-token guard, over uvicorn on loopback."""
+    import uvicorn
+
+    token = _http_token()
+    host, port = app.settings.host, app.settings.port
+    authenticated = _build_authenticated_sse_app(app.sse_app(), token)
+    _print_http_startup(host, port, token)
+    # Bound explicitly to 127.0.0.1 (not app.settings.host) so the loopback promise the
+    # Host check makes cannot be widened by a stray setting.
+    uvicorn.run(authenticated, host="127.0.0.1", port=port, log_level="warning")
 
 
 def run(transport: Transport = "stdio", config_path: str | None = None, gui: bool = True) -> None:

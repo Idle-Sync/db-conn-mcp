@@ -134,3 +134,53 @@ async def test_yolo_db_still_requires_dry_run_before_commit(env):
     await h.execute_write_query("ydb", "DELETE FROM t")  # dry-run records grant
     result = await h.execute_write_query("ydb", "DELETE FROM t", dry_run=False)
     assert result == {"rows_affected": 1}  # yolo waives consent, not the preview
+
+
+class _Session:
+    """A stand-in for an MCP session object (a weak-referenceable instance)."""
+
+
+async def test_grant_is_scoped_to_the_session(env):
+    """A dry-run in one session cannot authorize a commit from a DIFFERENT session.
+
+    Under `--transport http` a single Handlers instance is shared by every connected
+    client, so an unscoped grant let session A's preview satisfy session B's commit of
+    the identical statement. The grant must be keyed to the session that previewed.
+    """
+    h, fake = env
+    a, b = _Session(), _Session()
+
+    # Session A previews the statement — records a grant scoped to A.
+    await h.execute_write_query("db", "DELETE FROM t", session=a)
+
+    # Session B never previewed: committing the identical (db, sql, params) is rejected.
+    with pytest.raises(WriteRejected, match="dry_run"):
+        await h.execute_write_query(
+            "db", "DELETE FROM t", user_consent=True, dry_run=False, session=b
+        )
+    assert fake.committed == []
+
+    # Session A — the one that previewed — commits and consumes its own grant.
+    result = await h.execute_write_query(
+        "db", "DELETE FROM t", user_consent=True, dry_run=False, session=a
+    )
+    assert result == {"rows_affected": 1}
+    assert fake.committed == ["DELETE FROM t"]
+
+    # The grant was single-use: A cannot commit again without a fresh preview.
+    with pytest.raises(WriteRejected, match="dry_run"):
+        await h.execute_write_query(
+            "db", "DELETE FROM t", user_consent=True, dry_run=False, session=a
+        )
+
+
+async def test_stdio_none_session_still_shares_a_grant(env):
+    """Under stdio there is one session per process — session=None preserves today's
+    behavior: a dry-run then a commit (both session=None) works end to end."""
+    h, fake = env
+    await h.execute_write_query("db", "DELETE FROM t", session=None)
+    result = await h.execute_write_query(
+        "db", "DELETE FROM t", user_consent=True, dry_run=False, session=None
+    )
+    assert result == {"rows_affected": 1}
+    assert fake.committed == ["DELETE FROM t"]

@@ -140,6 +140,13 @@ async def verify_http(
             result["detail"] = f"something already listens on 127.0.0.1:{port}"
             result["suggested_action"] = "stop the other process, then re-run this check"
             return result
+    # The HTTP transport now requires a bearer token (issue #42). Ensure/read it HERE,
+    # before spawning, so the child server reads the same persisted file and we agree on
+    # the credential; then send it on the SSE connection like a real client must.
+    from .server import HTTP_TOKEN_HEADER, _http_token
+
+    token = _http_token()
+    auth_headers = {HTTP_TOKEN_HEADER: f"Bearer {token}"}
     try:
         proc = subprocess.Popen(  # noqa: S603 — command comes from our own config entries
             [command, *args, "--transport", "http"],
@@ -165,7 +172,7 @@ async def verify_http(
                         break
                 await asyncio.sleep(0.25)
             async with (
-                sse_client(f"http://127.0.0.1:{port}/sse") as (read, write),
+                sse_client(f"http://127.0.0.1:{port}/sse", headers=auth_headers) as (read, write),
                 ClientSession(read, write) as session,
             ):
                 init = await session.initialize()

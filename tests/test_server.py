@@ -8,6 +8,7 @@ as sanitized diagnostics.
 
 import asyncio
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -1498,6 +1499,54 @@ async def test_execute_write_query_tool_defaults_to_dry_run(tmp_path):
     assert props["skip_dry_run"]["default"] is False
 
 
+async def test_execute_write_query_tool_schema_hides_the_context_parameter(cfg_path):
+    """The wrapper takes a `ctx: Context` so it can scope grants to the MCP session, but
+    FastMCP injects Context and keeps it out of the input schema — the public tool
+    surface is unchanged, and neither `ctx` nor `session` leaks to the agent."""
+    app = server.build_server(cfg_path)
+    tool = next(t for t in await app.list_tools() if t.name == "execute_write_query")
+    assert set(tool.inputSchema["properties"]) == {
+        "database",
+        "sql",
+        "params",
+        "user_consent",
+        "dry_run",
+        "skip_dry_run",
+        "timeout_ms",
+    }
+
+
+async def test_execute_write_query_tool_still_rejects_unknown_arguments(cfg_path, monkeypatch):
+    """The argument-rejection guard reads the declared properties; the injected Context
+    param is not among them, so the seam keeps working with a Context-taking wrapper."""
+    dialect = FakeDialect()
+    _patch_dialect(monkeypatch, dialect)
+    app = server.build_server(cfg_path)
+
+    with pytest.raises(ValueError) as exc:
+        await app.call_tool(
+            "execute_write_query",
+            {"database": "dev", "sql": "DELETE FROM t", "session": "x"},
+        )
+    assert "unknown parameter(s) for execute_write_query: session" in str(exc.value)
+    assert dialect.exec_calls == [] and dialect.dry_run_calls == []
+
+
+async def test_execute_write_query_tool_wrapper_dry_runs_with_context_injected(
+    cfg_path, monkeypatch
+):
+    """End to end through the tool wrapper: FastMCP injects Context, the wrapper forwards
+    the (absent-outside-a-request) session, and the default dry-run path runs."""
+    dialect = FakeDialect(exec_result={"rows_affected": 3})
+    _patch_dialect(monkeypatch, dialect)
+    app = server.build_server(cfg_path)
+
+    blocks = await app.call_tool("execute_write_query", {"database": "dev", "sql": "DELETE FROM t"})
+    payload = _fenced_payload(blocks[0])
+    assert payload["dry_run"] is True and payload["rolled_back"] is True
+    assert dialect.dry_run_calls and not dialect.exec_calls
+
+
 async def test_check_sequences_tool_defaults_to_problems_only(tmp_path):
     cfg = {"connections": [{"name": "db", "dsn": "postgresql://u:p@h:5432/db", "mode": "read"}]}
     path = tmp_path / "connections.json"
@@ -1545,3 +1594,155 @@ async def test_doctor_tool_reports_no_config_when_the_file_is_deleted_after_star
         assert findings[check]["status"] == "skipped", findings[check]
         assert "no configuration found" in findings[check]["detail"]
     assert not any(f["status"] == "fail" for f in structured["result"])
+
+
+# ---- HTTP/SSE transport requires a bearer token (issue #42) ----------------------
+#
+# FastMCP's built-in "sse" transport served every tool — writes included — with NO
+# credential on 127.0.0.1:8000. The transport is now guarded by _HttpAuthGuard: a
+# bearer token on every request, plus a loopback Host check (DNS-rebinding defence).
+# The auth wrapper is unit-tested over a trivial inner app; the real /sse route blocks
+# forever (it is a live event stream), so it is deliberately not driven here.
+
+
+def _trivial_inner_app():
+    """A one-route Starlette app that answers 200 — a stand-in for the SSE app."""
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+
+    async def ok(_request):
+        return PlainTextResponse("INNER-OK")
+
+    return Starlette(routes=[Route("/ping", ok)])
+
+
+def _auth_client(token="s3cret-token"):
+    """A TestClient over the authenticated wrapper around the trivial inner app."""
+    from starlette.testclient import TestClient
+
+    return TestClient(server._build_authenticated_sse_app(_trivial_inner_app(), token))
+
+
+def test_auth_wrapper_rejects_missing_authorization():
+    """No Authorization header -> 401, before the inner app is ever reached."""
+    assert _auth_client().get("/ping").status_code == 401
+
+
+def test_auth_wrapper_rejects_wrong_bearer():
+    """A mismatched bearer token -> 401 (constant-time comparison)."""
+    resp = _auth_client().get("/ping", headers={"Authorization": "Bearer wrong-token"})
+    assert resp.status_code == 401
+
+
+def test_auth_wrapper_rejects_non_loopback_host_even_with_the_token():
+    """The right token but a rebound Host header -> 403 (DNS-rebinding defence)."""
+    resp = _auth_client().get(
+        "/ping",
+        headers={"Authorization": "Bearer s3cret-token", "Host": "evil.example.com"},
+    )
+    assert resp.status_code == 403
+
+
+def test_auth_wrapper_allows_correct_bearer_and_loopback_host():
+    """Correct token + loopback Host reaches the inner app with a 200."""
+    resp = _auth_client().get(
+        "/ping",
+        headers={"Authorization": "Bearer s3cret-token", "Host": "127.0.0.1"},
+    )
+    assert resp.status_code == 200
+    assert resp.text == "INNER-OK"
+
+
+def test_build_authenticated_sse_app_refuses_an_empty_token():
+    """An empty credential would compare equal to a request that supplies none."""
+    with pytest.raises(ValueError, match="non-empty"):
+        server._build_authenticated_sse_app(_trivial_inner_app(), "")
+
+
+def test_http_token_creates_the_file_and_is_stable(tmp_path, monkeypatch):
+    """First call mints and persists a token; a second call returns the same value."""
+    token_file = tmp_path / "http-token"
+    monkeypatch.setattr(server, "_http_token_path", lambda: token_file)
+
+    assert not token_file.exists()
+    first = server._http_token()
+    assert first
+    assert token_file.exists()
+    assert token_file.read_text(encoding="utf-8").strip() == first
+
+    second = server._http_token()
+    assert second == first  # stable across calls: read, not re-minted
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file mode bits only")
+def test_http_token_file_is_owner_only(tmp_path, monkeypatch):
+    """The persisted token file is created 0600 (owner read/write only)."""
+    token_file = tmp_path / "http-token"
+    monkeypatch.setattr(server, "_http_token_path", lambda: token_file)
+    server._http_token()
+    assert (token_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_http_token_path_is_beside_connections_json_and_not_the_gui_token():
+    """The HTTP token is a separate secret in the config dir, not the GUI's gui-token."""
+    from db_conn_mcp.gui.app import token_path as gui_token_path
+
+    path = server._http_token_path()
+    assert path.name == "http-token"
+    assert path.parent == server.global_config_path().parent
+    assert path != gui_token_path()
+
+
+def test_stdio_transport_runs_without_building_the_auth_app(cfg_path, monkeypatch):
+    """stdio stays a plain local pipe: FastMCP.run("stdio"), and no token/auth app built."""
+    calls = {}
+
+    def fake_run(_self, transport):
+        calls["transport"] = transport
+
+    monkeypatch.setattr(server.GuardedFastMCP, "run", fake_run, raising=True)
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("stdio must not touch the HTTP auth path")
+
+    monkeypatch.setattr(server, "_build_authenticated_sse_app", forbidden)
+    monkeypatch.setattr(server, "_http_token", forbidden)
+    monkeypatch.setattr(server, "_run_http", forbidden)
+
+    server._run_fastmcp("stdio", str(cfg_path))
+    assert calls == {"transport": "stdio"}
+
+
+def test_http_transport_builds_the_auth_app_and_serves_over_loopback(cfg_path, monkeypatch):
+    """http builds the authenticated SSE app and serves it via uvicorn on 127.0.0.1."""
+    import uvicorn
+
+    monkeypatch.setattr(server, "_http_token", lambda: "fixed-http-token")
+
+    def no_fastmcp_run(_self, _transport):
+        raise AssertionError("http must not call FastMCP.run (that path is unauthenticated)")
+
+    monkeypatch.setattr(server.GuardedFastMCP, "run", no_fastmcp_run, raising=True)
+
+    built = {}
+    real_build = server._build_authenticated_sse_app
+
+    def spy_build(app, token):
+        built["token"] = token
+        return real_build(app, token)
+
+    monkeypatch.setattr(server, "_build_authenticated_sse_app", spy_build)
+
+    served = {}
+
+    def fake_uvicorn_run(app, host, port, log_level="warning"):
+        served.update(app=app, host=host, port=port, log_level=log_level)
+
+    monkeypatch.setattr(uvicorn, "run", fake_uvicorn_run)
+
+    server._run_fastmcp("http", str(cfg_path))
+
+    assert built["token"] == "fixed-http-token"
+    assert served["host"] == "127.0.0.1"
+    assert served["app"] is not None

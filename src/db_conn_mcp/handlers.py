@@ -15,6 +15,7 @@ import json
 import re
 import time
 import uuid
+import weakref
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -148,10 +149,34 @@ class Handlers:
         #: Fallback-port memory: connection name -> port that answered (issue #10).
         self._active_ports: dict[str, int] = {}
         #: Dry-run grants: statement fingerprint -> monotonic time it was previewed.
+        #: The fingerprint folds in a per-session token so a grant made in one MCP
+        #: session cannot authorize a commit in another (issue #41).
         self._dry_run_grants: dict[str, float] = {}
+        #: Per-session identity: live session OBJECT -> stable uuid. Keyed weakly so an
+        #: entry vanishes when the session is garbage-collected — this both avoids
+        #: unbounded growth and sidesteps the id() reuse hazard of an address-keyed map.
+        self._session_ns: weakref.WeakKeyDictionary[object, str] = weakref.WeakKeyDictionary()
 
     def _load(self) -> config.Config:
         return config.load(str(self.config_path))
+
+    def _session_token(self, session: object | None) -> str:
+        """Return a stable token identifying one MCP session.
+
+        Under stdio (and direct/unit calls) there is exactly one session per process,
+        which arrives here as ``None`` and maps to the fixed ``"local"`` token — so
+        behavior is unchanged there. Under ``--transport http`` every connected client
+        has its own session object; each is assigned a fresh uuid on first sight and
+        remembered (weakly) for as long as that session lives, so grants are scoped to
+        the exact session that created them.
+        """
+        if session is None:
+            return "local"
+        token = self._session_ns.get(session)
+        if token is None:
+            token = uuid.uuid4().hex
+            self._session_ns[session] = token
+        return token
 
     def _dsn_candidates(self, conn: Any) -> list[tuple[int | None, str]]:
         """Return ``(port, dsn)`` pairs in probe order; ``None`` port = primary DSN.
@@ -445,9 +470,13 @@ class Handlers:
             await db.close()
 
     @staticmethod
-    def _grant_key(database: str, sql: str, params: list[Any] | None) -> str:
-        """Fingerprint one exact statement; any change to sql/params misses the grant."""
-        payload = json.dumps([database, sql, params], default=str)
+    def _grant_key(session_token: str, database: str, sql: str, params: list[Any] | None) -> str:
+        """Fingerprint one exact statement in one session.
+
+        Any change to the session token, sql, or params misses the grant — so a preview
+        recorded by one MCP session cannot satisfy a commit from another (issue #41).
+        """
+        payload = json.dumps([session_token, database, sql, params], default=str)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _sweep_grants(self) -> None:
@@ -467,21 +496,27 @@ class Handlers:
         dry_run: bool = True,
         skip_dry_run: bool = False,
         timeout_ms: int | None = None,
+        session: object | None = None,
     ) -> dict:
         """Run a mutation, gated by ``safety`` (mode → dry-run-first → yolo → consent).
 
         ``dry_run=True`` (the default) executes inside a transaction that is always
         ROLLED BACK and records a grant for this exact statement. A commit
         (``dry_run=False``) requires an unexpired grant for the identical
-        (database, sql, params); the commit ATTEMPT consumes it, whether it
+        (session, database, sql, params); the commit ATTEMPT consumes it, whether it
         succeeds or raises, so a failed commit needs a fresh preview before it may
         be retried. ``skip_dry_run=True`` attests the user explicitly asked to skip
         the preview. Neither yolo nor consent can bypass the preview stage; nothing
         can bypass ``mode``.
+
+        ``session`` identifies the calling MCP session so a grant is scoped to it: under
+        ``--transport http`` one shared Handlers instance serves every client, and an
+        unscoped grant let one session's preview authorize another session's commit
+        (issue #41). ``None`` (stdio/direct calls) is the single ``"local"`` session.
         """
         conn = config.get(self._load(), database)
         self._sweep_grants()
-        key = self._grant_key(database, sql, params)
+        key = self._grant_key(self._session_token(session), database, sql, params)
         if dry_run:
             safety.authorize_dry_run(conn)  # mode gate only — nothing commits
         else:
