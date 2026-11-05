@@ -538,6 +538,13 @@ async def test_execute_duplicate_column_names_keep_the_last_value():
     assert result == {"columns": ["a", "a"], "rows": [{"a": 2}]}
 
 
+async def test_execute_fails_when_a_row_has_more_columns_than_its_description():
+    # Pairing would otherwise stop at the shorter side and drop a column without a word.
+    conn = FakeConn([[{"a": 1, "b": 2}]], attributes=["a"])
+    with pytest.raises(ValueError, match="zip"):
+        await PostgresDialect().execute(conn, "SELECT a, b FROM f")
+
+
 async def test_execute_empty_select_reports_columns():
     # The row description names the columns even when no row comes back.
     conn = FakeConn([[]], attributes=["id", "name"], status="SELECT 0")
