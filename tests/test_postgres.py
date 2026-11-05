@@ -384,6 +384,14 @@ async def test_execute_write_returns_rows_affected():
     assert result == {"rows_affected": 3}
 
 
+async def test_execute_nested_comment_write_reports_rows_affected():
+    conn = FakeConn()
+    sql = "/* /* */ SELECT 1 */ UPDATE accounts SET balance = 0"
+    result = await PostgresDialect().execute(conn, sql)
+    assert result == {"rows_affected": 3}
+    assert conn.fetched == []
+
+
 # ---- multi-statement rejection (issue #40: dry-run bypass via embedded ;) ------
 
 
@@ -422,6 +430,21 @@ def test_reject_multiple_statements_allows_single():
     _reject_multiple_statements("SELECT $tag$a;b$tag$")  # tagged dollar-quote
     _reject_multiple_statements("/* a /* b */ c */ SELECT 1")  # nested block comment
     _reject_multiple_statements("SELECT 1 -- a; b\n")  # line comment with ;
+    _reject_multiple_statements("SELECT '-- a\r; b'")  # \r inside a string literal
+    _reject_multiple_statements("/* -- a\r; */ SELECT 1")  # \r inside a block comment
+
+
+def test_reject_multiple_statements_ends_line_comment_at_carriage_return():
+    # Postgres ends a -- comment at \r, so the ; COMMIT after it is live SQL.
+    with pytest.raises(ValueError):
+        _reject_multiple_statements("UPDATE u SET a = 2 -- x\r; COMMIT; SELECT 1")
+    with pytest.raises(ValueError):
+        _reject_multiple_statements("UPDATE u SET a = 2 --\r; COMMIT; SELECT 1")
+
+
+def test_reject_multiple_statements_ends_line_comment_at_newline():
+    with pytest.raises(ValueError):
+        _reject_multiple_statements("UPDATE u SET a = 2 -- x\n; COMMIT; SELECT 1")
 
 
 def test_reject_multiple_statements_ignores_empty_trailing():
@@ -437,6 +460,16 @@ async def test_execute_rejects_multi_statement_before_touching_db():
         await PostgresDialect().execute(conn, "DELETE FROM users; COMMIT;")
     assert conn.executed == []  # conn.execute never reached
     assert conn.fetched == []  # conn.fetch never reached
+
+
+async def test_execute_dry_run_rejects_carriage_return_comment_before_commit():
+    # If this SQL reached a server it would commit while reporting rolled_back: true.
+    conn = FakeConn()
+    with pytest.raises(ValueError):
+        await PostgresDialect().execute_dry_run(conn, "UPDATE u SET a = 2 -- x\r; COMMIT; SELECT 1")
+    assert conn.executed == []
+    assert conn.fetched == []
+    assert conn.transactions == []  # rejected before BEGIN reaches the server
 
 
 # ---- params, timeouts, dry-run (issue #8 primitives) --------------------------
@@ -814,6 +847,13 @@ async def test_show_activity_keeps_query_when_opted_in():
         ("", ""),
         ("   ", ""),
         ("-- only a comment", ""),
+        ("/* /* */ SELECT 1 */ UPDATE t SET a=0", "update"),
+        ("/* a /* b */ c */ -- d\nSELECT 1", "select"),
+        ("/* /* */ SELECT 1", ""),
+        ("/*/ SELECT 1 */ UPDATE t SET a=0", "update"),
+        ("-- x\rUPDATE u SET a=3 /*\nSELECT 1 */", "update"),
+        ("--\rUPDATE t SET a=0", "update"),
+        ("-- a\n-- b\nSELECT 1", "select"),
     ],
 )
 def test_leading_keyword(sql, expected):
@@ -855,6 +895,8 @@ def test_validate_read_only_accepts_read_statements(sql):
         # outright by the allowlist — the trailing write never gets a chance to run.
         "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE; DELETE FROM users",
         "set session characteristics as transaction read write; drop table t",
+        "/* /* */ SELECT 1 */ UPDATE accounts SET balance = 0",
+        "-- x\rUPDATE u SET a=3 /*\nSELECT 1 */",
     ],
 )
 def test_validate_read_only_rejects_non_read_statements(sql):

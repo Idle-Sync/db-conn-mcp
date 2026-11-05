@@ -713,18 +713,31 @@ class _PostgresCursor:
 def _leading_keyword(sql: str) -> str:
     """Return the first SQL keyword, lowercased, ignoring leading whitespace/comments.
 
-    Leading ``--`` line comments and ``/* */`` block comments are skipped so a query
-    like ``-- note\\nSELECT 1`` still reports ``select``. Returns ``""`` for blank or
-    comment-only input. Used both to shape results and to gate the read tool.
+    Leading ``--`` line comments (which end at ``\\r`` or ``\\n``) and ``/* */`` block
+    comments (which nest), both as in Postgres, are skipped so a query like
+    ``-- note\\nSELECT 1`` still reports ``select``. Returns ``""`` for blank, comment-only
+    or unterminated-comment input. Used both to shape results and to gate the read tool.
     """
     s = sql.lstrip()
     while s:
         if s.startswith("--"):
-            newline = s.find("\n")
-            s = "" if newline == -1 else s[newline + 1 :].lstrip()
+            i = 2
+            while i < len(s) and s[i] not in "\r\n":
+                i += 1
+            s = s[i:].lstrip()
         elif s.startswith("/*"):
-            end = s.find("*/")
-            s = "" if end == -1 else s[end + 2 :].lstrip()
+            depth = 1
+            i = 2
+            while i < len(s) and depth:
+                if s.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif s.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            s = "" if depth else s[i:].lstrip()
         else:
             break
     return s.split(None, 1)[0].lower() if s else ""
@@ -749,10 +762,10 @@ def _reject_multiple_statements(sql: str) -> None:
     This is a small single-pass character scanner, not an AST parser (project Rule 1). It
     skips semicolons that live inside single-quoted literals (with ``''`` escapes),
     ``E'...'`` escape strings (backslash escapes), double-quoted identifiers, dollar-quoted
-    bodies (``$tag$ ... $tag$``, empty tag ``$$`` included), line comments (``-- ...``) and
-    nested block comments (``/* ... */``). A single trailing semicolon, optionally followed
-    by whitespace or comments, is one statement and is allowed; two or more non-empty
-    statements are rejected.
+    bodies (``$tag$ ... $tag$``, empty tag ``$$`` included), line comments (``-- ...``,
+    ending at ``\\r`` or ``\\n`` as in Postgres) and nested block comments (``/* ... */``).
+    A single trailing semicolon, optionally followed by whitespace or comments, is one
+    statement and is allowed; two or more non-empty statements are rejected.
 
     The message names no SQL content (Rule 6): it states only the constraint.
     """
@@ -763,8 +776,9 @@ def _reject_multiple_statements(sql: str) -> None:
     while i < n:
         ch = sql[i]
         if ch == "-" and sql.startswith("--", i):  # line comment
-            newline = sql.find("\n", i)
-            i = n if newline == -1 else newline + 1
+            i += 2
+            while i < n and sql[i] not in "\r\n":
+                i += 1
             continue
         if ch == "/" and sql.startswith("/*", i):  # nested block comment
             depth = 1
@@ -1002,6 +1016,7 @@ class PostgresDialect(Dialect):
         params: list[Any] | None = None,
         timeout_ms: int | None = None,
     ) -> dict:
+        _reject_multiple_statements(sql)  # no BEGIN reaches the server for rejected SQL
         tx = conn.transaction()
         await tx.start()
         try:
