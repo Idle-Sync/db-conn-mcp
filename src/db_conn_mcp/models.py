@@ -8,7 +8,7 @@ tool (Rule 6); use :meth:`Connection.public_view` for anything agent-facing.
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 #: A connection's allowed access level. ``read`` is an absolute, native boundary.
 Mode = Literal["read", "write"]
@@ -16,6 +16,8 @@ Mode = Literal["read", "write"]
 
 class Connection(BaseModel):
     """One database connection as declared in ``connections.json``."""
+
+    model_config = ConfigDict(extra="allow")  # a key we don't know is the user's; save keeps it
 
     name: str
     dsn: str  # secret — never logged, never returned by a tool
@@ -42,5 +44,7 @@ class Connection(BaseModel):
 
 class Config(BaseModel):
     """The whole ``connections.json`` document: ``{"connections": [...]}``."""
+
+    model_config = ConfigDict(extra="allow")  # see Connection
 
     connections: list[Connection] = Field(default_factory=list)

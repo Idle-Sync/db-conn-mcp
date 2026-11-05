@@ -124,6 +124,17 @@ scanning), each **fallback** probe is capped at 5 seconds, and a connection with
 exactly as it always has. Existing `connections.json` files keep working untouched —
 the server never adds the key to a file that doesn't have it.
 
+Every write replaces the file in one step, so a failed write leaves it as it was:
+
+- **File mode** — a `connections.json` this tool creates is user-only (`0600`). A file
+  that already exists keeps its mode.
+- **Unknown keys** — a key the tool does not know, on a connection or at the top level, has
+  no effect and is kept when the file is saved. `db-conn-mcp doctor` warns about it, since
+  it may be a typo.
+- **Lock file** — a `connections.json.lock` file sits beside the real file (beside the target
+  when `connections.json` is a symlink), so two processes changing the file at once cannot lose
+  each other's update. It holds no data and stays there after the write.
+
 > `connections.json` is git-ignored by this project's `.gitignore` — never commit real DSNs.
 
 ---

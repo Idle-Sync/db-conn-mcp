@@ -217,7 +217,7 @@ _CONNECTION_KEYS = set(Connection.model_fields)
 
 
 def check_config_schema(ctx: CheckContext) -> list[Finding]:
-    """Use case 4: silently-ignored keys, typos, and wrong value types.
+    """Use case 4: unknown keys, typos, and wrong value types.
 
     Values are NEVER echoed (a value could be a DSN) — only key names, pydantic's
     value-free messages, and did-you-mean hints for near-miss key names.
@@ -255,7 +255,7 @@ def check_config_schema(ctx: CheckContext) -> list[Finding]:
     findings: list[Finding] = []
 
     def _flag_unknown(keys: dict[str, object], known: set[str], where: str) -> None:
-        """Warn about every key in ``keys`` that pydantic would silently ignore."""
+        """Warn about every key in ``keys`` that the models do not declare."""
         for key in keys:
             if key in known:
                 continue
@@ -263,7 +263,7 @@ def check_config_schema(ctx: CheckContext) -> list[Finding]:
             hint = f" — did you mean {close[0]!r}?" if close else ""
             detail = f"unrecognized key {key!r} in {where}{hint}"
             findings.append(
-                finding(name, "warn", f"{detail} (unknown keys are silently ignored)", "fix_config")
+                finding(name, "warn", f"{detail} (unknown keys have no effect)", "fix_config")
             )
 
     if isinstance(raw, dict):
