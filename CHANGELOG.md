@@ -19,6 +19,15 @@ the time of that release.
   gate and the single-statement check, so such a comment can no longer hide a write from the
   read tool or let `; COMMIT` escape a dry run.
 
+### Breaking / Behaviour changes
+
+- **`execute_write_query` now returns `{columns, rows}` for statements with `RETURNING`.** Your
+  `INSERT`, `UPDATE` or `DELETE ... RETURNING` call, dry-run and commit alike, returned
+  `{rows_affected}` before; read `rows` instead. `RETURNING` values from a dry-run are rolled
+  back and are not the values the commit will produce (sequences advance, so generated ids
+  differ), so never quote a preview id as the real one. Empty `SELECT` results now list their
+  columns, where `columns` was `[]`.
+
 ## [0.7.1] — 2026-08-13
 
 A security-hardening pass on the write-safety gate and the HTTP transport, from a full-repo

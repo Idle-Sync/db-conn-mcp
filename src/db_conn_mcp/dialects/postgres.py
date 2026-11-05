@@ -34,12 +34,10 @@ PROBE_TIMEOUT_SECONDS = 3.0
 #: The 8-byte PostgreSQL SSLRequest: length=8, code=80877103 (magic constant).
 _SSL_REQUEST = (8).to_bytes(4, "big") + (80877103).to_bytes(4, "big")
 
-# Leading keywords that begin a read-only, row-returning statement. This single set
-# does double duty: execute() uses it to shape the result ({columns, rows}), and the
-# read tool uses it as an allowlist (validate_read_only). The overlap is the point —
-# because every permitted read leader is row-returning, the statement runs through
-# asyncpg's extended (prepared-statement) protocol via fetch(), which refuses to run
-# more than one command. So banning non-read leaders also bans a trailing "; DELETE".
+# Leading keywords the read tool allows (validate_read_only); every other leader, so
+# every DML/DDL command and SET, is banned. A trailing "; DELETE" cannot slip past this
+# one-keyword check: every statement runs as one prepared statement over asyncpg's
+# extended protocol, which refuses stacked commands.
 _READ_ONLY_LEADERS = frozenset({"select", "with", "values", "table", "show", "explain"})
 
 #: Tables and views. Split so :func:`_build_list_tables_sql` can add a name filter
@@ -991,20 +989,23 @@ class PostgresDialect(Dialect):
         params: list[Any] | None = None,
         timeout_ms: int | None = None,
     ) -> dict:
-        # Defense-in-depth (issue #40): reject stacked statements up front, before either
-        # dispatch branch, so an embedded ``COMMIT`` can never escape the dry-run
-        # transaction regardless of the row-returning heuristic.
+        # Defense-in-depth (issue #40): reject stacked statements before the driver sees
+        # them, so an embedded ``COMMIT`` can never escape the dry-run transaction.
         _reject_multiple_statements(sql)
         args = list(params or [])
         timeout = _timeout_seconds(timeout_ms)
         try:
-            if self._is_row_returning(sql):
-                rows = await conn.fetch(sql, *args, timeout=timeout)
-                mapped = [dict(r) for r in rows]
-                columns = list(mapped[0].keys()) if mapped else []
-                return {"columns": columns, "rows": mapped}
-            status = await conn.execute(sql, *args, timeout=timeout)
-            return {"rows_affected": _parse_affected(status)}
+            statement = await conn.prepare(sql, timeout=timeout)
+            rows = await statement.fetch(*args, timeout=timeout)
+            # The server's row description decides the shape, not the SQL text: it covers
+            # RETURNING on a write and names the columns of a result with no rows.
+            attributes = statement.get_attributes()
+            if attributes:
+                return {
+                    "columns": [attribute.name for attribute in attributes],
+                    "rows": [dict(r) for r in rows],
+                }
+            return {"rows_affected": _parse_affected(statement.get_statusmsg())}
         except TimeoutError:
             # Sanitized: the query was cancelled server-side by the driver.
             raise ValueError(f"Query exceeded timeout_ms={timeout_ms} and was cancelled.") from None
@@ -1122,9 +1123,9 @@ class PostgresDialect(Dialect):
 
         The bar is a single read-only, row-returning statement. Requiring a leader in
         :data:`_READ_ONLY_LEADERS` bans ``SET`` (so the session can't be flipped out of
-        ``READ ONLY``) and every DML/DDL command; and since those leaders all route to
-        ``fetch()`` — asyncpg's extended protocol, which runs exactly one command — a
-        piggy-backed ``; DELETE ...`` is refused too. No SQL parsing, by design.
+        ``READ ONLY``) and every DML/DDL command; and since every statement runs as one
+        prepared statement over asyncpg's extended protocol, which refuses stacked
+        commands, a piggy-backed ``; DELETE ...`` is refused too. No SQL parsing, by design.
         """
         leader = _leading_keyword(sql)
         if not leader:
@@ -1204,13 +1205,8 @@ class PostgresDialect(Dialect):
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
 
-    @staticmethod
-    def _is_row_returning(sql: str) -> bool:
-        """Heuristic: does this statement return a result set?"""
-        return _leading_keyword(sql) in _READ_ONLY_LEADERS
 
-
-def _parse_affected(status: str) -> int:
+def _parse_affected(status: str | None) -> int:
     """Extract the affected-row count from an asyncpg command tag like ``UPDATE 3``."""
     try:
         return int(status.split()[-1])

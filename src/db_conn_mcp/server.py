@@ -337,8 +337,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         SAFETY — the server enforces this flow; you cannot skip it silently:
         1. Call with dry_run=true (the default): the statement executes inside a
-           transaction and is ALWAYS rolled back, returning the rows_affected it
-           WOULD have had. This records a preview grant for this exact statement.
+           transaction and is ALWAYS rolled back, returning its would-be
+           `rows_affected`, or the `RETURNING` rows. This records a preview grant for
+           this exact statement. `RETURNING` values from a dry-run are rolled back and
+           are not the values the commit will produce (sequences advance, so generated
+           ids differ): never quote a preview id as the real one.
         2. Show the user the exact SQL and the dry-run result; ask for permission
            (not needed if the database has yolo enabled).
         3. Call again with dry_run=false (and user_consent=true unless yolo) to

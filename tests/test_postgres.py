@@ -8,9 +8,11 @@ in postgres.py).
 """
 
 import asyncio
+from types import MappingProxyType
 
 import asyncpg
 import pytest
+from asyncpg.types import Attribute
 
 from db_conn_mcp.dialects import postgres as pg
 from db_conn_mcp.dialects.base import Dialect
@@ -55,10 +57,48 @@ class FakeAsyncpgCursor:
         return self._batches.pop(0) if self._batches else []
 
 
+class FakePreparedStatement:
+    """Serves rows like an asyncpg prepared statement and records how it was called.
+
+    ``attributes`` is the row description (column names), separate from the rows, so a
+    statement can describe columns while returning none. The command tag stays ``None``
+    until ``fetch`` has run, as in asyncpg.
+    """
+
+    def __init__(self, sql, rows, attributes, status, prepare_timeout):
+        self.sql = sql
+        self.prepare_timeout = prepare_timeout
+        self.fetch_args: list[tuple] = []
+        self.fetch_timeouts: list = []
+        self._rows = rows
+        self._attributes = tuple(Attribute(name=name, type=None) for name in attributes)
+        self._status = status
+        self._has_run = False
+
+    async def fetch(self, *args, timeout=None):
+        self.fetch_args.append(args)
+        self.fetch_timeouts.append(timeout)
+        self._has_run = True
+        return self._rows
+
+    def get_attributes(self):
+        return self._attributes
+
+    def get_statusmsg(self):
+        return self._status if self._has_run else None
+
+
 class FakeConn:
     """Records executed/fetched SQL (and args) and serves queued results in order."""
 
-    def __init__(self, fetch_results=None, fetchrow_results=None, cursor_batches=None):
+    def __init__(
+        self,
+        fetch_results=None,
+        fetchrow_results=None,
+        cursor_batches=None,
+        attributes=(),
+        status="UPDATE 3",
+    ):
         self.executed: list[str] = []
         self._fetch_queue = list(fetch_results or [])
         self._fetchrow_queue = list(fetchrow_results or [])
@@ -72,6 +112,15 @@ class FakeConn:
         self.cursor_batches = list(cursor_batches or [])
         self.cursor_calls: list[tuple] = []
         self.closed = False
+        self.prepared: list[FakePreparedStatement] = []
+        self._attributes = attributes
+        self._status = status
+
+    async def prepare(self, sql, *, timeout=None):
+        rows = self._fetch_queue.pop(0) if self._fetch_queue else []
+        statement = FakePreparedStatement(sql, rows, self._attributes, self._status, timeout)
+        self.prepared.append(statement)
+        return statement
 
     async def execute(self, sql, *args, timeout=None):
         self.executed.append(sql)
@@ -372,10 +421,25 @@ async def test_sample_rows_quotes_identifier_and_limits():
 
 
 async def test_execute_select_returns_columns_and_rows():
-    conn = FakeConn([[{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]])
+    conn = FakeConn([[{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]], attributes=["id", "name"])
     result = await PostgresDialect().execute(conn, "SELECT id, name FROM users")
     assert result["columns"] == ["id", "name"]
     assert result["rows"] == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
+
+
+async def test_execute_maps_rows_to_plain_dicts():
+    # A driver row is mapping-like but not a dict, and the tool result must serialize.
+    conn = FakeConn([[MappingProxyType({"id": 1})]], attributes=["id"])
+    result = await PostgresDialect().execute(conn, "SELECT id FROM users")
+    assert type(result["rows"][0]) is dict
+    assert result["rows"] == [{"id": 1}]
+
+
+async def test_execute_empty_select_reports_columns():
+    # The row description names the columns even when no row comes back.
+    conn = FakeConn([[]], attributes=["id", "name"], status="SELECT 0")
+    result = await PostgresDialect().execute(conn, "SELECT id, name FROM users")
+    assert result == {"columns": ["id", "name"], "rows": []}
 
 
 async def test_execute_write_returns_rows_affected():
@@ -384,12 +448,45 @@ async def test_execute_write_returns_rows_affected():
     assert result == {"rows_affected": 3}
 
 
+async def test_execute_insert_returning_returns_rows():
+    conn = FakeConn([[{"id": 7}]], attributes=["id"], status="INSERT 0 1")
+    sql = "INSERT INTO users (email) VALUES ($1) RETURNING id"
+    result = await PostgresDialect().execute(conn, sql, ["a"], timeout_ms=1500)
+    assert result == {"columns": ["id"], "rows": [{"id": 7}]}
+    statement = conn.prepared[0]
+    assert statement.sql == sql
+    assert statement.fetch_args == [("a",)]
+    assert statement.fetch_timeouts == [1.5]
+
+
+async def test_execute_update_returning_returns_rows():
+    conn = FakeConn([[{"id": 1, "x": 1}, {"id": 2, "x": 1}]], attributes=["id", "x"])
+    sql = "UPDATE users SET x = 1 RETURNING id, x"
+    result = await PostgresDialect().execute(conn, sql, timeout_ms=1500)
+    assert result == {"columns": ["id", "x"], "rows": [{"id": 1, "x": 1}, {"id": 2, "x": 1}]}
+    statement = conn.prepared[0]
+    assert statement.sql == sql
+    assert statement.fetch_args == [()]
+    assert statement.fetch_timeouts == [1.5]
+
+
+async def test_execute_delete_returning_returns_rows():
+    conn = FakeConn([[{"id": 9}]], attributes=["id"], status="DELETE 1")
+    sql = "DELETE FROM users WHERE id = $1 RETURNING id"
+    result = await PostgresDialect().execute(conn, sql, [9], timeout_ms=1500)
+    assert result == {"columns": ["id"], "rows": [{"id": 9}]}
+    statement = conn.prepared[0]
+    assert statement.sql == sql
+    assert statement.fetch_args == [(9,)]
+    assert statement.fetch_timeouts == [1.5]
+
+
 async def test_execute_nested_comment_write_reports_rows_affected():
     conn = FakeConn()
     sql = "/* /* */ SELECT 1 */ UPDATE accounts SET balance = 0"
     result = await PostgresDialect().execute(conn, sql)
     assert result == {"rows_affected": 3}
-    assert conn.fetched == []
+    assert conn.prepared[0].sql == sql
 
 
 # ---- multi-statement rejection (issue #40: dry-run bypass via embedded ;) ------
@@ -460,6 +557,7 @@ async def test_execute_rejects_multi_statement_before_touching_db():
         await PostgresDialect().execute(conn, "DELETE FROM users; COMMIT;")
     assert conn.executed == []  # conn.execute never reached
     assert conn.fetched == []  # conn.fetch never reached
+    assert conn.prepared == []  # conn.prepare never reached
 
 
 async def test_execute_dry_run_rejects_carriage_return_comment_before_commit():
@@ -469,6 +567,7 @@ async def test_execute_dry_run_rejects_carriage_return_comment_before_commit():
         await PostgresDialect().execute_dry_run(conn, "UPDATE u SET a = 2 -- x\r; COMMIT; SELECT 1")
     assert conn.executed == []
     assert conn.fetched == []
+    assert conn.prepared == []
     assert conn.transactions == []  # rejected before BEGIN reaches the server
 
 
@@ -476,21 +575,37 @@ async def test_execute_dry_run_rejects_carriage_return_comment_before_commit():
 
 
 async def test_execute_binds_params_via_driver():
-    conn = FakeConn([[{"id": 1}]])
-    await PostgresDialect().execute(conn, "SELECT * FROM users WHERE name = $1", ["O'Hara"])
-    assert conn.fetch_args[0] == ("O'Hara",)  # bound, never interpolated
+    conn = FakeConn([[{"id": 1}]], attributes=["id"])
+    sql = "SELECT * FROM users WHERE name = $1"
+    await PostgresDialect().execute(conn, sql, ["O'Hara"])
+    assert conn.prepared[0].sql == sql
+    assert conn.prepared[0].fetch_args == [("O'Hara",)]  # bound, never interpolated
 
 
 async def test_execute_passes_timeout_in_seconds():
-    conn = FakeConn([[{"id": 1}]])
+    conn = FakeConn([[{"id": 1}]], attributes=["id"])
     await PostgresDialect().execute(conn, "SELECT 1", timeout_ms=1500)
-    assert conn.fetch_timeouts[0] == 1.5
+    assert conn.prepared[0].prepare_timeout == 1.5
+    assert conn.prepared[0].fetch_timeouts == [1.5]
 
 
 async def test_execute_timeout_raises_sanitized_valueerror():
     class TimingOutConn(FakeConn):
-        async def fetch(self, sql, *args, timeout=None):
+        async def prepare(self, sql, *, timeout=None):
             raise TimeoutError
+
+    with pytest.raises(ValueError, match="timeout_ms=100"):
+        await PostgresDialect().execute(TimingOutConn(), "SELECT 1", timeout_ms=100)
+
+
+async def test_execute_timeout_during_fetch_raises_sanitized_valueerror():
+    class TimingOutStatement(FakePreparedStatement):
+        async def fetch(self, *args, timeout=None):
+            raise TimeoutError
+
+    class TimingOutConn(FakeConn):
+        async def prepare(self, sql, *, timeout=None):
+            return TimingOutStatement(sql, [], [], "", timeout)
 
     with pytest.raises(ValueError, match="timeout_ms=100"):
         await PostgresDialect().execute(TimingOutConn(), "SELECT 1", timeout_ms=100)
@@ -513,9 +628,18 @@ async def test_execute_dry_run_rolls_back_and_reports():
     assert tx.started and tx.rolled_back
 
 
+async def test_execute_dry_run_of_returning_reports_rows_and_rolls_back():
+    conn = FakeConn([[{"id": 7}]], attributes=["id"], status="INSERT 0 1")
+    sql = "INSERT INTO users (email) VALUES ($1) RETURNING id"
+    result = await PostgresDialect().execute_dry_run(conn, sql, ["a"])
+    assert result == {"columns": ["id"], "rows": [{"id": 7}], "dry_run": True, "rolled_back": True}
+    tx = conn.transactions[0]
+    assert tx.started and tx.rolled_back
+
+
 async def test_execute_dry_run_rolls_back_even_on_error():
     class FailingConn(FakeConn):
-        async def execute(self, sql, *args, timeout=None):
+        async def prepare(self, sql, *, timeout=None):
             raise asyncpg.PostgresSyntaxError("bad sql")
 
     conn = FailingConn()

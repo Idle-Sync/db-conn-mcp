@@ -98,6 +98,10 @@ class Dialect(ABC):
     ) -> dict:
         """Run raw SQL; return ``{columns, rows}`` or ``{rows_affected}``.
 
+        ``{columns, rows}`` when the statement describes a result set, which includes a
+        write with ``RETURNING`` and a query that matches no rows; otherwise
+        ``{rows_affected}``. The database decides, not the SQL text.
+
         ``params`` are bound via the driver's native parameterization (Postgres:
         ``$1``/``$2`` placeholders) — never interpolated into the SQL text. A
         ``timeout_ms`` cancels the statement and raises a sanitized ``ValueError``

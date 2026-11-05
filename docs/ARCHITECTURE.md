@@ -248,7 +248,7 @@ sequenceDiagram
     Note over Agent,DB: 2. Dry-run (the default) — executes, ALWAYS rolls back
     Agent->>Server: execute_write_query(db="dev", sql="UPDATE users SET …")
     Server->>PG: connect(read_only=false) → execute in tx → ROLLBACK
-    PG-->>Agent: rows_affected it WOULD have had (grant recorded)
+    PG-->>Agent: would-be rows_affected, or the RETURNING rows (grant recorded)
 
     Agent->>User: "I will run:  UPDATE users SET … (affects 3 rows). Proceed?"
     User-->>Agent: "yes"
@@ -256,18 +256,18 @@ sequenceDiagram
     Note over Agent,DB: 3. Re-call to commit — grant + consent
     Agent->>Server: execute_write_query(db="dev", sql="UPDATE users SET …", dry_run=false, user_consent=true)
     Server->>PG: connect(read_only=false) → execute(sql)
-    DB-->>Agent: rows affected (grant consumed by the attempt)
+    DB-->>Agent: rows affected, or the RETURNING rows (grant consumed by the attempt)
 ```
 
 Skipping step 2 is not a matter of etiquette: a commit with no matching unexpired grant is **rejected by the server** unless `skip_dry_run=true` attests the user explicitly asked to skip the preview.
 
 `mode` is the **hard boundary** (native, unbypassable). Everything after it — the dry-run stage, `yolo`, `user_consent` — only decides *how much ceremony* a write needs on a DB that is *already* `write`; none of them, nor `skip_dry_run`, can ever make a `read` DB writable. And the two relaxations are scoped: `yolo` waives only the consent prompt (never the preview), `skip_dry_run` waives only the preview (never consent).
 
-**Dry-run writes** (`dry_run=true`, the default): the statement executes inside a transaction that is **always rolled back**, returning the `rows_affected` it *would* have had, and records a grant keyed on the exact `(session, database, sql, params)`. Because nothing commits, only the `mode` gate applies — no yolo or consent needed — which is exactly what lets the agent show the user the real impact *before* asking for consent to the real write. The grant expires after 10 minutes and is **consumed by the commit attempt** it authorizes — success *or* exception, because an ambiguous failure (statement timeout, connection dropped during COMMIT) may still have applied the write, and a blind retry on a live grant would double-apply it. Running the same statement twice means previewing it twice. Caveat (documented on the tool): a dry-run still executes server-side until the rollback, so it briefly takes locks, advances sequences, and fires triggers.
+**Dry-run writes** (`dry_run=true`, the default): the statement executes inside a transaction that is **always rolled back**, returning its would-be `rows_affected`, or the `RETURNING` rows, and records a grant keyed on the exact `(session, database, sql, params)`. Because nothing commits, only the `mode` gate applies — no yolo or consent needed — which is exactly what lets the agent show the user the real impact *before* asking for consent to the real write. The grant expires after 10 minutes and is **consumed by the commit attempt** it authorizes — success *or* exception, because an ambiguous failure (statement timeout, connection dropped during COMMIT) may still have applied the write, and a blind retry on a live grant would double-apply it. Running the same statement twice means previewing it twice. Caveat (documented on the tool): a dry-run still executes server-side until the rollback, so it briefly takes locks, advances sequences, and fires triggers; `RETURNING` values from a preview are therefore not the values the commit will produce (generated ids differ).
 
 The grant is **scoped to the originating MCP session**, not just the statement text: under the `http` transport one server process serves many clients, so a grant made by one client is invisible to the others (keyed by the live session object via a `WeakKeyDictionary`). Under `stdio` there is one session per process, so this changes nothing. The grant key alone is never a capability another connection can forge by resending identical SQL.
 
-**Single-statement enforcement.** The write path rejects SQL that contains more than one top-level statement *before* it runs, closing a bypass where a stacked `…; COMMIT;` rode the driver's simple-query protocol and committed the change the dry-run's own transaction was meant to roll back. The check is a small character scanner (Rule 1 — not an AST parser) that ignores `;` inside string literals, dollar-quoted bodies, and comments; only real statement boundaries are counted.
+**Single-statement enforcement.** The write path rejects SQL that contains more than one top-level statement *before* it runs, closing a bypass where a stacked `…; COMMIT;` rode the driver's simple-query protocol and committed the change the dry-run's own transaction was meant to roll back. The check is a small character scanner (Rule 1 — not an AST parser) that ignores `;` inside string literals, dollar-quoted bodies, and comments; only real statement boundaries are counted. What passes runs as one prepared statement over the driver's extended protocol, which refuses stacked commands, and the server's row description decides whether the result is `{columns, rows}` or `{rows_affected}`.
 
 ---
 
