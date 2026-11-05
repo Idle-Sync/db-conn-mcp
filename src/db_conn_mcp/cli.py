@@ -260,7 +260,7 @@ def _inject_into_client(spec: ClientSpec, command: str, args: list[str]) -> None
         write_config(spec, updated)
     except ClientConfigError as exc:
         print(f"  Skipped {spec.label}: {exc}")
-        print("    Fix that file by hand, then re-run `db-conn-mcp clients`.")
+        print("    Fix the problem above by hand, then re-run `db-conn-mcp clients`.")
         return
     print(f"  Updated {spec.label} config.")
 
@@ -574,6 +574,15 @@ def cmd_doctor(config_arg: str | None = None, offline: bool = False) -> int:
     return 0
 
 
+def _report_if_unknown(cfg: Config, name: str) -> bool:
+    """Print the refusal and return True when no connection in ``cfg`` has ``name``."""
+    if any(c.name == name for c in cfg.connections):
+        return False
+    available = ", ".join(c.name for c in cfg.connections) or "(none)"
+    print(f"No connection named {name!r}. Available: {available}.")
+    return True
+
+
 def cmd_remove(config_arg: str | None, name: str) -> int:
     """Remove a database connection by name."""
     path = _existing_config(config_arg)
@@ -581,16 +590,21 @@ def cmd_remove(config_arg: str | None, name: str) -> int:
         print("No configuration found.")
         return 1
     try:
+        # A mistyped name is refused here: the lock would create a file for nothing, and
+        # cannot be taken at all in a read-only folder.
+        if _report_if_unknown(config.load(str(path)), name):
+            return 1
         with config.locked(path):
             cfg = config.load(str(path))
-            if not any(c.name == name for c in cfg.connections):
-                available = ", ".join(c.name for c in cfg.connections) or "(none)"
-                print(f"No connection named {name!r}. Available: {available}.")
+            if _report_if_unknown(cfg, name):
                 return 1
             cfg.connections = [c for c in cfg.connections if c.name != name]
             config.save(cfg, path)
     except config.ConfigError as exc:
         print(exc)
+        return 1
+    except OSError as exc:
+        print(f"Could not update {path} ({type(exc).__name__}); the file is unchanged.")
         return 1
     print(f"Removed {name!r} from {path}.")
     return 0

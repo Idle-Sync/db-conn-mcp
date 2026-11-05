@@ -137,6 +137,16 @@ def test_get_unknown_lists_available():
         config.get(cfg, "missing")
 
 
+def test_non_utf8_file_is_a_config_error_with_no_file_contents(tmp_path):
+    """The decode error carries the file's bytes, so it must not stay as the cause."""
+    path = tmp_path / "connections.json"
+    path.write_bytes('{"connections": [{"dsn": "postgresql://u:SEKRET@h/d"}]}'.encode("utf-16"))
+    with pytest.raises(ConfigError, match="is not valid JSON") as caught:
+        config.load(str(path))
+    assert caught.value.__suppress_context__
+    assert "SEKRET" not in str(caught.value)
+
+
 # ---- save + set_yolo ---------------------------------------------------------
 
 
@@ -294,6 +304,27 @@ def test_unknown_keys_survive_set_yolo(tmp_path):
     assert conn["flag"] is None and "flag" in conn
     assert conn["yolo"] is True
     assert "fallback_ports" not in conn
+
+
+def test_saved_layout_with_unknown_keys_is_pinned(tmp_path):
+    """Non-null unknown top-level keys stay ahead of ``connections``; null ones follow."""
+    path = _write(tmp_path / "connections.json", WITH_UNKNOWN_KEYS)
+    config.set_yolo(path, "a", True)
+    document = {
+        "notes": "y",
+        "connections": [
+            {
+                "name": "a",
+                "dsn": "postgresql://u:p@h/d",
+                "mode": "write",
+                "yolo": True,
+                "comment": "x",
+                "flag": None,
+            }
+        ],
+        "owner": None,
+    }
+    assert path.read_text(encoding="utf-8") == json.dumps(document, indent=2) + "\n"
 
 
 def test_unknown_keys_survive_load_but_stay_out_of_public_view(tmp_path):

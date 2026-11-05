@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import httpx
@@ -964,6 +965,7 @@ def test_inject_write_fails_is_a_409_not_a_500(cfg_client, tmp_path, monkeypatch
     for verb in ("inject", "uninject"):
         r = client.post(f"/api/clients/fake/{verb}", headers=_hdr())
         assert r.status_code == 409
+        assert "could not be read or written" in r.json()["error"]
 
 
 def test_junk_key_is_dropped_on_add_but_stored_extras_survive_patch(cfg_client):
@@ -984,3 +986,146 @@ def test_junk_key_is_dropped_on_add_but_stored_extras_survive_patch(cfg_client):
     kept = json.loads(cfg.read_text(encoding="utf-8"))["connections"][0]
     assert kept["comment"] == "keep me"
     assert kept["mode"] == "write"
+
+
+# ---- a refused request stays off the disk; a stuck folder is a fixed error ----
+
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX folder permissions")
+
+
+def _client_for(cfg):
+    return TestClient(create_app(TOKEN, config_arg=str(cfg)), base_url=f"http://{HOST}")
+
+
+def _seed_one_connection(cfg):
+    cfg.write_text(
+        json.dumps({"connections": [{"name": "a", "dsn": SECRET_DSN, "mode": "read"}]}),
+        encoding="utf-8",
+    )
+
+
+def _send(client, verb, name):
+    """One write request per verb, so the verb decides which route and body are used."""
+    if verb == "POST":
+        return client.post(
+            "/api/databases",
+            json={"name": name, "dsn": OTHER_DSN, "mode": "read"},
+            headers=_hdr(),
+        )
+    if verb == "PATCH":
+        return client.patch(f"/api/databases/{name}", json={"mode": "write"}, headers=_hdr())
+    return client.delete(f"/api/databases/{name}", headers=_hdr())
+
+
+@pytest.mark.parametrize("verb", ["PATCH", "DELETE"])
+def test_refused_for_lack_of_a_config_creates_nothing(verb, tmp_path):
+    client = _client_for(tmp_path / "nested" / "deep" / "connections.json")
+    assert _send(client, verb, "a").status_code == 404
+    assert not (tmp_path / "nested").exists()
+
+
+@pytest.mark.parametrize(
+    ("verb", "name", "status"),
+    [("PATCH", "ghost", 404), ("DELETE", "ghost", 404), ("POST", "a", 409)],
+)
+def test_refused_on_an_existing_config_leaves_no_lock_file(verb, name, status, cfg_client):
+    client, cfg = cfg_client
+    _seed_one_connection(cfg)
+    assert _send(client, verb, name).status_code == status
+    assert not cfg.with_name("connections.json.lock").exists()
+
+
+def test_invalid_patch_leaves_no_lock_file(cfg_client):
+    client, cfg = cfg_client
+    _seed_one_connection(cfg)
+    r = client.patch("/api/databases/a", json={"mode": "banana"}, headers=_hdr())
+    assert r.status_code == 400
+    assert r.json()["fields"] == ["mode"]
+    assert not cfg.with_name("connections.json.lock").exists()
+
+
+@pytest.mark.parametrize("verb", ["POST", "PATCH", "DELETE"])
+def test_malformed_config_is_refused_with_no_lock_file(verb, cfg_client):
+    client, cfg = cfg_client
+    cfg.write_text('{"connections": [,]}', encoding="utf-8")
+    r = _send(client, verb, "a")
+    assert r.status_code == 409
+    assert r.json()["error"] == "no configuration found"
+    assert not cfg.with_name("connections.json.lock").exists()
+
+
+@pytest.mark.parametrize(
+    ("verb", "name", "status", "error"),
+    [
+        ("PATCH", "ghost", 404, "no such connection"),
+        ("DELETE", "ghost", 404, "no such connection"),
+        ("POST", "a", 409, "a connection with that name exists"),
+    ],
+)
+@posix_only
+def test_refusal_in_a_read_only_folder_keeps_its_own_answer(verb, name, status, error, tmp_path):
+    folder = tmp_path / "read_only"
+    folder.mkdir()
+    cfg = folder / "connections.json"
+    _seed_one_connection(cfg)
+    client = _client_for(cfg)
+    folder.chmod(0o555)
+    try:
+        r = _send(client, verb, name)
+    finally:
+        folder.chmod(0o755)
+    assert r.status_code == status
+    assert r.json()["error"] == error
+
+
+@posix_only
+@pytest.mark.parametrize("sidecar_exists", [False, True], ids=["lock_fails", "save_fails"])
+@pytest.mark.parametrize(("verb", "name"), [("POST", "b"), ("PATCH", "a"), ("DELETE", "a")])
+def test_save_in_a_read_only_folder_is_a_fixed_error(verb, name, sidecar_exists, tmp_path):
+    folder = tmp_path / "read_only"
+    folder.mkdir()
+    cfg = folder / "connections.json"
+    _seed_one_connection(cfg)
+    before = cfg.read_text(encoding="utf-8")
+    if sidecar_exists:
+        cfg.with_name("connections.json.lock").touch()
+    client = _client_for(cfg)
+    folder.chmod(0o555)
+    try:
+        r = _send(client, verb, name)
+    finally:
+        folder.chmod(0o755)
+    assert r.status_code == 409
+    assert r.json() == {"error": "the configuration could not be read or written"}
+    assert cfg.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    ("verb", "name", "other_writer_leaves", "status"),
+    [
+        ("PATCH", "a", [], 404),
+        ("DELETE", "a", [], 404),
+        ("POST", "b", [{"name": "b", "dsn": SECRET_DSN, "mode": "read"}], 409),
+    ],
+)
+def test_refusal_is_rechecked_under_the_lock(
+    verb, name, other_writer_leaves, status, cfg_client, monkeypatch
+):
+    """Another writer can change the file between the first check and the lock."""
+    import contextlib
+
+    from db_conn_mcp import config
+
+    client, cfg = cfg_client
+    _seed_one_connection(cfg)
+    real_locked = config.locked
+
+    @contextlib.contextmanager
+    def locked_after_another_writer(path):
+        cfg.write_text(json.dumps({"connections": other_writer_leaves}), encoding="utf-8")
+        with real_locked(path):
+            yield
+
+    monkeypatch.setattr(config, "locked", locked_after_another_writer)
+    assert _send(client, verb, name).status_code == status
+    assert json.loads(cfg.read_text(encoding="utf-8"))["connections"] == other_writer_leaves
