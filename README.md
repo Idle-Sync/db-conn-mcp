@@ -4,6 +4,8 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/Idle-Sync/db-conn-mcp?style=social)](https://github.com/Idle-Sync/db-conn-mcp/stargazers)
 
+[![db-conn-mcp MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/Idle-Sync/db-conn-mcp/badges/card.svg)](https://glama.ai/mcp/servers/Idle-Sync/db-conn-mcp)
+
 A dead-simple, self-hosted **Model Context Protocol (MCP) server for querying your databases** with AI agents (Claude, Cursor, Windsurf, VS Code, Zed, Codex, and more).
 
 It does one thing well: let an agent **safely explore and query** a database you point it at — with security delegated to the simplest possible primitives (a static JSON file and your database's own read-only transactions), not custom auth servers or fragile SQL parsing.
