@@ -1003,10 +1003,7 @@ class PostgresDialect(Dialect):
             if attributes:
                 return {
                     "columns": [attribute.name for attribute in attributes],
-                    "rows": [
-                        {column: _json_safe_value(value) for column, value in r.items()}
-                        for r in rows
-                    ],
+                    "rows": [_json_safe_row(r, attributes) for r in rows],
                 }
             return {"rows_affected": _parse_affected(statement.get_statusmsg())}
         except TimeoutError:
@@ -1229,6 +1226,37 @@ async def _fetch_statement_rows(
             "a read before running it again; a dry run was rolled back. To see the rows, cast "
             "that value to text."
         ) from None
+
+
+#: ``"char"`` and ``"char"[]``: asyncpg decodes them with its bytea codec, but they hold text.
+_CHAR_TYPE_OIDS = frozenset({18, 1002})
+
+
+def _json_safe_row(row: Any, attributes: tuple) -> dict:
+    """Map a row to a dict, rendering each value by its column's type.
+
+    Attributes pair with ``row.items()`` by position: a repeated name can hold two types,
+    and it keeps its last value, as the tool docstrings state.
+    """
+    safe_row = {}
+    for attribute, (column, value) in zip(attributes, row.items(), strict=True):
+        if attribute.type.oid in _CHAR_TYPE_OIDS:
+            safe_row[column] = _char_value_as_text(value)
+        else:
+            safe_row[column] = _json_safe_value(value)
+    return safe_row
+
+
+def _char_value_as_text(value: Any) -> Any:
+    """Render a ``"char"`` value as its character, or as hex when it is not valid UTF-8."""
+    if isinstance(value, list):
+        return [_char_value_as_text(item) for item in value]
+    if not isinstance(value, bytes):
+        return value
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError:
+        return _json_safe_value(value)
 
 
 def _json_safe_value(value: Any) -> Any:
