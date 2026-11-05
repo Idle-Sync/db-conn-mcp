@@ -384,6 +384,14 @@ async def test_execute_write_returns_rows_affected():
     assert result == {"rows_affected": 3}
 
 
+async def test_execute_nested_comment_write_reports_rows_affected():
+    conn = FakeConn()
+    sql = "/* /* */ SELECT 1 */ UPDATE accounts SET balance = 0"
+    result = await PostgresDialect().execute(conn, sql)
+    assert result == {"rows_affected": 3}
+    assert conn.fetched == []
+
+
 # ---- multi-statement rejection (issue #40: dry-run bypass via embedded ;) ------
 
 
@@ -814,6 +822,10 @@ async def test_show_activity_keeps_query_when_opted_in():
         ("", ""),
         ("   ", ""),
         ("-- only a comment", ""),
+        ("/* /* */ SELECT 1 */ UPDATE t SET a=0", "update"),
+        ("/* a /* b */ c */ -- d\nSELECT 1", "select"),
+        ("/* /* */ SELECT 1", ""),
+        ("/*/ SELECT 1 */ UPDATE t SET a=0", "update"),
     ],
 )
 def test_leading_keyword(sql, expected):
@@ -855,6 +867,7 @@ def test_validate_read_only_accepts_read_statements(sql):
         # outright by the allowlist — the trailing write never gets a chance to run.
         "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE; DELETE FROM users",
         "set session characteristics as transaction read write; drop table t",
+        "/* /* */ SELECT 1 */ UPDATE accounts SET balance = 0",
     ],
 )
 def test_validate_read_only_rejects_non_read_statements(sql):

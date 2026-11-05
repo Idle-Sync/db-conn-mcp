@@ -11,7 +11,10 @@ the time of that release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- A read query whose leading block comment nests another comment (`/* /* */ ... */`) is now
+  rejected by the read tool instead of reaching the server.
 
 ## [0.7.1] — 2026-08-13
 

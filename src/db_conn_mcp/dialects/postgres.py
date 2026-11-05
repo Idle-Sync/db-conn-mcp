@@ -713,9 +713,10 @@ class _PostgresCursor:
 def _leading_keyword(sql: str) -> str:
     """Return the first SQL keyword, lowercased, ignoring leading whitespace/comments.
 
-    Leading ``--`` line comments and ``/* */`` block comments are skipped so a query
-    like ``-- note\\nSELECT 1`` still reports ``select``. Returns ``""`` for blank or
-    comment-only input. Used both to shape results and to gate the read tool.
+    Leading ``--`` line comments and ``/* */`` block comments (which nest, as in Postgres)
+    are skipped so a query like ``-- note\\nSELECT 1`` still reports ``select``. Returns
+    ``""`` for blank, comment-only or unterminated-comment input. Used both to shape
+    results and to gate the read tool.
     """
     s = sql.lstrip()
     while s:
@@ -723,8 +724,18 @@ def _leading_keyword(sql: str) -> str:
             newline = s.find("\n")
             s = "" if newline == -1 else s[newline + 1 :].lstrip()
         elif s.startswith("/*"):
-            end = s.find("*/")
-            s = "" if end == -1 else s[end + 2 :].lstrip()
+            depth = 1
+            i = 2
+            while i < len(s) and depth:
+                if s.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif s.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            s = "" if depth else s[i:].lstrip()
         else:
             break
     return s.split(None, 1)[0].lower() if s else ""
