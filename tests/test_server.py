@@ -14,12 +14,14 @@ from pathlib import Path
 
 import asyncpg
 import pytest
+from asyncpg.types import Attribute
 from mcp import types
 from mcp.types import TextContent
 
 from db_conn_mcp import clients as clients_mod
 from db_conn_mcp import guard, server
 from db_conn_mcp import handlers as handlers_mod
+from db_conn_mcp.dialects.postgres import PostgresDialect
 from db_conn_mcp.handlers import Handlers
 from db_conn_mcp.safety import WriteRejected
 from db_conn_mcp.server import build_server
@@ -979,6 +981,7 @@ async def test_server_advertises_the_untrusted_data_policy(cfg_path):
 _VALUE_TOOL_ARGS = {
     "sample_table_rows": {"database": "prod", "table": "users"},
     "execute_read_query": {"database": "prod", "sql": "SELECT 1"},
+    "execute_write_query": {"database": "dev", "sql": "DELETE FROM t RETURNING id"},
     "search_value": {"database": "prod", "value": "alice"},
 }
 
@@ -991,9 +994,14 @@ async def _value_tool_arguments(app, name):
     return {"cursor_id": _fenced_payload(blocks[0])["cursor_id"]}
 
 
+def test_value_bearing_tools_are_exactly_the_row_value_tools():
+    """The parametrized test below iterates the set, so a tool leaving it would go unseen."""
+    assert {*_VALUE_TOOL_ARGS, "fetch_rows"} == server.VALUE_BEARING_TOOLS
+
+
 @pytest.mark.parametrize("name", sorted(server.VALUE_BEARING_TOOLS))
 async def test_value_bearing_tools_emit_no_structured_content(name, cfg_path, monkeypatch):
-    """All four row-value tools answer with a fenced text channel and NO structured one."""
+    """All five row-value tools answer with a fenced text channel and NO structured one."""
     _patch_dialect(monkeypatch, FakeDialect(cursor_batches=[[{"id": 1}]]))
     app = server.build_server(cfg_path)
 
@@ -1025,6 +1033,117 @@ async def test_value_bearing_tool_reaches_the_client_without_structured_content(
     assert text.startswith(guard.GUARD_OPEN) and text.endswith(guard.GUARD_CLOSE)
     # The row itself is inside the fence — the only place it exists in the response.
     assert _fenced_payload(result.content[0]) == {"id": 1}
+
+
+async def test_write_tool_rows_are_fenced_whatever_its_return_annotation_produces(
+    cfg_path, monkeypatch
+):
+    """RETURNING rows are row values. The parametrized test above iterates the set, so
+    only a direct call notices the write tool leaving it."""
+    _patch_dialect(monkeypatch, FakeDialect(exec_result={"columns": ["id"], "rows": [{"id": 1}]}))
+    app = server.build_server(cfg_path)
+
+    content, structured = await app.call_tool(
+        "execute_write_query", _VALUE_TOOL_ARGS["execute_write_query"]
+    )
+
+    assert structured is None
+    assert _fenced_payload(content[0])["rows"] == [{"id": 1}]
+
+
+class _StatementServingOneRow:
+    """An asyncpg prepared statement that serves ``row``, or raises ``fetch_error``."""
+
+    def __init__(self, row, fetch_error):
+        self._row = row
+        self._fetch_error = fetch_error
+
+    async def fetch(self, *args, timeout=None):
+        if self._fetch_error:
+            raise self._fetch_error
+        return [self._row]
+
+    def get_attributes(self):
+        return tuple(Attribute(name=name, type=None) for name in self._row)
+
+    def get_statusmsg(self):
+        return "INSERT 0 1"
+
+
+class _ConnectionServingOneRow(FakeConn):
+    def __init__(self, row, fetch_error):
+        super().__init__()
+        self._statement = _StatementServingOneRow(row, fetch_error)
+
+    async def prepare(self, sql, *, timeout=None):
+        return self._statement
+
+    def transaction(self):
+        return _NoOpTransaction()
+
+
+class _NoOpTransaction:
+    async def start(self):
+        pass
+
+    async def rollback(self):
+        pass
+
+
+class _PostgresServingOneRow(PostgresDialect):
+    """The real result mapping, over a connection serving one canned driver row.
+
+    ``FakeDialect`` replaces ``execute``, so it cannot show what the mapping hands to the
+    SDK's JSON serialization.
+    """
+
+    def __init__(self, row, fetch_error=None):
+        self._row = row
+        self._fetch_error = fetch_error
+
+    async def connect(self, dsn, *, read_only):
+        return _ConnectionServingOneRow(self._row, self._fetch_error)
+
+
+@pytest.mark.parametrize(
+    ("tool", "database", "sql"),
+    [
+        ("execute_write_query", "dev", "INSERT INTO f VALUES ('\\xff') RETURNING data"),
+        ("execute_read_query", "prod", "SELECT data FROM f"),
+    ],
+)
+async def test_non_utf8_bytea_reaches_the_client_as_hex_text(
+    tool, database, sql, cfg_path, monkeypatch
+):
+    """Raw bytes fail the SDK's JSON step after the statement has run, which reported an
+    applied write as an error and left a preview grant behind it."""
+    _patch_dialect(monkeypatch, _PostgresServingOneRow({"data": b"\xff"}))
+    app = server.build_server(cfg_path)
+
+    result = await _call_over_the_wire(app, tool, {"database": database, "sql": sql})
+
+    assert result.isError is False
+    assert result.structuredContent is None
+    assert _fenced_payload(result.content[0])["rows"] == [{"data": "\\xff"}]
+
+
+async def test_undecodable_returning_preview_grants_no_commit(cfg_path, monkeypatch):
+    """A preview that shows an error must not authorize the write it could not show."""
+    error = ValueError("year must be in 1..9999, not 20000")
+    _patch_dialect(monkeypatch, _PostgresServingOneRow({"d": None}, fetch_error=error))
+    app = server.build_server(cfg_path)
+    arguments = {"database": "dev", "sql": "INSERT INTO f VALUES (1) RETURNING d"}
+
+    preview = await _call_over_the_wire(app, "execute_write_query", arguments)
+    commit = await _call_over_the_wire(
+        app, "execute_write_query", {**arguments, "dry_run": False, "user_consent": True}
+    )
+
+    assert preview.isError is True
+    assert "The statement ran" in preview.content[0].text
+    assert "20000" not in preview.content[0].text
+    assert commit.isError is True
+    assert "has not been previewed" in commit.content[0].text
 
 
 async def test_empty_row_result_is_still_one_banner_wrapped_block(cfg_path, monkeypatch):
@@ -1541,8 +1660,10 @@ async def test_execute_write_query_tool_wrapper_dry_runs_with_context_injected(
     _patch_dialect(monkeypatch, dialect)
     app = server.build_server(cfg_path)
 
-    blocks = await app.call_tool("execute_write_query", {"database": "dev", "sql": "DELETE FROM t"})
-    payload = _fenced_payload(blocks[0])
+    content, _structured = await app.call_tool(
+        "execute_write_query", {"database": "dev", "sql": "DELETE FROM t"}
+    )
+    payload = _fenced_payload(content[0])
     assert payload["dry_run"] is True and payload["rolled_back"] is True
     assert dialect.dry_run_calls and not dialect.exec_calls
 

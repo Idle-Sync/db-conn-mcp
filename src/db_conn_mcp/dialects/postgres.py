@@ -996,14 +996,17 @@ class PostgresDialect(Dialect):
         timeout = _timeout_seconds(timeout_ms)
         try:
             statement = await conn.prepare(sql, timeout=timeout)
-            rows = await statement.fetch(*args, timeout=timeout)
+            rows = await _fetch_statement_rows(statement, args, timeout)
             # The server's row description decides the shape, not the SQL text: it covers
             # RETURNING on a write and names the columns of a result with no rows.
             attributes = statement.get_attributes()
             if attributes:
                 return {
                     "columns": [attribute.name for attribute in attributes],
-                    "rows": [dict(r) for r in rows],
+                    "rows": [
+                        {column: _json_safe_value(value) for column, value in r.items()}
+                        for r in rows
+                    ],
                 }
             return {"rows_affected": _parse_affected(statement.get_statusmsg())}
         except TimeoutError:
@@ -1204,6 +1207,42 @@ class PostgresDialect(Dialect):
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
+
+
+async def _fetch_statement_rows(
+    statement: Any, args: list[Any], timeout: float | None
+) -> list[Any]:
+    """Run a prepared statement, naming a failure to decode its rows for what it is.
+
+    asyncpg decodes rows on the client, after the server has run the statement. A value
+    Python cannot represent (a date past year 9999) raises a builtin whose text quotes the
+    value and says nothing about the write. An argument that fails to encode raises
+    ``asyncpg.exceptions.DataError`` instead and passes through, because that statement
+    never ran.
+    """
+    try:
+        return await statement.fetch(*args, timeout=timeout)
+    except (ValueError, OverflowError):
+        raise ValueError(
+            "The statement ran, but the rows it returned could not be decoded: a value is "
+            "outside what the client can represent. Treat a write as applied and check with "
+            "a read before running it again; a dry run was rolled back. To see the rows, cast "
+            "that value to text."
+        ) from None
+
+
+def _json_safe_value(value: Any) -> Any:
+    """Render ``bytes`` as Postgres' ``\\x`` hex text, inside arrays and records too.
+
+    Tool results are JSON, and the SDK's serialization fails on non-UTF-8 ``bytes`` after
+    the statement has already run. Declared composite types decode to an ``asyncpg.Record``,
+    which that serialization stringifies without failing, so they are left alone.
+    """
+    if isinstance(value, bytes):
+        return f"\\x{value.hex()}"
+    if isinstance(value, list | tuple):
+        return [_json_safe_value(item) for item in value]
+    return value
 
 
 def _parse_affected(status: str | None) -> int:

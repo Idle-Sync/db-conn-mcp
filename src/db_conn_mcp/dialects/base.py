@@ -100,7 +100,11 @@ class Dialect(ABC):
 
         ``{columns, rows}`` when the statement describes a result set, which includes a
         write with ``RETURNING`` and a query that matches no rows; otherwise
-        ``{rows_affected}``. The database decides, not the SQL text.
+        ``{rows_affected}``. The database decides, not the SQL text. Row values must
+        survive JSON serialization, so binary values arrive as text (Postgres: ``\\x`` hex).
+
+        A statement that ran but whose rows cannot be decoded raises a sanitized
+        ``ValueError`` saying that it ran.
 
         ``params`` are bound via the driver's native parameterization (Postgres:
         ``$1``/``$2`` placeholders) — never interpolated into the SQL text. A

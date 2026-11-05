@@ -435,6 +435,33 @@ async def test_execute_maps_rows_to_plain_dicts():
     assert result["rows"] == [{"id": 1}]
 
 
+async def test_execute_renders_bytes_as_hex_text():
+    # Non-UTF-8 bytea would otherwise fail JSON serialization after the write has run.
+    conn = FakeConn([[{"data": b"\xff\x00"}]], attributes=["data"], status="INSERT 0 1")
+    result = await PostgresDialect().execute(conn, "INSERT INTO f VALUES (1) RETURNING data")
+    assert result["rows"] == [{"data": "\\xff00"}]
+
+
+async def test_execute_renders_bytes_inside_arrays_and_records_as_hex_text():
+    # bytea[] decodes to nested lists and an anonymous ROW(...) to a tuple.
+    row = {"array": [[b"\xff"]], "record": (b"\xfe", 1)}
+    conn = FakeConn([[row]], attributes=["array", "record"])
+    result = await PostgresDialect().execute(conn, "SELECT array, record FROM f")
+    assert result["rows"] == [{"array": [["\\xff"]], "record": ["\\xfe", 1]}]
+
+
+async def test_execute_duplicate_column_names_keep_the_last_value():
+    # columns follows the row description, but a row is keyed by name, so the earlier
+    # value of a repeated name is lost. The tool docstrings state this.
+    class DuplicateColumnRow:
+        def items(self):
+            return [("a", 1), ("a", 2)]
+
+    conn = FakeConn([[DuplicateColumnRow()]], attributes=["a", "a"])
+    result = await PostgresDialect().execute(conn, "SELECT 1 AS a, 2 AS a")
+    assert result == {"columns": ["a", "a"], "rows": [{"a": 2}]}
+
+
 async def test_execute_empty_select_reports_columns():
     # The row description names the columns even when no row comes back.
     conn = FakeConn([[]], attributes=["id", "name"], status="SELECT 0")
@@ -635,6 +662,60 @@ async def test_execute_dry_run_of_returning_reports_rows_and_rolls_back():
     assert result == {"columns": ["id"], "rows": [{"id": 7}], "dry_run": True, "rolled_back": True}
     tx = conn.transactions[0]
     assert tx.started and tx.rolled_back
+
+
+def _conn_whose_fetch_raises(error):
+    """A connection whose prepared statement raises ``error`` from ``fetch``."""
+
+    class RaisingStatement(FakePreparedStatement):
+        async def fetch(self, *args, timeout=None):
+            raise error
+
+    class RaisingConn(FakeConn):
+        async def prepare(self, sql, *, timeout=None):
+            return RaisingStatement(sql, [], ["d"], "", timeout)
+
+    return RaisingConn()
+
+
+@pytest.mark.parametrize(
+    "decode_error",
+    [
+        ValueError("year must be in 1..9999, not 20000"),
+        OverflowError("date value out of range"),
+    ],
+)
+async def test_execute_decode_failure_says_the_statement_ran(decode_error):
+    # asyncpg raises these builtins after the server finished, and their text quotes the value.
+    conn = _conn_whose_fetch_raises(decode_error)
+    with pytest.raises(ValueError, match="The statement ran") as raised:
+        await PostgresDialect().execute(conn, "INSERT INTO f VALUES (1) RETURNING d")
+    assert "20000" not in str(raised.value)
+    assert "out of range" not in str(raised.value)
+    assert raised.value.__suppress_context__
+
+
+async def test_execute_dry_run_decode_failure_still_rolls_back():
+    conn = _conn_whose_fetch_raises(ValueError("year must be in 1..9999, not 20000"))
+    with pytest.raises(ValueError, match="The statement ran"):
+        await PostgresDialect().execute_dry_run(conn, "INSERT INTO f VALUES (1) RETURNING d")
+    assert conn.transactions[0].rolled_back
+
+
+async def test_execute_argument_encoding_failure_is_not_reported_as_ran():
+    # asyncpg raises this before anything is sent, so nothing ran.
+    error = asyncpg.exceptions.DataError("invalid input for query argument $1")
+    with pytest.raises(asyncpg.exceptions.DataError, match="query argument"):
+        await PostgresDialect().execute(_conn_whose_fetch_raises(error), "SELECT $1", ["x"])
+
+
+async def test_execute_prepare_failure_is_not_reported_as_ran():
+    class RefusingConn(FakeConn):
+        async def prepare(self, sql, *, timeout=None):
+            raise ValueError("unknown type: public.nope")
+
+    with pytest.raises(ValueError, match="unknown type"):
+        await PostgresDialect().execute(RefusingConn(), "SELECT 1")
 
 
 async def test_execute_dry_run_rolls_back_even_on_error():

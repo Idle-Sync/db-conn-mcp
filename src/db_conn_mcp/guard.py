@@ -28,8 +28,8 @@ diagnostics (Rule 6) — rather than being a payload of rows. The standing
 
 Because a client may render *only* ``structuredContent`` and so never see this
 wrapper, the tools that return raw row **values** (``server.VALUE_BEARING_TOOLS``:
-``sample_table_rows``, ``execute_read_query``, ``fetch_rows``, ``search_value``)
-emit no structured content at all — their data exists in the response only inside
+``sample_table_rows``, ``execute_read_query``, ``execute_write_query``, ``fetch_rows``,
+``search_value``) emit no structured content at all — their data exists in the response only inside
 the fence. Metadata tools (schemas, stats, diagnostics, config) keep their
 structured output: their content is far less attacker-controllable, and clients
 parse it. Those tools rest on the second layer, the standing

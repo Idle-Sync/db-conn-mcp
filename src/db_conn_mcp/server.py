@@ -42,12 +42,12 @@ ToolResult = Sequence[ContentBlock] | tuple[Sequence[ContentBlock], dict[str, An
 
 #: Tools that return raw row VALUES — the most attacker-controllable content this server
 #: emits, since anyone who can write a row chooses the text. Their payload must reach the
-#: agent ONLY inside the untrusted-data banner, so these four emit no ``structuredContent``
+#: agent ONLY inside the untrusted-data banner, so these five emit no ``structuredContent``
 #: at all: a client that renders only the structured channel would otherwise read raw row
 #: data with no fence around it. Metadata tools (schemas, stats, diagnostics, config) keep
 #: their structured output.
 VALUE_BEARING_TOOLS = frozenset(
-    {"sample_table_rows", "execute_read_query", "fetch_rows", "search_value"}
+    {"sample_table_rows", "execute_read_query", "execute_write_query", "fetch_rows", "search_value"}
 )
 
 #: What a value-bearing tool says when its result carries no rows at all. FastMCP turns
@@ -163,7 +163,7 @@ def _drop_value_bearing_output_schemas(app: GuardedFastMCP) -> None:
 
     Today only ``sample_table_rows`` actually declares one (FastMCP derives a schema from
     a ``list[dict]`` return annotation but not from a bare ``dict``); the loop covers all
-    four so a future annotation change cannot silently re-open the gap.
+    five so a future annotation change cannot silently re-open the gap.
     """
     for name in VALUE_BEARING_TOOLS:
         tool = app._tool_manager.get_tool(name)
@@ -314,6 +314,10 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Rows arrive on the text channel only, inside the untrusted-data banner: this
         tool emits no structuredContent.
+
+        Result shape: `columns` lists every column the statement returned, but each row
+        is keyed by name, so a repeated name (`SELECT 1 AS a, 2 AS a`) keeps only its last
+        value: alias the columns to keep both. bytea values arrive as `\\x` hex text.
         """
         return await handlers.execute_read_query(database, sql, params, timeout_ms)
 
@@ -354,6 +358,15 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
            skip the preview.
 
         Pass values via `params` ($1/$2/... placeholders), not pasted into the SQL.
+
+        Rows arrive on the text channel only, inside the untrusted-data banner: this
+        tool emits no structuredContent.
+
+        Result shape: `columns` lists every column `RETURNING` named, but each row is
+        keyed by name, so a repeated name (`RETURNING id, id`) keeps only its last value:
+        alias the columns to keep both. bytea values arrive as `\\x` hex text. An error
+        saying the statement ran but its rows could not be decoded means a commit is to be
+        treated as applied: check with a read before running it again.
         """
         # Scope the dry-run grant to THIS MCP session (issue #41): under --transport http
         # one Handlers instance is shared by every client, so a grant must not be
