@@ -34,7 +34,7 @@ from db_conn_mcp.dialects.postgres import (
 
 
 class FakeTx:
-    """Records the transaction lifecycle (start / rollback)."""
+    """Records the transaction lifecycle (start / rollback), refusing what asyncpg refuses."""
 
     def __init__(self):
         self.started = False
@@ -44,6 +44,8 @@ class FakeTx:
         self.started = True
 
     async def rollback(self):
+        if not self.started:
+            raise asyncpg.InterfaceError("cannot rollback; the transaction is not yet started")
         self.rolled_back = True
 
 
@@ -73,11 +75,16 @@ class FakePreparedStatement:
     command tag stays ``None`` until ``fetch`` has run, as in asyncpg.
     """
 
-    def __init__(self, sql, rows, attributes, status, prepare_timeout):
+    def __init__(
+        self, sql, rows, attributes, status, prepare_timeout, cursor_batches=(), transactions=()
+    ):
         self.sql = sql
         self.prepare_timeout = prepare_timeout
         self.fetch_args: list[tuple] = []
         self.fetch_timeouts: list = []
+        self.cursor_args: list[tuple] = []
+        self._cursor_batches = cursor_batches
+        self._transactions = transactions
         self._rows = rows
         self._attributes = tuple(
             Attribute(name=attribute, type=TEXT_TYPE) if isinstance(attribute, str) else attribute
@@ -91,6 +98,14 @@ class FakePreparedStatement:
         self.fetch_timeouts.append(timeout)
         self._has_run = True
         return self._rows
+
+    async def cursor(self, *args):
+        if not any(tx.started for tx in self._transactions):
+            raise asyncpg.NoActiveSQLTransactionError(
+                "cursor cannot be created outside of a transaction"
+            )
+        self.cursor_args.append(args)
+        return FakeAsyncpgCursor(self._cursor_batches)
 
     def get_attributes(self):
         return self._attributes
@@ -121,7 +136,6 @@ class FakeConn:
         self.fetchrow_args: list[tuple] = []
         self.transactions: list[FakeTx] = []
         self.cursor_batches = list(cursor_batches or [])
-        self.cursor_calls: list[tuple] = []
         self.closed = False
         self.prepared: list[FakePreparedStatement] = []
         self._attributes = attributes
@@ -129,7 +143,15 @@ class FakeConn:
 
     async def prepare(self, sql, *, timeout=None):
         rows = self._fetch_queue.pop(0) if self._fetch_queue else []
-        statement = FakePreparedStatement(sql, rows, self._attributes, self._status, timeout)
+        statement = FakePreparedStatement(
+            sql,
+            rows,
+            self._attributes,
+            self._status,
+            timeout,
+            self.cursor_batches,
+            self.transactions,
+        )
         self.prepared.append(statement)
         return statement
 
@@ -153,10 +175,6 @@ class FakeConn:
         tx = FakeTx()
         self.transactions.append(tx)
         return tx
-
-    async def cursor(self, sql, *args):
-        self.cursor_calls.append((sql, args))
-        return FakeAsyncpgCursor(self.cursor_batches)
 
     async def close(self):
         self.closed = True
@@ -421,11 +439,24 @@ async def test_get_database_schema_orders_deterministically():
 
 
 async def test_sample_rows_quotes_identifier_and_limits():
-    conn = FakeConn([[{"id": 1}]])
+    conn = FakeConn([[{"id": 1}]], attributes=["id"])
     await PostgresDialect().sample_rows(conn, "users", n=5)
-    sql = conn.fetched[0]
+    sql = conn.prepared[0].sql
     assert '"users"' in sql
     assert "5" in sql
+
+
+async def test_sample_rows_maps_bytes_by_column_type():
+    # bytea is hex and "char" its character, the same as execute_read_query shows them.
+    conn = FakeConn(
+        [[{"data": b"\xff", "relkind": b"r"}]],
+        attributes=[
+            Attribute(name="data", type=BYTEA_TYPE),
+            Attribute(name="relkind", type=CHAR_TYPE),
+        ],
+    )
+    rows = await PostgresDialect().sample_rows(conn, "f")
+    assert rows == [{"data": "\\xff", "relkind": "r"}]
 
 
 # ---- execute result shaping --------------------------------------------------
@@ -476,6 +507,16 @@ async def test_execute_renders_bytes_inside_arrays_and_records_as_hex_text():
         {"array": [["\\xff"]], "record": ["\\xfe", 1]},
         {"array": [["\\xff"]], "record": ["\\x72", 1]},
     ]
+
+
+async def test_execute_renders_utf8_bytea_arrays_as_hex():
+    # b"r" decodes as UTF-8, so only the column type keeps bytea[] apart from "char"[].
+    conn = FakeConn(
+        [[{"array": [[b"r"]]}]],
+        attributes=[Attribute(name="array", type=BYTEA_ARRAY_TYPE)],
+    )
+    result = await PostgresDialect().execute(conn, "SELECT array FROM f")
+    assert result["rows"] == [{"array": [["\\x72"]]}]
 
 
 async def test_execute_renders_char_columns_as_text():
@@ -829,13 +870,27 @@ async def test_execute_dry_run_rolls_back_even_on_error():
 
 
 async def test_open_cursor_starts_tx_and_fetch_maps_dicts():
-    conn = FakeConn(cursor_batches=[[{"id": 1}, {"id": 2}], [{"id": 3}]])
+    conn = FakeConn(cursor_batches=[[{"id": 1}, {"id": 2}], [{"id": 3}]], attributes=["id"])
     cursor = await PostgresDialect().open_cursor(conn, "SELECT * FROM big", ["arg"])
     assert conn.transactions[0].started
-    assert conn.cursor_calls[0] == ("SELECT * FROM big", ("arg",))
+    assert conn.prepared[0].sql == "SELECT * FROM big"
+    assert conn.prepared[0].cursor_args == [("arg",)]
     assert await cursor.fetch(2) == [{"id": 1}, {"id": 2}]
     assert await cursor.fetch(2) == [{"id": 3}]
     assert await cursor.fetch(2) == []
+
+
+async def test_cursor_fetch_maps_bytes_by_column_type():
+    # bytea is hex and "char" its character, the same as execute_read_query shows them.
+    conn = FakeConn(
+        cursor_batches=[[{"data": b"\xff", "relkind": b"r"}]],
+        attributes=[
+            Attribute(name="data", type=BYTEA_TYPE),
+            Attribute(name="relkind", type=CHAR_TYPE),
+        ],
+    )
+    cursor = await PostgresDialect().open_cursor(conn, "SELECT data, relkind FROM f")
+    assert await cursor.fetch(10) == [{"data": "\\xff", "relkind": "r"}]
 
 
 async def test_cursor_close_rolls_back_and_closes_connection():
@@ -847,13 +902,28 @@ async def test_cursor_close_rolls_back_and_closes_connection():
 
 
 async def test_open_cursor_failure_rolls_back():
-    class NoCursorConn(FakeConn):
-        async def cursor(self, sql, *args):
+    class UnpreparableConn(FakeConn):
+        async def prepare(self, sql, *, timeout=None):
             raise asyncpg.PostgresSyntaxError("bad")
 
-    conn = NoCursorConn()
+    conn = UnpreparableConn()
     with pytest.raises(asyncpg.PostgresSyntaxError):
         await PostgresDialect().open_cursor(conn, "SELECT nope")
+    assert conn.transactions[0].rolled_back
+
+
+async def test_open_cursor_argument_failure_rolls_back():
+    class UnbindableStatement(FakePreparedStatement):
+        async def cursor(self, *args):
+            raise asyncpg.DataError("bad argument")
+
+    class UnbindableConn(FakeConn):
+        async def prepare(self, sql, *, timeout=None):
+            return UnbindableStatement(sql, [], [], "", timeout)
+
+    conn = UnbindableConn()
+    with pytest.raises(asyncpg.DataError):
+        await PostgresDialect().open_cursor(conn, "SELECT $1::int", ["x"])
     assert conn.transactions[0].rolled_back
 
 

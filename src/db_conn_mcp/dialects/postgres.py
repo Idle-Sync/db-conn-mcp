@@ -690,15 +690,16 @@ class _PostgresCursor:
     committed anything — it is read-only) and closes the connection.
     """
 
-    def __init__(self, conn: Any, tx: Any, cursor: Any):
+    def __init__(self, conn: Any, tx: Any, cursor: Any, attributes: tuple):
         self._conn = conn
         self._tx = tx
         self._cursor = cursor
+        self._attributes = attributes
 
     async def fetch(self, n: int) -> list[dict]:
         """Fetch up to ``n`` more rows; fewer (or none) means the cursor is exhausted."""
         rows = await self._cursor.fetch(max(1, int(n)))
-        return [dict(r) for r in rows]
+        return [_json_safe_row(r, self._attributes) for r in rows]
 
     async def close(self) -> None:
         """Release the cursor, its transaction, and the underlying connection."""
@@ -979,8 +980,10 @@ class PostgresDialect(Dialect):
     async def sample_rows(self, conn: Any, table: str, n: int = 10) -> list[dict]:
         limit = max(0, int(n))  # coerce to a safe non-negative int (never interpolate raw)
         sql = f"SELECT * FROM {_quote_identifier(table)} LIMIT {limit}"
-        rows = await conn.fetch(sql)
-        return [dict(r) for r in rows]
+        statement = await conn.prepare(sql)
+        rows = await statement.fetch()
+        attributes = statement.get_attributes()
+        return [_json_safe_row(r, attributes) for r in rows]
 
     async def execute(
         self,
@@ -1030,11 +1033,13 @@ class PostgresDialect(Dialect):
         tx = conn.transaction()
         await tx.start()
         try:
-            cursor = await conn.cursor(sql, *(params or []))
+            # An asyncpg cursor has no row description, so the statement provides it.
+            statement = await conn.prepare(sql)
+            cursor = await statement.cursor(*(params or []))
         except Exception:
             await tx.rollback()
             raise
-        return _PostgresCursor(conn, tx, cursor)
+        return _PostgresCursor(conn, tx, cursor, statement.get_attributes())
 
     async def get_object_definition(self, conn: Any, object_type: str, name: str) -> list[dict]:
         query = _OBJECT_DEFINITION_SQL.get(object_type)
@@ -1229,6 +1234,7 @@ async def _fetch_statement_rows(
 
 
 #: ``"char"`` and ``"char"[]``: asyncpg decodes them with its bytea codec, but they hold text.
+#: An array of a domain over ``"char"`` has its own OID, so it is not listed and reads as hex.
 _CHAR_TYPE_OIDS = frozenset({18, 1002})
 
 
