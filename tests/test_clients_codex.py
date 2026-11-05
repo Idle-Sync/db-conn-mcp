@@ -1,12 +1,16 @@
 """The codec seam (syntax-aware read/write behind one interface) plus Codex's spec."""
 
 import json
+import os
 import tomllib
 import traceback
+from fnmatch import fnmatch
+from pathlib import Path
 
 import pytest
 import tomlkit
 
+from db_conn_mcp import atomic_write
 from db_conn_mcp.clients import (
     ClientConfigError,
     ClientSpec,
@@ -312,3 +316,109 @@ def test_injected_launch_missing_args_defaults_empty(tmp_path):
         json.dumps({"mcpServers": {"db-conn-mcp": {"command": NASTY_PATH}}}), encoding="utf-8"
     )
     assert injected_launch(spec) == (NASTY_PATH, [])
+
+
+# ---- atomic writes (issue #53) -------------------------------------------------
+
+posix_only = pytest.mark.skipif(os.name != "posix", reason="POSIX file mode bits only")
+
+
+def test_write_config_failed_write_leaves_the_file_unchanged(tmp_path):
+    """A full disk mid-write must not cost the user every other server in the file."""
+    resource = pytest.importorskip("resource")
+    spec = _json_spec(tmp_path)
+    original = json.dumps({"mcpServers": {}, "token": "hunter2" + "x" * 5000}).encode()
+    spec.path.write_bytes(original)
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (1024, hard))
+    try:
+        with pytest.raises(ClientConfigError) as excinfo:
+            write_config(spec, {"mcpServers": {}, "token": "hunter2" + "y" * 2048})
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+    message = str(excinfo.value)
+    assert "could not be written" in message
+    assert "unchanged" in message
+    assert "hunter2" not in message
+    assert excinfo.value.__cause__ is None
+    assert spec.path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [spec.path]
+
+
+def test_write_config_keyboard_interrupt_leaves_the_file_unchanged(tmp_path, monkeypatch):
+    """Ctrl-C is not a write failure: it stays Ctrl-C, and still cleans up its temp file."""
+
+    def interrupted_replace(source: str, destination: str) -> None:
+        raise KeyboardInterrupt
+
+    spec = _json_spec(tmp_path)
+    spec.path.write_text('{"mcpServers": {}}', encoding="utf-8")
+    original = spec.path.read_bytes()
+    monkeypatch.setattr(atomic_write.os, "replace", interrupted_replace)
+    with pytest.raises(KeyboardInterrupt):
+        write_config(spec, {"mcpServers": {"a": {}}})
+    assert spec.path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [spec.path]
+
+
+def test_write_config_temp_file_sits_beside_the_target_under_the_ignored_name(
+    tmp_path, monkeypatch
+):
+    """A temp file elsewhere may be on another filesystem, where a replace is not atomic."""
+    real_replace = os.replace
+    sources: list[Path] = []
+
+    def recording_replace(source: str, destination: Path) -> None:
+        sources.append(Path(source))
+        real_replace(source, destination)
+
+    spec = _json_spec(tmp_path)
+    monkeypatch.setattr(atomic_write.os, "replace", recording_replace)
+    write_config(spec, {"mcpServers": {}})
+    assert len(sources) == 1
+    assert sources[0].parent == spec.path.resolve().parent
+    assert fnmatch(sources[0].name, ".cfg.json.*.tmp")
+
+
+def test_write_config_writes_utf8_whatever_the_locale(tmp_path):
+    spec = ClientSpec("codex", "Codex", tmp_path / "config.toml", "codex")
+    write_config(spec, {"model": "café ☕"})
+    assert tomllib.loads(spec.path.read_bytes().decode("utf-8")) == {"model": "café ☕"}
+
+
+@posix_only
+def test_write_config_keeps_mode_of_an_existing_file(tmp_path):
+    spec = _json_spec(tmp_path)
+    spec.path.write_text("{}", encoding="utf-8")
+    spec.path.chmod(0o600)
+    write_config(spec, {"mcpServers": {}})
+    assert spec.path.stat().st_mode & 0o777 == 0o600
+    assert list(tmp_path.iterdir()) == [spec.path]
+
+
+@posix_only
+def test_write_config_creates_a_new_file_user_only(tmp_path):
+    spec = _json_spec(tmp_path)
+    write_config(spec, {"mcpServers": {}})
+    assert spec.path.stat().st_mode & 0o777 == 0o600
+    assert list(tmp_path.iterdir()) == [spec.path]
+
+
+@posix_only
+def test_write_config_writes_through_a_symlink(tmp_path):
+    """Dotfile managers symlink client configs; replacing the link would orphan the target."""
+    real = tmp_path / "real" / "cfg.json"
+    real.parent.mkdir()
+    real.write_text("{}", encoding="utf-8")
+    link_dir = tmp_path / "link_dir"
+    link_dir.mkdir()
+    link = link_dir / "cfg.json"
+    link.symlink_to(real)
+    spec = ClientSpec("t", "Test", link, "mcpServers")
+
+    write_config(spec, {"mcpServers": {"a": {}}})
+
+    assert link.is_symlink()
+    assert json.loads(real.read_text(encoding="utf-8")) == {"mcpServers": {"a": {}}}
+    assert list(real.parent.iterdir()) == [real]
+    assert list(link_dir.iterdir()) == [link]

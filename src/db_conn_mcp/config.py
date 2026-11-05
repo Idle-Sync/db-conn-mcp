@@ -11,14 +11,25 @@ All errors are raised as :class:`ConfigError` with actionable, **sanitized** mes
 — never echoing a DSN or credentials (Rule 6).
 """
 
+import contextlib
+import errno
 import json
 import os
+import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 from pydantic import ValidationError
 
+from .atomic_write import write_text_atomically
 from .dialects.registry import dialect_for, supported_schemes
 from .models import Config, Connection
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 #: Filename used for both the repo- and global-scoped locations.
 CONFIG_FILENAME = "connections.json"
@@ -107,19 +118,77 @@ def get(config: Config, name: str) -> Connection:
     raise ConfigError(f"Unknown database {name!r}. Available: {available}.")
 
 
-def save(config: Config, path: Path) -> None:
-    """Atomically rewrite ``connections.json`` (temp file + replace)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _dump_connection(conn: Connection) -> dict:
+    """Return one connection's JSON document, unknown keys included."""
     # exclude_none: optional keys absent from a user's file must stay absent (issue #10).
-    payload = config.model_dump(exclude_none=True)
-    tmp = path.with_name(f"{path.name}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    # It would drop a null-valued unknown key too, so model_extra goes back on top.
+    return {**conn.model_dump(exclude_none=True), **(conn.model_extra or {})}
+
+
+def save(config: Config, path: Path) -> None:
+    """Atomically rewrite ``connections.json``, keeping its mode and any unknown keys."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        **config.model_dump(exclude_none=True, exclude={"connections"}),
+        "connections": [_dump_connection(conn) for conn in config.connections],
+        **(config.model_extra or {}),
+    }
+    write_text_atomically(path, json.dumps(payload, indent=2) + "\n")
+
+
+def _acquire_lock(fd: int) -> None:
+    """Block until this process holds the exclusive lock on the open file ``fd``."""
+    if sys.platform != "win32":
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return
+    # Not LK_LOCK: it stalls a full second per attempt, which a busy config can't afford.
+    while True:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno != errno.EACCES:  # EACCES is the CRT's "already locked"
+                raise
+            time.sleep(0.01)
+        else:
+            return
+
+
+def _release_lock(fd: int) -> None:
+    """Release the lock taken by :func:`_acquire_lock`."""
+    if sys.platform != "win32":
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+
+@contextlib.contextmanager
+def locked(path: Path) -> Iterator[None]:
+    """Hold an exclusive cross-process lock on the config at ``path`` for the ``with`` body.
+
+    The lock lives on a ``connections.json.lock`` sidecar, never on the config itself:
+    :func:`save` swaps the config's inode, so a lock on it would guard a file that is
+    gone. The sidecar is derived from the resolved path, so a symlink and its target
+    contend on one lock. It is never deleted, for the same reason: a process blocked on
+    the old inode would then hold a lock nobody else can see.
+    """
+    real = path.resolve()
+    sidecar = real.with_name(real.name + ".lock")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(sidecar, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        _acquire_lock(fd)
+        try:
+            yield
+        finally:
+            _release_lock(fd)
+    finally:
+        os.close(fd)
 
 
 def set_yolo(path: Path, name: str, enabled: bool) -> Config:
     """Persist the ``yolo`` flag for one named DB and return the updated config."""
-    config = load(str(path))
-    get(config, name).yolo = enabled  # raises ConfigError if the name is unknown
-    save(config, path)
+    with locked(path):
+        config = load(str(path))
+        get(config, name).yolo = enabled  # raises ConfigError if the name is unknown
+        save(config, path)
     return config
