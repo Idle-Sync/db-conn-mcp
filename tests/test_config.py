@@ -148,6 +148,24 @@ def test_save_round_trip(tmp_path):
     assert reloaded.connections[0].name == "dev"
 
 
+def test_save_creates_the_config_directory(tmp_path):
+    """The first `setup` writes into `~/.db-conn-mcp`, which does not exist yet."""
+    path = tmp_path / "new_dir" / "connections.json"
+    config.save(Config(), path)
+    assert config.load(str(path)).connections == []
+
+
+def test_save_writes_two_space_json_with_a_trailing_newline(tmp_path):
+    """Hand-edited and diffed by users, so the layout is part of what a save must keep."""
+    path = tmp_path / "connections.json"
+    cfg = Config(connections=[Connection(name="dev", dsn="postgresql://h/d", mode="write")])
+    config.save(cfg, path)
+    document = {
+        "connections": [{"name": "dev", "dsn": "postgresql://h/d", "mode": "write", "yolo": False}]
+    }
+    assert path.read_text(encoding="utf-8") == json.dumps(document, indent=2) + "\n"
+
+
 def test_set_yolo_persists(tmp_path):
     path = _write(tmp_path / "c.json", VALID)
     updated = config.set_yolo(path, "prod", True)
@@ -348,6 +366,16 @@ def test_locked_puts_the_sidecar_beside_the_symlink_target(tmp_path):
 
     assert _mode(tmp_path / "real" / "connections.json.lock") == 0o600
     assert [p.name for p in link_dir.iterdir()] == ["connections.json"]
+
+
+@posix_only
+def test_locked_closes_its_file_descriptor(tmp_path):
+    """The MCP server is long-lived: one leaked descriptor per yolo toggle adds up."""
+    path = _write(tmp_path / "connections.json", VALID)
+    open_before = len(os.listdir("/dev/fd"))
+    with config.locked(path):
+        pass
+    assert len(os.listdir("/dev/fd")) == open_before
 
 
 def test_locked_creates_the_sidecar_directory_for_a_config_not_yet_written(tmp_path):
