@@ -317,7 +317,10 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Result shape: `columns` lists every column the statement returned, but each row
         is keyed by name, so a repeated name (`SELECT 1 AS a, 2 AS a`) keeps only its last
-        value: alias the columns to keep both. bytea values arrive as `\\x` hex text.
+        value: alias the columns to keep both. Rendering follows the server's column type:
+        bytea arrives as `\\x` hex text, a `"char"` column (`relkind`, `contype`, `prokind`,
+        ...) as its character (hex when the byte is not valid UTF-8), and a `"char"` inside
+        an anonymous `ROW(...)` as hex because the row description says only `record`.
         """
         return await handlers.execute_read_query(database, sql, params, timeout_ms)
 
@@ -364,7 +367,10 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Result shape: `columns` lists every column `RETURNING` named, but each row is
         keyed by name, so a repeated name (`RETURNING id, id`) keeps only its last value:
-        alias the columns to keep both. bytea values arrive as `\\x` hex text. An error
+        alias the columns to keep both. Rendering follows the server's column type: bytea
+        arrives as `\\x` hex text, a `"char"` column (`relkind`, `contype`, `prokind`, ...)
+        as its character (hex when the byte is not valid UTF-8), and a `"char"` inside an
+        anonymous `ROW(...)` as hex because the row description says only `record`. An error
         saying the statement ran but its rows could not be decoded means a commit is to be
         treated as applied: check with a read before running it again.
         """

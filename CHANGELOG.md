@@ -34,6 +34,10 @@ the time of that release.
 - **bytea values now arrive as `\x` hex text on `execute_read_query` and `execute_write_query`.**
   Your bytea column read back as plain text when it held valid UTF-8 and failed the whole call
   when it did not; it now always reads as `\xff00`.
+  Your `"char"` catalog columns (`relkind`, `contype`, `prokind`, ...) keep reading as their
+  character, in hex only when the byte is not valid UTF-8. A `"char"` inside an anonymous
+  `ROW(...)` reads as hex, because the row description says only `record`. An empty `"char"`
+  reads as an empty string, as `''::"char"::text` does.
 - **A statement whose returned rows cannot be decoded now fails and says it ran.** Your
   `RETURNING` of a value Python cannot represent (a date past year 9999) returned
   `{rows_affected}`, and a `SELECT` of one raised the driver's raw error; both now raise an error

@@ -12,7 +12,7 @@ from types import MappingProxyType
 
 import asyncpg
 import pytest
-from asyncpg.types import Attribute
+from asyncpg.types import Attribute, Type
 
 from db_conn_mcp.dialects import postgres as pg
 from db_conn_mcp.dialects.base import Dialect
@@ -57,12 +57,20 @@ class FakeAsyncpgCursor:
         return self._batches.pop(0) if self._batches else []
 
 
+TEXT_TYPE = Type(oid=25, name="text", kind="scalar", schema="pg_catalog")
+BYTEA_TYPE = Type(oid=17, name="bytea", kind="scalar", schema="pg_catalog")
+BYTEA_ARRAY_TYPE = Type(oid=1001, name="bytea[]", kind="array", schema="pg_catalog")
+CHAR_TYPE = Type(oid=18, name="char", kind="scalar", schema="pg_catalog")
+CHAR_ARRAY_TYPE = Type(oid=1002, name="char[]", kind="array", schema="pg_catalog")
+RECORD_TYPE = Type(oid=2249, name="record", kind="composite", schema="pg_catalog")
+
+
 class FakePreparedStatement:
     """Serves rows like an asyncpg prepared statement and records how it was called.
 
-    ``attributes`` is the row description (column names), separate from the rows, so a
-    statement can describe columns while returning none. The command tag stays ``None``
-    until ``fetch`` has run, as in asyncpg.
+    ``attributes`` is the row description, separate from the rows, so a statement can
+    describe columns while returning none. A plain name stands for a ``text`` column. The
+    command tag stays ``None`` until ``fetch`` has run, as in asyncpg.
     """
 
     def __init__(self, sql, rows, attributes, status, prepare_timeout):
@@ -71,7 +79,10 @@ class FakePreparedStatement:
         self.fetch_args: list[tuple] = []
         self.fetch_timeouts: list = []
         self._rows = rows
-        self._attributes = tuple(Attribute(name=name, type=None) for name in attributes)
+        self._attributes = tuple(
+            Attribute(name=attribute, type=TEXT_TYPE) if isinstance(attribute, str) else attribute
+            for attribute in attributes
+        )
         self._status = status
         self._has_run = False
 
@@ -437,17 +448,95 @@ async def test_execute_maps_rows_to_plain_dicts():
 
 async def test_execute_renders_bytes_as_hex_text():
     # Non-UTF-8 bytea would otherwise fail JSON serialization after the write has run.
-    conn = FakeConn([[{"data": b"\xff\x00"}]], attributes=["data"], status="INSERT 0 1")
+    conn = FakeConn(
+        [[{"data": b"\xff\x00"}]],
+        attributes=[Attribute(name="data", type=BYTEA_TYPE)],
+        status="INSERT 0 1",
+    )
     result = await PostgresDialect().execute(conn, "INSERT INTO f VALUES (1) RETURNING data")
     assert result["rows"] == [{"data": "\\xff00"}]
 
 
 async def test_execute_renders_bytes_inside_arrays_and_records_as_hex_text():
     # bytea[] decodes to nested lists and an anonymous ROW(...) to a tuple.
-    row = {"array": [[b"\xff"]], "record": (b"\xfe", 1)}
-    conn = FakeConn([[row]], attributes=["array", "record"])
+    # The row description says only record, so a "char" byte in ROW(...) stays hex too.
+    rows = [
+        {"array": [[b"\xff"]], "record": (b"\xfe", 1)},
+        {"array": [[b"\xff"]], "record": (b"r", 1)},
+    ]
+    conn = FakeConn(
+        [rows],
+        attributes=[
+            Attribute(name="array", type=BYTEA_ARRAY_TYPE),
+            Attribute(name="record", type=RECORD_TYPE),
+        ],
+    )
     result = await PostgresDialect().execute(conn, "SELECT array, record FROM f")
-    assert result["rows"] == [{"array": [["\\xff"]], "record": ["\\xfe", 1]}]
+    assert result["rows"] == [
+        {"array": [["\\xff"]], "record": ["\\xfe", 1]},
+        {"array": [["\\xff"]], "record": ["\\x72", 1]},
+    ]
+
+
+async def test_execute_renders_char_columns_as_text():
+    # asyncpg decodes "char" with its bytea codec, and the catalogs use it for flags.
+    conn = FakeConn(
+        [[{"relkind": b"r", "relpersistence": b"p"}]],
+        attributes=[
+            Attribute(name="relkind", type=CHAR_TYPE),
+            Attribute(name="relpersistence", type=CHAR_TYPE),
+        ],
+    )
+    sql = "SELECT relkind, relpersistence FROM pg_class WHERE relname='f'"
+    result = await PostgresDialect().execute(conn, sql)
+    assert result["rows"] == [{"relkind": "r", "relpersistence": "p"}]
+
+
+async def test_execute_renders_char_arrays_as_text():
+    rows = [{"v": [b"a", b"b"]}, {"v": [[b"a", None]]}]
+    conn = FakeConn([rows], attributes=[Attribute(name="v", type=CHAR_ARRAY_TYPE)])
+    result = await PostgresDialect().execute(conn, "SELECT v FROM f")
+    assert result["rows"] == [{"v": ["a", "b"]}, {"v": [["a", None]]}]
+
+
+async def test_execute_renders_non_utf8_char_as_hex():
+    # 'é'::"char" keeps only the first byte of the character, which is not valid UTF-8.
+    rows = [{"v": b"\xc3"}, {"v": None}]
+    conn = FakeConn([rows], attributes=[Attribute(name="v", type=CHAR_TYPE)])
+    result = await PostgresDialect().execute(conn, "SELECT v FROM f")
+    assert result["rows"] == [{"v": "\\xc3"}, {"v": None}]
+
+
+async def test_execute_renders_nul_char_as_an_empty_string():
+    # Postgres' own ''::"char"::text has length 0, though the wire carries one NUL byte.
+    conn = FakeConn(
+        [[{"v": b"\x00", "letters": [b"\x00", b"a"]}]],
+        attributes=[
+            Attribute(name="v", type=CHAR_TYPE),
+            Attribute(name="letters", type=CHAR_ARRAY_TYPE),
+        ],
+    )
+    result = await PostgresDialect().execute(conn, "SELECT v, letters FROM f")
+    assert result["rows"] == [{"v": "", "letters": ["", "a"]}]
+
+
+@pytest.mark.parametrize(
+    ("types", "expected"),
+    [
+        ((CHAR_TYPE, BYTEA_TYPE), "\\x72"),
+        ((BYTEA_TYPE, CHAR_TYPE), "r"),
+    ],
+)
+async def test_execute_renders_a_repeated_name_by_the_type_of_its_last_column(types, expected):
+    # Looking a type up by name would give both columns the same one.
+    class DuplicateColumnRow:
+        def items(self):
+            return [("a", b"r"), ("a", b"r")]
+
+    attributes = [Attribute(name="a", type=column_type) for column_type in types]
+    conn = FakeConn([[DuplicateColumnRow()]], attributes=attributes)
+    result = await PostgresDialect().execute(conn, "SELECT 1 AS a, 2 AS a")
+    assert result["rows"] == [{"a": expected}]
 
 
 async def test_execute_duplicate_column_names_keep_the_last_value():
@@ -460,6 +549,13 @@ async def test_execute_duplicate_column_names_keep_the_last_value():
     conn = FakeConn([[DuplicateColumnRow()]], attributes=["a", "a"])
     result = await PostgresDialect().execute(conn, "SELECT 1 AS a, 2 AS a")
     assert result == {"columns": ["a", "a"], "rows": [{"a": 2}]}
+
+
+async def test_execute_fails_when_a_row_has_more_columns_than_its_description():
+    # Pairing would otherwise stop at the shorter side and drop a column without a word.
+    conn = FakeConn([[{"a": 1, "b": 2}]], attributes=["a"])
+    with pytest.raises(ValueError, match="zip"):
+        await PostgresDialect().execute(conn, "SELECT a, b FROM f")
 
 
 async def test_execute_empty_select_reports_columns():

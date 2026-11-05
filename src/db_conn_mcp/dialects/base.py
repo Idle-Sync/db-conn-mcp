@@ -101,7 +101,11 @@ class Dialect(ABC):
         ``{columns, rows}`` when the statement describes a result set, which includes a
         write with ``RETURNING`` and a query that matches no rows; otherwise
         ``{rows_affected}``. The database decides, not the SQL text. Row values must
-        survive JSON serialization, so binary values arrive as text (Postgres: ``\\x`` hex).
+        survive JSON serialization, so rendering follows the server's column type (Postgres:
+        ``bytea`` as ``\\x`` hex text; a ``"char"`` column such as ``relkind``, ``contype`` or
+        ``prokind`` as its character, hex when the byte is not valid UTF-8; a ``"char"``
+        inside an anonymous ``ROW(...)`` as hex because the row description says only
+        ``record``).
 
         A statement that ran but whose rows cannot be decoded raises a sanitized
         ``ValueError`` saying that it ran.
