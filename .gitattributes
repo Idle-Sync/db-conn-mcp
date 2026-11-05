@@ -1,0 +1,5 @@
+.idleflow/lessons.md merge=union
+progress.md merge=union
+.idleflow/suggestions.md merge=union
+.idleflow/time-log.md merge=union
+CHANGELOG.md merge=union

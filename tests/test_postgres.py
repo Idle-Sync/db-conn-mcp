@@ -8,9 +8,11 @@ in postgres.py).
 """
 
 import asyncio
+from types import MappingProxyType
 
 import asyncpg
 import pytest
+from asyncpg.types import Attribute, Type
 
 from db_conn_mcp.dialects import postgres as pg
 from db_conn_mcp.dialects.base import Dialect
@@ -32,7 +34,7 @@ from db_conn_mcp.dialects.postgres import (
 
 
 class FakeTx:
-    """Records the transaction lifecycle (start / rollback)."""
+    """Records the transaction lifecycle (start / rollback), refusing what asyncpg refuses."""
 
     def __init__(self):
         self.started = False
@@ -42,6 +44,8 @@ class FakeTx:
         self.started = True
 
     async def rollback(self):
+        if not self.started:
+            raise asyncpg.InterfaceError("cannot rollback; the transaction is not yet started")
         self.rolled_back = True
 
 
@@ -55,10 +59,72 @@ class FakeAsyncpgCursor:
         return self._batches.pop(0) if self._batches else []
 
 
+TEXT_TYPE = Type(oid=25, name="text", kind="scalar", schema="pg_catalog")
+BYTEA_TYPE = Type(oid=17, name="bytea", kind="scalar", schema="pg_catalog")
+BYTEA_ARRAY_TYPE = Type(oid=1001, name="bytea[]", kind="array", schema="pg_catalog")
+CHAR_TYPE = Type(oid=18, name="char", kind="scalar", schema="pg_catalog")
+CHAR_ARRAY_TYPE = Type(oid=1002, name="char[]", kind="array", schema="pg_catalog")
+RECORD_TYPE = Type(oid=2249, name="record", kind="composite", schema="pg_catalog")
+
+
+class FakePreparedStatement:
+    """Serves rows like an asyncpg prepared statement and records how it was called.
+
+    ``attributes`` is the row description, separate from the rows, so a statement can
+    describe columns while returning none. A plain name stands for a ``text`` column. The
+    command tag stays ``None`` until ``fetch`` has run, as in asyncpg.
+    """
+
+    def __init__(
+        self, sql, rows, attributes, status, prepare_timeout, cursor_batches=(), transactions=()
+    ):
+        self.sql = sql
+        self.prepare_timeout = prepare_timeout
+        self.fetch_args: list[tuple] = []
+        self.fetch_timeouts: list = []
+        self.cursor_args: list[tuple] = []
+        self._cursor_batches = cursor_batches
+        self._transactions = transactions
+        self._rows = rows
+        self._attributes = tuple(
+            Attribute(name=attribute, type=TEXT_TYPE) if isinstance(attribute, str) else attribute
+            for attribute in attributes
+        )
+        self._status = status
+        self._has_run = False
+
+    async def fetch(self, *args, timeout=None):
+        self.fetch_args.append(args)
+        self.fetch_timeouts.append(timeout)
+        self._has_run = True
+        return self._rows
+
+    async def cursor(self, *args):
+        if not any(tx.started for tx in self._transactions):
+            raise asyncpg.NoActiveSQLTransactionError(
+                "cursor cannot be created outside of a transaction"
+            )
+        self.cursor_args.append(args)
+        return FakeAsyncpgCursor(self._cursor_batches)
+
+    def get_attributes(self):
+        return self._attributes
+
+    def get_statusmsg(self):
+        return self._status if self._has_run else None
+
+
 class FakeConn:
     """Records executed/fetched SQL (and args) and serves queued results in order."""
 
-    def __init__(self, fetch_results=None, fetchrow_results=None, cursor_batches=None):
+    def __init__(
+        self,
+        fetch_results=None,
+        fetchrow_results=None,
+        cursor_batches=None,
+        attributes=(),
+        status="UPDATE 3",
+    ):
         self.executed: list[str] = []
         self._fetch_queue = list(fetch_results or [])
         self._fetchrow_queue = list(fetchrow_results or [])
@@ -70,8 +136,24 @@ class FakeConn:
         self.fetchrow_args: list[tuple] = []
         self.transactions: list[FakeTx] = []
         self.cursor_batches = list(cursor_batches or [])
-        self.cursor_calls: list[tuple] = []
         self.closed = False
+        self.prepared: list[FakePreparedStatement] = []
+        self._attributes = attributes
+        self._status = status
+
+    async def prepare(self, sql, *, timeout=None):
+        rows = self._fetch_queue.pop(0) if self._fetch_queue else []
+        statement = FakePreparedStatement(
+            sql,
+            rows,
+            self._attributes,
+            self._status,
+            timeout,
+            self.cursor_batches,
+            self.transactions,
+        )
+        self.prepared.append(statement)
+        return statement
 
     async def execute(self, sql, *args, timeout=None):
         self.executed.append(sql)
@@ -93,10 +175,6 @@ class FakeConn:
         tx = FakeTx()
         self.transactions.append(tx)
         return tx
-
-    async def cursor(self, sql, *args):
-        self.cursor_calls.append((sql, args))
-        return FakeAsyncpgCursor(self.cursor_batches)
 
     async def close(self):
         self.closed = True
@@ -361,27 +439,218 @@ async def test_get_database_schema_orders_deterministically():
 
 
 async def test_sample_rows_quotes_identifier_and_limits():
-    conn = FakeConn([[{"id": 1}]])
+    conn = FakeConn([[{"id": 1}]], attributes=["id"])
     await PostgresDialect().sample_rows(conn, "users", n=5)
-    sql = conn.fetched[0]
+    sql = conn.prepared[0].sql
     assert '"users"' in sql
     assert "5" in sql
+
+
+async def test_sample_rows_maps_bytes_by_column_type():
+    # bytea is hex and "char" its character, the same as execute_read_query shows them.
+    conn = FakeConn(
+        [[{"data": b"\xff", "relkind": b"r"}]],
+        attributes=[
+            Attribute(name="data", type=BYTEA_TYPE),
+            Attribute(name="relkind", type=CHAR_TYPE),
+        ],
+    )
+    rows = await PostgresDialect().sample_rows(conn, "f")
+    assert rows == [{"data": "\\xff", "relkind": "r"}]
 
 
 # ---- execute result shaping --------------------------------------------------
 
 
 async def test_execute_select_returns_columns_and_rows():
-    conn = FakeConn([[{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]])
+    conn = FakeConn([[{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]], attributes=["id", "name"])
     result = await PostgresDialect().execute(conn, "SELECT id, name FROM users")
     assert result["columns"] == ["id", "name"]
     assert result["rows"] == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
+
+
+async def test_execute_maps_rows_to_plain_dicts():
+    # A driver row is mapping-like but not a dict, and the tool result must serialize.
+    conn = FakeConn([[MappingProxyType({"id": 1})]], attributes=["id"])
+    result = await PostgresDialect().execute(conn, "SELECT id FROM users")
+    assert type(result["rows"][0]) is dict
+    assert result["rows"] == [{"id": 1}]
+
+
+async def test_execute_renders_bytes_as_hex_text():
+    # Non-UTF-8 bytea would otherwise fail JSON serialization after the write has run.
+    conn = FakeConn(
+        [[{"data": b"\xff\x00"}]],
+        attributes=[Attribute(name="data", type=BYTEA_TYPE)],
+        status="INSERT 0 1",
+    )
+    result = await PostgresDialect().execute(conn, "INSERT INTO f VALUES (1) RETURNING data")
+    assert result["rows"] == [{"data": "\\xff00"}]
+
+
+async def test_execute_renders_bytes_inside_arrays_and_records_as_hex_text():
+    # bytea[] decodes to nested lists and an anonymous ROW(...) to a tuple.
+    # The row description says only record, so a "char" byte in ROW(...) stays hex too.
+    rows = [
+        {"array": [[b"\xff"]], "record": (b"\xfe", 1)},
+        {"array": [[b"\xff"]], "record": (b"r", 1)},
+    ]
+    conn = FakeConn(
+        [rows],
+        attributes=[
+            Attribute(name="array", type=BYTEA_ARRAY_TYPE),
+            Attribute(name="record", type=RECORD_TYPE),
+        ],
+    )
+    result = await PostgresDialect().execute(conn, "SELECT array, record FROM f")
+    assert result["rows"] == [
+        {"array": [["\\xff"]], "record": ["\\xfe", 1]},
+        {"array": [["\\xff"]], "record": ["\\x72", 1]},
+    ]
+
+
+async def test_execute_renders_utf8_bytea_arrays_as_hex():
+    # b"r" decodes as UTF-8, so only the column type keeps bytea[] apart from "char"[].
+    conn = FakeConn(
+        [[{"array": [[b"r"]]}]],
+        attributes=[Attribute(name="array", type=BYTEA_ARRAY_TYPE)],
+    )
+    result = await PostgresDialect().execute(conn, "SELECT array FROM f")
+    assert result["rows"] == [{"array": [["\\x72"]]}]
+
+
+async def test_execute_renders_char_columns_as_text():
+    # asyncpg decodes "char" with its bytea codec, and the catalogs use it for flags.
+    conn = FakeConn(
+        [[{"relkind": b"r", "relpersistence": b"p"}]],
+        attributes=[
+            Attribute(name="relkind", type=CHAR_TYPE),
+            Attribute(name="relpersistence", type=CHAR_TYPE),
+        ],
+    )
+    sql = "SELECT relkind, relpersistence FROM pg_class WHERE relname='f'"
+    result = await PostgresDialect().execute(conn, sql)
+    assert result["rows"] == [{"relkind": "r", "relpersistence": "p"}]
+
+
+async def test_execute_renders_char_arrays_as_text():
+    rows = [{"v": [b"a", b"b"]}, {"v": [[b"a", None]]}]
+    conn = FakeConn([rows], attributes=[Attribute(name="v", type=CHAR_ARRAY_TYPE)])
+    result = await PostgresDialect().execute(conn, "SELECT v FROM f")
+    assert result["rows"] == [{"v": ["a", "b"]}, {"v": [["a", None]]}]
+
+
+async def test_execute_renders_non_utf8_char_as_hex():
+    # 'é'::"char" keeps only the first byte of the character, which is not valid UTF-8.
+    rows = [{"v": b"\xc3"}, {"v": None}]
+    conn = FakeConn([rows], attributes=[Attribute(name="v", type=CHAR_TYPE)])
+    result = await PostgresDialect().execute(conn, "SELECT v FROM f")
+    assert result["rows"] == [{"v": "\\xc3"}, {"v": None}]
+
+
+async def test_execute_renders_nul_char_as_an_empty_string():
+    # Postgres' own ''::"char"::text has length 0, though the wire carries one NUL byte.
+    conn = FakeConn(
+        [[{"v": b"\x00", "letters": [b"\x00", b"a"]}]],
+        attributes=[
+            Attribute(name="v", type=CHAR_TYPE),
+            Attribute(name="letters", type=CHAR_ARRAY_TYPE),
+        ],
+    )
+    result = await PostgresDialect().execute(conn, "SELECT v, letters FROM f")
+    assert result["rows"] == [{"v": "", "letters": ["", "a"]}]
+
+
+@pytest.mark.parametrize(
+    ("types", "expected"),
+    [
+        ((CHAR_TYPE, BYTEA_TYPE), "\\x72"),
+        ((BYTEA_TYPE, CHAR_TYPE), "r"),
+    ],
+)
+async def test_execute_renders_a_repeated_name_by_the_type_of_its_last_column(types, expected):
+    # Looking a type up by name would give both columns the same one.
+    class DuplicateColumnRow:
+        def items(self):
+            return [("a", b"r"), ("a", b"r")]
+
+    attributes = [Attribute(name="a", type=column_type) for column_type in types]
+    conn = FakeConn([[DuplicateColumnRow()]], attributes=attributes)
+    result = await PostgresDialect().execute(conn, "SELECT 1 AS a, 2 AS a")
+    assert result["rows"] == [{"a": expected}]
+
+
+async def test_execute_duplicate_column_names_keep_the_last_value():
+    # columns follows the row description, but a row is keyed by name, so the earlier
+    # value of a repeated name is lost. The tool docstrings state this.
+    class DuplicateColumnRow:
+        def items(self):
+            return [("a", 1), ("a", 2)]
+
+    conn = FakeConn([[DuplicateColumnRow()]], attributes=["a", "a"])
+    result = await PostgresDialect().execute(conn, "SELECT 1 AS a, 2 AS a")
+    assert result == {"columns": ["a", "a"], "rows": [{"a": 2}]}
+
+
+async def test_execute_fails_when_a_row_has_more_columns_than_its_description():
+    # Pairing would otherwise stop at the shorter side and drop a column without a word.
+    conn = FakeConn([[{"a": 1, "b": 2}]], attributes=["a"])
+    with pytest.raises(ValueError, match="zip"):
+        await PostgresDialect().execute(conn, "SELECT a, b FROM f")
+
+
+async def test_execute_empty_select_reports_columns():
+    # The row description names the columns even when no row comes back.
+    conn = FakeConn([[]], attributes=["id", "name"], status="SELECT 0")
+    result = await PostgresDialect().execute(conn, "SELECT id, name FROM users")
+    assert result == {"columns": ["id", "name"], "rows": []}
 
 
 async def test_execute_write_returns_rows_affected():
     conn = FakeConn()
     result = await PostgresDialect().execute(conn, "UPDATE users SET x = 1")
     assert result == {"rows_affected": 3}
+
+
+async def test_execute_insert_returning_returns_rows():
+    conn = FakeConn([[{"id": 7}]], attributes=["id"], status="INSERT 0 1")
+    sql = "INSERT INTO users (email) VALUES ($1) RETURNING id"
+    result = await PostgresDialect().execute(conn, sql, ["a"], timeout_ms=1500)
+    assert result == {"columns": ["id"], "rows": [{"id": 7}]}
+    statement = conn.prepared[0]
+    assert statement.sql == sql
+    assert statement.fetch_args == [("a",)]
+    assert statement.fetch_timeouts == [1.5]
+
+
+async def test_execute_update_returning_returns_rows():
+    conn = FakeConn([[{"id": 1, "x": 1}, {"id": 2, "x": 1}]], attributes=["id", "x"])
+    sql = "UPDATE users SET x = 1 RETURNING id, x"
+    result = await PostgresDialect().execute(conn, sql, timeout_ms=1500)
+    assert result == {"columns": ["id", "x"], "rows": [{"id": 1, "x": 1}, {"id": 2, "x": 1}]}
+    statement = conn.prepared[0]
+    assert statement.sql == sql
+    assert statement.fetch_args == [()]
+    assert statement.fetch_timeouts == [1.5]
+
+
+async def test_execute_delete_returning_returns_rows():
+    conn = FakeConn([[{"id": 9}]], attributes=["id"], status="DELETE 1")
+    sql = "DELETE FROM users WHERE id = $1 RETURNING id"
+    result = await PostgresDialect().execute(conn, sql, [9], timeout_ms=1500)
+    assert result == {"columns": ["id"], "rows": [{"id": 9}]}
+    statement = conn.prepared[0]
+    assert statement.sql == sql
+    assert statement.fetch_args == [(9,)]
+    assert statement.fetch_timeouts == [1.5]
+
+
+async def test_execute_nested_comment_write_reports_rows_affected():
+    conn = FakeConn()
+    sql = "/* /* */ SELECT 1 */ UPDATE accounts SET balance = 0"
+    result = await PostgresDialect().execute(conn, sql)
+    assert result == {"rows_affected": 3}
+    assert conn.prepared[0].sql == sql
 
 
 # ---- multi-statement rejection (issue #40: dry-run bypass via embedded ;) ------
@@ -422,6 +691,21 @@ def test_reject_multiple_statements_allows_single():
     _reject_multiple_statements("SELECT $tag$a;b$tag$")  # tagged dollar-quote
     _reject_multiple_statements("/* a /* b */ c */ SELECT 1")  # nested block comment
     _reject_multiple_statements("SELECT 1 -- a; b\n")  # line comment with ;
+    _reject_multiple_statements("SELECT '-- a\r; b'")  # \r inside a string literal
+    _reject_multiple_statements("/* -- a\r; */ SELECT 1")  # \r inside a block comment
+
+
+def test_reject_multiple_statements_ends_line_comment_at_carriage_return():
+    # Postgres ends a -- comment at \r, so the ; COMMIT after it is live SQL.
+    with pytest.raises(ValueError):
+        _reject_multiple_statements("UPDATE u SET a = 2 -- x\r; COMMIT; SELECT 1")
+    with pytest.raises(ValueError):
+        _reject_multiple_statements("UPDATE u SET a = 2 --\r; COMMIT; SELECT 1")
+
+
+def test_reject_multiple_statements_ends_line_comment_at_newline():
+    with pytest.raises(ValueError):
+        _reject_multiple_statements("UPDATE u SET a = 2 -- x\n; COMMIT; SELECT 1")
 
 
 def test_reject_multiple_statements_ignores_empty_trailing():
@@ -437,27 +721,55 @@ async def test_execute_rejects_multi_statement_before_touching_db():
         await PostgresDialect().execute(conn, "DELETE FROM users; COMMIT;")
     assert conn.executed == []  # conn.execute never reached
     assert conn.fetched == []  # conn.fetch never reached
+    assert conn.prepared == []  # conn.prepare never reached
+
+
+async def test_execute_dry_run_rejects_carriage_return_comment_before_commit():
+    # If this SQL reached a server it would commit while reporting rolled_back: true.
+    conn = FakeConn()
+    with pytest.raises(ValueError):
+        await PostgresDialect().execute_dry_run(conn, "UPDATE u SET a = 2 -- x\r; COMMIT; SELECT 1")
+    assert conn.executed == []
+    assert conn.fetched == []
+    assert conn.prepared == []
+    assert conn.transactions == []  # rejected before BEGIN reaches the server
 
 
 # ---- params, timeouts, dry-run (issue #8 primitives) --------------------------
 
 
 async def test_execute_binds_params_via_driver():
-    conn = FakeConn([[{"id": 1}]])
-    await PostgresDialect().execute(conn, "SELECT * FROM users WHERE name = $1", ["O'Hara"])
-    assert conn.fetch_args[0] == ("O'Hara",)  # bound, never interpolated
+    conn = FakeConn([[{"id": 1}]], attributes=["id"])
+    sql = "SELECT * FROM users WHERE name = $1"
+    await PostgresDialect().execute(conn, sql, ["O'Hara"])
+    assert conn.prepared[0].sql == sql
+    assert conn.prepared[0].fetch_args == [("O'Hara",)]  # bound, never interpolated
 
 
 async def test_execute_passes_timeout_in_seconds():
-    conn = FakeConn([[{"id": 1}]])
+    conn = FakeConn([[{"id": 1}]], attributes=["id"])
     await PostgresDialect().execute(conn, "SELECT 1", timeout_ms=1500)
-    assert conn.fetch_timeouts[0] == 1.5
+    assert conn.prepared[0].prepare_timeout == 1.5
+    assert conn.prepared[0].fetch_timeouts == [1.5]
 
 
 async def test_execute_timeout_raises_sanitized_valueerror():
     class TimingOutConn(FakeConn):
-        async def fetch(self, sql, *args, timeout=None):
+        async def prepare(self, sql, *, timeout=None):
             raise TimeoutError
+
+    with pytest.raises(ValueError, match="timeout_ms=100"):
+        await PostgresDialect().execute(TimingOutConn(), "SELECT 1", timeout_ms=100)
+
+
+async def test_execute_timeout_during_fetch_raises_sanitized_valueerror():
+    class TimingOutStatement(FakePreparedStatement):
+        async def fetch(self, *args, timeout=None):
+            raise TimeoutError
+
+    class TimingOutConn(FakeConn):
+        async def prepare(self, sql, *, timeout=None):
+            return TimingOutStatement(sql, [], [], "", timeout)
 
     with pytest.raises(ValueError, match="timeout_ms=100"):
         await PostgresDialect().execute(TimingOutConn(), "SELECT 1", timeout_ms=100)
@@ -480,9 +792,72 @@ async def test_execute_dry_run_rolls_back_and_reports():
     assert tx.started and tx.rolled_back
 
 
+async def test_execute_dry_run_of_returning_reports_rows_and_rolls_back():
+    conn = FakeConn([[{"id": 7}]], attributes=["id"], status="INSERT 0 1")
+    sql = "INSERT INTO users (email) VALUES ($1) RETURNING id"
+    result = await PostgresDialect().execute_dry_run(conn, sql, ["a"])
+    assert result == {"columns": ["id"], "rows": [{"id": 7}], "dry_run": True, "rolled_back": True}
+    tx = conn.transactions[0]
+    assert tx.started and tx.rolled_back
+
+
+def _conn_whose_fetch_raises(error):
+    """A connection whose prepared statement raises ``error`` from ``fetch``."""
+
+    class RaisingStatement(FakePreparedStatement):
+        async def fetch(self, *args, timeout=None):
+            raise error
+
+    class RaisingConn(FakeConn):
+        async def prepare(self, sql, *, timeout=None):
+            return RaisingStatement(sql, [], ["d"], "", timeout)
+
+    return RaisingConn()
+
+
+@pytest.mark.parametrize(
+    "decode_error",
+    [
+        ValueError("year must be in 1..9999, not 20000"),
+        OverflowError("date value out of range"),
+    ],
+)
+async def test_execute_decode_failure_says_the_statement_ran(decode_error):
+    # asyncpg raises these builtins after the server finished, and their text quotes the value.
+    conn = _conn_whose_fetch_raises(decode_error)
+    with pytest.raises(ValueError, match="The statement ran") as raised:
+        await PostgresDialect().execute(conn, "INSERT INTO f VALUES (1) RETURNING d")
+    assert "20000" not in str(raised.value)
+    assert "out of range" not in str(raised.value)
+    assert raised.value.__suppress_context__
+
+
+async def test_execute_dry_run_decode_failure_still_rolls_back():
+    conn = _conn_whose_fetch_raises(ValueError("year must be in 1..9999, not 20000"))
+    with pytest.raises(ValueError, match="The statement ran"):
+        await PostgresDialect().execute_dry_run(conn, "INSERT INTO f VALUES (1) RETURNING d")
+    assert conn.transactions[0].rolled_back
+
+
+async def test_execute_argument_encoding_failure_is_not_reported_as_ran():
+    # asyncpg raises this before anything is sent, so nothing ran.
+    error = asyncpg.exceptions.DataError("invalid input for query argument $1")
+    with pytest.raises(asyncpg.exceptions.DataError, match="query argument"):
+        await PostgresDialect().execute(_conn_whose_fetch_raises(error), "SELECT $1", ["x"])
+
+
+async def test_execute_prepare_failure_is_not_reported_as_ran():
+    class RefusingConn(FakeConn):
+        async def prepare(self, sql, *, timeout=None):
+            raise ValueError("unknown type: public.nope")
+
+    with pytest.raises(ValueError, match="unknown type"):
+        await PostgresDialect().execute(RefusingConn(), "SELECT 1")
+
+
 async def test_execute_dry_run_rolls_back_even_on_error():
     class FailingConn(FakeConn):
-        async def execute(self, sql, *args, timeout=None):
+        async def prepare(self, sql, *, timeout=None):
             raise asyncpg.PostgresSyntaxError("bad sql")
 
     conn = FailingConn()
@@ -495,13 +870,27 @@ async def test_execute_dry_run_rolls_back_even_on_error():
 
 
 async def test_open_cursor_starts_tx_and_fetch_maps_dicts():
-    conn = FakeConn(cursor_batches=[[{"id": 1}, {"id": 2}], [{"id": 3}]])
+    conn = FakeConn(cursor_batches=[[{"id": 1}, {"id": 2}], [{"id": 3}]], attributes=["id"])
     cursor = await PostgresDialect().open_cursor(conn, "SELECT * FROM big", ["arg"])
     assert conn.transactions[0].started
-    assert conn.cursor_calls[0] == ("SELECT * FROM big", ("arg",))
+    assert conn.prepared[0].sql == "SELECT * FROM big"
+    assert conn.prepared[0].cursor_args == [("arg",)]
     assert await cursor.fetch(2) == [{"id": 1}, {"id": 2}]
     assert await cursor.fetch(2) == [{"id": 3}]
     assert await cursor.fetch(2) == []
+
+
+async def test_cursor_fetch_maps_bytes_by_column_type():
+    # bytea is hex and "char" its character, the same as execute_read_query shows them.
+    conn = FakeConn(
+        cursor_batches=[[{"data": b"\xff", "relkind": b"r"}]],
+        attributes=[
+            Attribute(name="data", type=BYTEA_TYPE),
+            Attribute(name="relkind", type=CHAR_TYPE),
+        ],
+    )
+    cursor = await PostgresDialect().open_cursor(conn, "SELECT data, relkind FROM f")
+    assert await cursor.fetch(10) == [{"data": "\\xff", "relkind": "r"}]
 
 
 async def test_cursor_close_rolls_back_and_closes_connection():
@@ -513,13 +902,28 @@ async def test_cursor_close_rolls_back_and_closes_connection():
 
 
 async def test_open_cursor_failure_rolls_back():
-    class NoCursorConn(FakeConn):
-        async def cursor(self, sql, *args):
+    class UnpreparableConn(FakeConn):
+        async def prepare(self, sql, *, timeout=None):
             raise asyncpg.PostgresSyntaxError("bad")
 
-    conn = NoCursorConn()
+    conn = UnpreparableConn()
     with pytest.raises(asyncpg.PostgresSyntaxError):
         await PostgresDialect().open_cursor(conn, "SELECT nope")
+    assert conn.transactions[0].rolled_back
+
+
+async def test_open_cursor_argument_failure_rolls_back():
+    class UnbindableStatement(FakePreparedStatement):
+        async def cursor(self, *args):
+            raise asyncpg.DataError("bad argument")
+
+    class UnbindableConn(FakeConn):
+        async def prepare(self, sql, *, timeout=None):
+            return UnbindableStatement(sql, [], [], "", timeout)
+
+    conn = UnbindableConn()
+    with pytest.raises(asyncpg.DataError):
+        await PostgresDialect().open_cursor(conn, "SELECT $1::int", ["x"])
     assert conn.transactions[0].rolled_back
 
 
@@ -814,6 +1218,13 @@ async def test_show_activity_keeps_query_when_opted_in():
         ("", ""),
         ("   ", ""),
         ("-- only a comment", ""),
+        ("/* /* */ SELECT 1 */ UPDATE t SET a=0", "update"),
+        ("/* a /* b */ c */ -- d\nSELECT 1", "select"),
+        ("/* /* */ SELECT 1", ""),
+        ("/*/ SELECT 1 */ UPDATE t SET a=0", "update"),
+        ("-- x\rUPDATE u SET a=3 /*\nSELECT 1 */", "update"),
+        ("--\rUPDATE t SET a=0", "update"),
+        ("-- a\n-- b\nSELECT 1", "select"),
     ],
 )
 def test_leading_keyword(sql, expected):
@@ -855,6 +1266,8 @@ def test_validate_read_only_accepts_read_statements(sql):
         # outright by the allowlist — the trailing write never gets a chance to run.
         "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE; DELETE FROM users",
         "set session characteristics as transaction read write; drop table t",
+        "/* /* */ SELECT 1 */ UPDATE accounts SET balance = 0",
+        "-- x\rUPDATE u SET a=3 /*\nSELECT 1 */",
     ],
 )
 def test_validate_read_only_rejects_non_read_statements(sql):

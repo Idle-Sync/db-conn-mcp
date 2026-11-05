@@ -42,12 +42,12 @@ ToolResult = Sequence[ContentBlock] | tuple[Sequence[ContentBlock], dict[str, An
 
 #: Tools that return raw row VALUES — the most attacker-controllable content this server
 #: emits, since anyone who can write a row chooses the text. Their payload must reach the
-#: agent ONLY inside the untrusted-data banner, so these four emit no ``structuredContent``
+#: agent ONLY inside the untrusted-data banner, so these five emit no ``structuredContent``
 #: at all: a client that renders only the structured channel would otherwise read raw row
 #: data with no fence around it. Metadata tools (schemas, stats, diagnostics, config) keep
 #: their structured output.
 VALUE_BEARING_TOOLS = frozenset(
-    {"sample_table_rows", "execute_read_query", "fetch_rows", "search_value"}
+    {"sample_table_rows", "execute_read_query", "execute_write_query", "fetch_rows", "search_value"}
 )
 
 #: What a value-bearing tool says when its result carries no rows at all. FastMCP turns
@@ -163,7 +163,7 @@ def _drop_value_bearing_output_schemas(app: GuardedFastMCP) -> None:
 
     Today only ``sample_table_rows`` actually declares one (FastMCP derives a schema from
     a ``list[dict]`` return annotation but not from a bare ``dict``); the loop covers all
-    four so a future annotation change cannot silently re-open the gap.
+    five so a future annotation change cannot silently re-open the gap.
     """
     for name in VALUE_BEARING_TOOLS:
         tool = app._tool_manager.get_tool(name)
@@ -260,6 +260,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Rows arrive on the text channel only, inside the untrusted-data banner: this
         tool emits no structuredContent.
+
+        Values render as on execute_read_query: bytea as `\\x` hex text, a `"char"` column
+        (`relkind`, `contype`, `prokind`, ...) as its character (hex when the byte is not
+        valid UTF-8), and hex for a `"char"` inside an anonymous `ROW(...)` or an array of
+        a domain over `"char"`.
         """
         return await handlers.sample_table_rows(database, table, n)
 
@@ -314,6 +319,15 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Rows arrive on the text channel only, inside the untrusted-data banner: this
         tool emits no structuredContent.
+
+        Result shape: `columns` lists every column the statement returned, but each row
+        is keyed by name, so a repeated name (`SELECT 1 AS a, 2 AS a`) keeps only its last
+        value: alias the columns to keep both. Rendering follows the server's column type:
+        bytea arrives as `\\x` hex text, a `"char"` column (`relkind`, `contype`, `prokind`,
+        ...) as its character (hex when the byte is not valid UTF-8), and a `"char"` inside
+        an anonymous `ROW(...)` as hex because the row description says only `record`. An
+        array of a domain over `"char"` also reads as hex, because that array has its own
+        type.
         """
         return await handlers.execute_read_query(database, sql, params, timeout_ms)
 
@@ -337,8 +351,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         SAFETY — the server enforces this flow; you cannot skip it silently:
         1. Call with dry_run=true (the default): the statement executes inside a
-           transaction and is ALWAYS rolled back, returning the rows_affected it
-           WOULD have had. This records a preview grant for this exact statement.
+           transaction and is ALWAYS rolled back, returning its would-be
+           `rows_affected`, or the `RETURNING` rows. This records a preview grant for
+           this exact statement. `RETURNING` values from a dry-run are rolled back and
+           are not the values the commit will produce (sequences advance, so generated
+           ids differ): never quote a preview id as the real one.
         2. Show the user the exact SQL and the dry-run result; ask for permission
            (not needed if the database has yolo enabled).
         3. Call again with dry_run=false (and user_consent=true unless yolo) to
@@ -351,6 +368,19 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
            skip the preview.
 
         Pass values via `params` ($1/$2/... placeholders), not pasted into the SQL.
+
+        Rows arrive on the text channel only, inside the untrusted-data banner: this
+        tool emits no structuredContent.
+
+        Result shape: `columns` lists every column `RETURNING` named, but each row is
+        keyed by name, so a repeated name (`RETURNING id, id`) keeps only its last value:
+        alias the columns to keep both. Rendering follows the server's column type: bytea
+        arrives as `\\x` hex text, a `"char"` column (`relkind`, `contype`, `prokind`, ...)
+        as its character (hex when the byte is not valid UTF-8), and a `"char"` inside an
+        anonymous `ROW(...)` as hex because the row description says only `record`. An array
+        of a domain over `"char"` also reads as hex, because that array has its own type. An
+        error saying the statement ran but its rows could not be decoded means a commit is to be
+        treated as applied: check with a read before running it again.
         """
         # Scope the dry-run grant to THIS MCP session (issue #41): under --transport http
         # one Handlers instance is shared by every client, so a grant must not be
@@ -418,6 +448,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Rows arrive on the text channel only, inside the untrusted-data banner: this
         tool emits no structuredContent.
+
+        Values render as on execute_read_query: bytea as `\\x` hex text, a `"char"` column
+        (`relkind`, `contype`, `prokind`, ...) as its character (hex when the byte is not
+        valid UTF-8), and hex for a `"char"` inside an anonymous `ROW(...)` or an array of
+        a domain over `"char"`.
         """
         return await handlers.fetch_rows(cursor_id, n)
 

@@ -34,12 +34,10 @@ PROBE_TIMEOUT_SECONDS = 3.0
 #: The 8-byte PostgreSQL SSLRequest: length=8, code=80877103 (magic constant).
 _SSL_REQUEST = (8).to_bytes(4, "big") + (80877103).to_bytes(4, "big")
 
-# Leading keywords that begin a read-only, row-returning statement. This single set
-# does double duty: execute() uses it to shape the result ({columns, rows}), and the
-# read tool uses it as an allowlist (validate_read_only). The overlap is the point —
-# because every permitted read leader is row-returning, the statement runs through
-# asyncpg's extended (prepared-statement) protocol via fetch(), which refuses to run
-# more than one command. So banning non-read leaders also bans a trailing "; DELETE".
+# Leading keywords the read tool allows (validate_read_only); every other leader, so
+# every DML/DDL command and SET, is banned. A trailing "; DELETE" cannot slip past this
+# one-keyword check: every statement runs as one prepared statement over asyncpg's
+# extended protocol, which refuses stacked commands.
 _READ_ONLY_LEADERS = frozenset({"select", "with", "values", "table", "show", "explain"})
 
 #: Tables and views. Split so :func:`_build_list_tables_sql` can add a name filter
@@ -692,15 +690,16 @@ class _PostgresCursor:
     committed anything — it is read-only) and closes the connection.
     """
 
-    def __init__(self, conn: Any, tx: Any, cursor: Any):
+    def __init__(self, conn: Any, tx: Any, cursor: Any, attributes: tuple):
         self._conn = conn
         self._tx = tx
         self._cursor = cursor
+        self._attributes = attributes
 
     async def fetch(self, n: int) -> list[dict]:
         """Fetch up to ``n`` more rows; fewer (or none) means the cursor is exhausted."""
         rows = await self._cursor.fetch(max(1, int(n)))
-        return [dict(r) for r in rows]
+        return [_json_safe_row(r, self._attributes) for r in rows]
 
     async def close(self) -> None:
         """Release the cursor, its transaction, and the underlying connection."""
@@ -713,18 +712,31 @@ class _PostgresCursor:
 def _leading_keyword(sql: str) -> str:
     """Return the first SQL keyword, lowercased, ignoring leading whitespace/comments.
 
-    Leading ``--`` line comments and ``/* */`` block comments are skipped so a query
-    like ``-- note\\nSELECT 1`` still reports ``select``. Returns ``""`` for blank or
-    comment-only input. Used both to shape results and to gate the read tool.
+    Leading ``--`` line comments (which end at ``\\r`` or ``\\n``) and ``/* */`` block
+    comments (which nest), both as in Postgres, are skipped so a query like
+    ``-- note\\nSELECT 1`` still reports ``select``. Returns ``""`` for blank, comment-only
+    or unterminated-comment input. Used both to shape results and to gate the read tool.
     """
     s = sql.lstrip()
     while s:
         if s.startswith("--"):
-            newline = s.find("\n")
-            s = "" if newline == -1 else s[newline + 1 :].lstrip()
+            i = 2
+            while i < len(s) and s[i] not in "\r\n":
+                i += 1
+            s = s[i:].lstrip()
         elif s.startswith("/*"):
-            end = s.find("*/")
-            s = "" if end == -1 else s[end + 2 :].lstrip()
+            depth = 1
+            i = 2
+            while i < len(s) and depth:
+                if s.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif s.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            s = "" if depth else s[i:].lstrip()
         else:
             break
     return s.split(None, 1)[0].lower() if s else ""
@@ -749,10 +761,10 @@ def _reject_multiple_statements(sql: str) -> None:
     This is a small single-pass character scanner, not an AST parser (project Rule 1). It
     skips semicolons that live inside single-quoted literals (with ``''`` escapes),
     ``E'...'`` escape strings (backslash escapes), double-quoted identifiers, dollar-quoted
-    bodies (``$tag$ ... $tag$``, empty tag ``$$`` included), line comments (``-- ...``) and
-    nested block comments (``/* ... */``). A single trailing semicolon, optionally followed
-    by whitespace or comments, is one statement and is allowed; two or more non-empty
-    statements are rejected.
+    bodies (``$tag$ ... $tag$``, empty tag ``$$`` included), line comments (``-- ...``,
+    ending at ``\\r`` or ``\\n`` as in Postgres) and nested block comments (``/* ... */``).
+    A single trailing semicolon, optionally followed by whitespace or comments, is one
+    statement and is allowed; two or more non-empty statements are rejected.
 
     The message names no SQL content (Rule 6): it states only the constraint.
     """
@@ -763,8 +775,9 @@ def _reject_multiple_statements(sql: str) -> None:
     while i < n:
         ch = sql[i]
         if ch == "-" and sql.startswith("--", i):  # line comment
-            newline = sql.find("\n", i)
-            i = n if newline == -1 else newline + 1
+            i += 2
+            while i < n and sql[i] not in "\r\n":
+                i += 1
             continue
         if ch == "/" and sql.startswith("/*", i):  # nested block comment
             depth = 1
@@ -967,8 +980,10 @@ class PostgresDialect(Dialect):
     async def sample_rows(self, conn: Any, table: str, n: int = 10) -> list[dict]:
         limit = max(0, int(n))  # coerce to a safe non-negative int (never interpolate raw)
         sql = f"SELECT * FROM {_quote_identifier(table)} LIMIT {limit}"
-        rows = await conn.fetch(sql)
-        return [dict(r) for r in rows]
+        statement = await conn.prepare(sql)
+        rows = await statement.fetch()
+        attributes = statement.get_attributes()
+        return [_json_safe_row(r, attributes) for r in rows]
 
     async def execute(
         self,
@@ -977,20 +992,23 @@ class PostgresDialect(Dialect):
         params: list[Any] | None = None,
         timeout_ms: int | None = None,
     ) -> dict:
-        # Defense-in-depth (issue #40): reject stacked statements up front, before either
-        # dispatch branch, so an embedded ``COMMIT`` can never escape the dry-run
-        # transaction regardless of the row-returning heuristic.
+        # Defense-in-depth (issue #40): reject stacked statements before the driver sees
+        # them, so an embedded ``COMMIT`` can never escape the dry-run transaction.
         _reject_multiple_statements(sql)
         args = list(params or [])
         timeout = _timeout_seconds(timeout_ms)
         try:
-            if self._is_row_returning(sql):
-                rows = await conn.fetch(sql, *args, timeout=timeout)
-                mapped = [dict(r) for r in rows]
-                columns = list(mapped[0].keys()) if mapped else []
-                return {"columns": columns, "rows": mapped}
-            status = await conn.execute(sql, *args, timeout=timeout)
-            return {"rows_affected": _parse_affected(status)}
+            statement = await conn.prepare(sql, timeout=timeout)
+            rows = await _fetch_statement_rows(statement, args, timeout)
+            # The server's row description decides the shape, not the SQL text: it covers
+            # RETURNING on a write and names the columns of a result with no rows.
+            attributes = statement.get_attributes()
+            if attributes:
+                return {
+                    "columns": [attribute.name for attribute in attributes],
+                    "rows": [_json_safe_row(r, attributes) for r in rows],
+                }
+            return {"rows_affected": _parse_affected(statement.get_statusmsg())}
         except TimeoutError:
             # Sanitized: the query was cancelled server-side by the driver.
             raise ValueError(f"Query exceeded timeout_ms={timeout_ms} and was cancelled.") from None
@@ -1002,6 +1020,7 @@ class PostgresDialect(Dialect):
         params: list[Any] | None = None,
         timeout_ms: int | None = None,
     ) -> dict:
+        _reject_multiple_statements(sql)  # no BEGIN reaches the server for rejected SQL
         tx = conn.transaction()
         await tx.start()
         try:
@@ -1014,11 +1033,13 @@ class PostgresDialect(Dialect):
         tx = conn.transaction()
         await tx.start()
         try:
-            cursor = await conn.cursor(sql, *(params or []))
+            # An asyncpg cursor has no row description, so the statement provides it.
+            statement = await conn.prepare(sql)
+            cursor = await statement.cursor(*(params or []))
         except Exception:
             await tx.rollback()
             raise
-        return _PostgresCursor(conn, tx, cursor)
+        return _PostgresCursor(conn, tx, cursor, statement.get_attributes())
 
     async def get_object_definition(self, conn: Any, object_type: str, name: str) -> list[dict]:
         query = _OBJECT_DEFINITION_SQL.get(object_type)
@@ -1107,9 +1128,9 @@ class PostgresDialect(Dialect):
 
         The bar is a single read-only, row-returning statement. Requiring a leader in
         :data:`_READ_ONLY_LEADERS` bans ``SET`` (so the session can't be flipped out of
-        ``READ ONLY``) and every DML/DDL command; and since those leaders all route to
-        ``fetch()`` — asyncpg's extended protocol, which runs exactly one command — a
-        piggy-backed ``; DELETE ...`` is refused too. No SQL parsing, by design.
+        ``READ ONLY``) and every DML/DDL command; and since every statement runs as one
+        prepared statement over asyncpg's extended protocol, which refuses stacked
+        commands, a piggy-backed ``; DELETE ...`` is refused too. No SQL parsing, by design.
         """
         leader = _leading_keyword(sql)
         if not leader:
@@ -1189,13 +1210,81 @@ class PostgresDialect(Dialect):
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
 
-    @staticmethod
-    def _is_row_returning(sql: str) -> bool:
-        """Heuristic: does this statement return a result set?"""
-        return _leading_keyword(sql) in _READ_ONLY_LEADERS
+
+async def _fetch_statement_rows(
+    statement: Any, args: list[Any], timeout: float | None
+) -> list[Any]:
+    """Run a prepared statement, naming a failure to decode its rows for what it is.
+
+    asyncpg decodes rows on the client, after the server has run the statement. A value
+    Python cannot represent (a date past year 9999) raises a builtin whose text quotes the
+    value and says nothing about the write. An argument that fails to encode raises
+    ``asyncpg.exceptions.DataError`` instead and passes through, because that statement
+    never ran.
+    """
+    try:
+        return await statement.fetch(*args, timeout=timeout)
+    except (ValueError, OverflowError):
+        raise ValueError(
+            "The statement ran, but the rows it returned could not be decoded: a value is "
+            "outside what the client can represent. Treat a write as applied and check with "
+            "a read before running it again; a dry run was rolled back. To see the rows, cast "
+            "that value to text."
+        ) from None
 
 
-def _parse_affected(status: str) -> int:
+#: ``"char"`` and ``"char"[]``: asyncpg decodes them with its bytea codec, but they hold text.
+#: An array of a domain over ``"char"`` has its own OID, so it is not listed and reads as hex.
+_CHAR_TYPE_OIDS = frozenset({18, 1002})
+
+
+def _json_safe_row(row: Any, attributes: tuple) -> dict:
+    """Map a row to a dict, rendering each value by its column's type.
+
+    Attributes pair with ``row.items()`` by position: a repeated name can hold two types,
+    and it keeps its last value, as the tool docstrings state.
+    """
+    safe_row = {}
+    for attribute, (column, value) in zip(attributes, row.items(), strict=True):
+        if attribute.type.oid in _CHAR_TYPE_OIDS:
+            safe_row[column] = _char_value_as_text(value)
+        else:
+            safe_row[column] = _json_safe_value(value)
+    return safe_row
+
+
+def _char_value_as_text(value: Any) -> Any:
+    """Render a ``"char"`` value as its character, or as hex when it is not valid UTF-8.
+
+    The NUL byte renders as the empty string, which is what ``''::"char"::text`` returns.
+    """
+    if isinstance(value, list):
+        return [_char_value_as_text(item) for item in value]
+    if not isinstance(value, bytes):
+        return value
+    if value == b"\x00":
+        return ""
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError:
+        return _json_safe_value(value)
+
+
+def _json_safe_value(value: Any) -> Any:
+    """Render ``bytes`` as Postgres' ``\\x`` hex text, inside arrays and records too.
+
+    Tool results are JSON, and the SDK's serialization fails on non-UTF-8 ``bytes`` after
+    the statement has already run. Declared composite types decode to an ``asyncpg.Record``,
+    which that serialization stringifies without failing, so they are left alone.
+    """
+    if isinstance(value, bytes):
+        return f"\\x{value.hex()}"
+    if isinstance(value, list | tuple):
+        return [_json_safe_value(item) for item in value]
+    return value
+
+
+def _parse_affected(status: str | None) -> int:
     """Extract the affected-row count from an asyncpg command tag like ``UPDATE 3``."""
     try:
         return int(status.split()[-1])

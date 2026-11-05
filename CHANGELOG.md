@@ -11,7 +11,42 @@ the time of that release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- A read query whose leading block comment contains a nested comment (`/* /* */ ... */`) is
+  now rejected by the read tool instead of reaching the server.
+- A `--` comment ending in a carriage return (`\r`) now ends the comment for both the read
+  gate and the single-statement check, so such a comment can no longer hide a write from the
+  read tool or let `; COMMIT` escape a dry run.
+
+### Breaking / Behaviour changes
+
+- **`execute_write_query` now returns `{columns, rows}` for statements with `RETURNING`.** Your
+  `INSERT`, `UPDATE` or `DELETE ... RETURNING` call, dry-run and commit alike, returned
+  `{rows_affected}` before; read `rows` instead. `RETURNING` values from a dry-run are rolled
+  back and are not the values the commit will produce (sequences advance, so generated ids
+  differ), so never quote a preview id as the real one. Empty `SELECT` results now list their
+  columns, where `columns` was `[]`. The result shape now follows the server's row description
+  for every statement on both query tools: `(SELECT 1 AS a)` and a `CALL` with an `INOUT`
+  argument now return `{columns, rows}`, `WITH x AS (SELECT 1) UPDATE ...` now returns
+  `{rows_affected}`, `SELECT FROM e` (zero columns) now returns `{rows_affected}`, and an empty
+  or comment-only statement returns `{rows_affected: 0}` where it raised an error.
+- **bytea values now arrive as `\x` hex text on `execute_read_query` and `execute_write_query`.**
+  Your bytea column read back as plain text when it held valid UTF-8 and failed the whole call
+  when it did not; it now always reads as `\xff00`.
+  Your `"char"` catalog columns (`relkind`, `contype`, `prokind`, ...) keep reading as their
+  character, in hex only when the byte is not valid UTF-8. A `"char"` inside an anonymous
+  `ROW(...)` reads as hex, because the row description says only `record`. An empty `"char"`
+  reads as an empty string, as `''::"char"::text` does.
+  An array of a domain over `"char"` reads as hex, because that array has its own type.
+  Your `sample_table_rows` and `fetch_rows` calls now render values the same way: a bytea that
+  held valid UTF-8 reads as hex instead of plain text, and a non-UTF-8 bytea no longer fails the
+  whole call. `search_value` samples were already text, so they are unchanged.
+- **A statement whose returned rows cannot be decoded now fails and says it ran.** Your
+  `RETURNING` of a value Python cannot represent (a date past year 9999) returned
+  `{rows_affected}`, and a `SELECT` of one raised the driver's raw error; both now raise an error
+  saying the statement ran, so treat a commit as applied and check with a read before retrying. A
+  dry run that fails this way grants no commit: cast the value to text, or use `skip_dry_run`.
 
 ## [0.7.1] — 2026-08-13
 
