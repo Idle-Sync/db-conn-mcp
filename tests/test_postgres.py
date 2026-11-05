@@ -438,6 +438,13 @@ def test_reject_multiple_statements_ends_line_comment_at_carriage_return():
     # Postgres ends a -- comment at \r, so the ; COMMIT after it is live SQL.
     with pytest.raises(ValueError):
         _reject_multiple_statements("UPDATE u SET a = 2 -- x\r; COMMIT; SELECT 1")
+    with pytest.raises(ValueError):
+        _reject_multiple_statements("UPDATE u SET a = 2 --\r; COMMIT; SELECT 1")
+
+
+def test_reject_multiple_statements_ends_line_comment_at_newline():
+    with pytest.raises(ValueError):
+        _reject_multiple_statements("UPDATE u SET a = 2 -- x\n; COMMIT; SELECT 1")
 
 
 def test_reject_multiple_statements_ignores_empty_trailing():
@@ -456,7 +463,7 @@ async def test_execute_rejects_multi_statement_before_touching_db():
 
 
 async def test_execute_dry_run_rejects_carriage_return_comment_before_commit():
-    # Against a real server this SQL commits while the tool reports rolled_back: true.
+    # If this SQL reached a server it would commit while reporting rolled_back: true.
     conn = FakeConn()
     with pytest.raises(ValueError):
         await PostgresDialect().execute_dry_run(conn, "UPDATE u SET a = 2 -- x\r; COMMIT; SELECT 1")
@@ -845,6 +852,8 @@ async def test_show_activity_keeps_query_when_opted_in():
         ("/* /* */ SELECT 1", ""),
         ("/*/ SELECT 1 */ UPDATE t SET a=0", "update"),
         ("-- x\rUPDATE u SET a=3 /*\nSELECT 1 */", "update"),
+        ("--\rUPDATE t SET a=0", "update"),
+        ("-- a\n-- b\nSELECT 1", "select"),
     ],
 )
 def test_leading_keyword(sql, expected):
