@@ -38,6 +38,10 @@ the time of that release.
   character, in hex only when the byte is not valid UTF-8. A `"char"` inside an anonymous
   `ROW(...)` reads as hex, because the row description says only `record`. An empty `"char"`
   reads as an empty string, as `''::"char"::text` does.
+  An array of a domain over `"char"` reads as hex, because that array has its own type.
+  Your `sample_table_rows` and `fetch_rows` calls now render values the same way: a bytea that
+  held valid UTF-8 reads as hex instead of plain text, and a non-UTF-8 bytea no longer fails the
+  whole call. `search_value` samples were already text, so they are unchanged.
 - **A statement whose returned rows cannot be decoded now fails and says it ran.** Your
   `RETURNING` of a value Python cannot represent (a date past year 9999) returned
   `{rows_affected}`, and a `SELECT` of one raised the driver's raw error; both now raise an error

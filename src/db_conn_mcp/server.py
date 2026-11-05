@@ -260,6 +260,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Rows arrive on the text channel only, inside the untrusted-data banner: this
         tool emits no structuredContent.
+
+        Values render as on execute_read_query: bytea as `\\x` hex text, a `"char"` column
+        (`relkind`, `contype`, `prokind`, ...) as its character (hex when the byte is not
+        valid UTF-8), and hex for a `"char"` inside an anonymous `ROW(...)` or an array of
+        a domain over `"char"`.
         """
         return await handlers.sample_table_rows(database, table, n)
 
@@ -320,7 +325,9 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         value: alias the columns to keep both. Rendering follows the server's column type:
         bytea arrives as `\\x` hex text, a `"char"` column (`relkind`, `contype`, `prokind`,
         ...) as its character (hex when the byte is not valid UTF-8), and a `"char"` inside
-        an anonymous `ROW(...)` as hex because the row description says only `record`.
+        an anonymous `ROW(...)` as hex because the row description says only `record`. An
+        array of a domain over `"char"` also reads as hex, because that array has its own
+        type.
         """
         return await handlers.execute_read_query(database, sql, params, timeout_ms)
 
@@ -370,8 +377,9 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         alias the columns to keep both. Rendering follows the server's column type: bytea
         arrives as `\\x` hex text, a `"char"` column (`relkind`, `contype`, `prokind`, ...)
         as its character (hex when the byte is not valid UTF-8), and a `"char"` inside an
-        anonymous `ROW(...)` as hex because the row description says only `record`. An error
-        saying the statement ran but its rows could not be decoded means a commit is to be
+        anonymous `ROW(...)` as hex because the row description says only `record`. An array
+        of a domain over `"char"` also reads as hex, because that array has its own type. An
+        error saying the statement ran but its rows could not be decoded means a commit is to be
         treated as applied: check with a read before running it again.
         """
         # Scope the dry-run grant to THIS MCP session (issue #41): under --transport http
@@ -440,6 +448,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Rows arrive on the text channel only, inside the untrusted-data banner: this
         tool emits no structuredContent.
+
+        Values render as on execute_read_query: bytea as `\\x` hex text, a `"char"` column
+        (`relkind`, `contype`, `prokind`, ...) as its character (hex when the byte is not
+        valid UTF-8), and hex for a `"char"` inside an anonymous `ROW(...)` or an array of
+        a domain over `"char"`.
         """
         return await handlers.fetch_rows(cursor_id, n)
 

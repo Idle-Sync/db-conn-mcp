@@ -86,7 +86,11 @@ class Dialect(ABC):
 
     @abstractmethod
     async def sample_rows(self, conn: Any, table: str, n: int = 10) -> list[dict]:
-        """Return the first ``n`` rows. The identifier MUST be safely quoted (Rule 9)."""
+        """Return the first ``n`` rows. The identifier MUST be safely quoted (Rule 9).
+
+        Values render as in :meth:`execute` (Postgres: ``bytea`` as ``\\x`` hex text,
+        ``"char"`` as its character).
+        """
 
     @abstractmethod
     async def execute(
@@ -105,7 +109,8 @@ class Dialect(ABC):
         ``bytea`` as ``\\x`` hex text; a ``"char"`` column such as ``relkind``, ``contype`` or
         ``prokind`` as its character, hex when the byte is not valid UTF-8; a ``"char"``
         inside an anonymous ``ROW(...)`` as hex because the row description says only
-        ``record``).
+        ``record``; an array of a domain over ``"char"`` as hex because that array has its
+        own type).
 
         A statement that ran but whose rows cannot be decoded raises a sanitized
         ``ValueError`` saying that it ran.
@@ -139,7 +144,9 @@ class Dialect(ABC):
         Returns a cursor handle owning ``conn`` and its transaction, exposing
         ``await fetch(n) -> list[dict]`` and ``await close()`` (which must also
         close the underlying connection). The caller keeps the handle alive
-        across tool calls; the dialect never stores it.
+        across tool calls; the dialect never stores it. Fetched values render as in
+        :meth:`execute` (Postgres: ``bytea`` as ``\\x`` hex text, ``"char"`` as its
+        character).
         """
 
     @abstractmethod
