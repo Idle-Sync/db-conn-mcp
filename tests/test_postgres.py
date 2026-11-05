@@ -34,7 +34,7 @@ from db_conn_mcp.dialects.postgres import (
 
 
 class FakeTx:
-    """Records the transaction lifecycle (start / rollback)."""
+    """Records the transaction lifecycle (start / rollback), refusing what asyncpg refuses."""
 
     def __init__(self):
         self.started = False
@@ -44,6 +44,8 @@ class FakeTx:
         self.started = True
 
     async def rollback(self):
+        if not self.started:
+            raise asyncpg.InterfaceError("cannot rollback; the transaction is not yet started")
         self.rolled_back = True
 
 
@@ -73,13 +75,16 @@ class FakePreparedStatement:
     command tag stays ``None`` until ``fetch`` has run, as in asyncpg.
     """
 
-    def __init__(self, sql, rows, attributes, status, prepare_timeout, cursor_batches=()):
+    def __init__(
+        self, sql, rows, attributes, status, prepare_timeout, cursor_batches=(), transactions=()
+    ):
         self.sql = sql
         self.prepare_timeout = prepare_timeout
         self.fetch_args: list[tuple] = []
         self.fetch_timeouts: list = []
         self.cursor_args: list[tuple] = []
         self._cursor_batches = cursor_batches
+        self._transactions = transactions
         self._rows = rows
         self._attributes = tuple(
             Attribute(name=attribute, type=TEXT_TYPE) if isinstance(attribute, str) else attribute
@@ -95,6 +100,10 @@ class FakePreparedStatement:
         return self._rows
 
     async def cursor(self, *args):
+        if not any(tx.started for tx in self._transactions):
+            raise asyncpg.NoActiveSQLTransactionError(
+                "cursor cannot be created outside of a transaction"
+            )
         self.cursor_args.append(args)
         return FakeAsyncpgCursor(self._cursor_batches)
 
@@ -135,7 +144,13 @@ class FakeConn:
     async def prepare(self, sql, *, timeout=None):
         rows = self._fetch_queue.pop(0) if self._fetch_queue else []
         statement = FakePreparedStatement(
-            sql, rows, self._attributes, self._status, timeout, self.cursor_batches
+            sql,
+            rows,
+            self._attributes,
+            self._status,
+            timeout,
+            self.cursor_batches,
+            self.transactions,
         )
         self.prepared.append(statement)
         return statement
