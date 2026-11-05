@@ -430,6 +430,14 @@ def test_reject_multiple_statements_allows_single():
     _reject_multiple_statements("SELECT $tag$a;b$tag$")  # tagged dollar-quote
     _reject_multiple_statements("/* a /* b */ c */ SELECT 1")  # nested block comment
     _reject_multiple_statements("SELECT 1 -- a; b\n")  # line comment with ;
+    _reject_multiple_statements("SELECT '-- a\r; b'")  # \r inside a string literal
+    _reject_multiple_statements("/* -- a\r; */ SELECT 1")  # \r inside a block comment
+
+
+def test_reject_multiple_statements_ends_line_comment_at_carriage_return():
+    # Postgres ends a -- comment at \r, so the ; COMMIT after it is live SQL.
+    with pytest.raises(ValueError):
+        _reject_multiple_statements("UPDATE u SET a = 2 -- x\r; COMMIT; SELECT 1")
 
 
 def test_reject_multiple_statements_ignores_empty_trailing():
@@ -445,6 +453,16 @@ async def test_execute_rejects_multi_statement_before_touching_db():
         await PostgresDialect().execute(conn, "DELETE FROM users; COMMIT;")
     assert conn.executed == []  # conn.execute never reached
     assert conn.fetched == []  # conn.fetch never reached
+
+
+async def test_execute_dry_run_rejects_carriage_return_comment_before_commit():
+    # Against a real server this SQL commits while the tool reports rolled_back: true.
+    conn = FakeConn()
+    with pytest.raises(ValueError):
+        await PostgresDialect().execute_dry_run(conn, "UPDATE u SET a = 2 -- x\r; COMMIT; SELECT 1")
+    assert conn.executed == []
+    assert conn.fetched == []
+    assert conn.transactions == []  # rejected before BEGIN reaches the server
 
 
 # ---- params, timeouts, dry-run (issue #8 primitives) --------------------------
@@ -826,6 +844,7 @@ async def test_show_activity_keeps_query_when_opted_in():
         ("/* a /* b */ c */ -- d\nSELECT 1", "select"),
         ("/* /* */ SELECT 1", ""),
         ("/*/ SELECT 1 */ UPDATE t SET a=0", "update"),
+        ("-- x\rUPDATE u SET a=3 /*\nSELECT 1 */", "update"),
     ],
 )
 def test_leading_keyword(sql, expected):
@@ -868,6 +887,7 @@ def test_validate_read_only_accepts_read_statements(sql):
         "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE; DELETE FROM users",
         "set session characteristics as transaction read write; drop table t",
         "/* /* */ SELECT 1 */ UPDATE accounts SET balance = 0",
+        "-- x\rUPDATE u SET a=3 /*\nSELECT 1 */",
     ],
 )
 def test_validate_read_only_rejects_non_read_statements(sql):

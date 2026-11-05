@@ -13,8 +13,11 @@ the time of that release.
 
 ### Fixed
 
-- A read query whose leading block comment nests another comment (`/* /* */ ... */`) is now
-  rejected by the read tool instead of reaching the server.
+- A read query whose leading block comment contains a nested comment (`/* /* */ ... */`) is
+  now rejected by the read tool instead of reaching the server.
+- A `--` comment ending in a carriage return (`\r`) now ends the comment for both the read
+  gate and the single-statement check, so such a comment can no longer hide a write from the
+  read tool or let `; COMMIT` escape a dry run.
 
 ## [0.7.1] — 2026-08-13
 
