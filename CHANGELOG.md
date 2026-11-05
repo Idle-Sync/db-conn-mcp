@@ -26,6 +26,13 @@ the time of that release.
   dropped when the file is saved (#46).
 - A failed write to an MCP client's config file no longer truncates it: the file keeps its old
   contents, no temp file stays behind, and the error says the file is unchanged (#53).
+- `status`, `setup`, `add` and `remove` print the config error and exit 1 instead of a traceback
+  when connections.json is malformed, including a file that is not UTF-8 text (#54).
+- A client config that cannot be written is skipped with a message (CLI) or a 409 (dashboard)
+  instead of a traceback or 500.
+- A connections.json that cannot be updated, such as one in a read-only folder, is reported in one
+  line by `remove` and as a 409 by the dashboard's add, edit and delete, instead of a traceback or
+  500. A mistyped name or a duplicate still gets its usual refusal there, and writes nothing.
 
 ### Breaking / Behaviour changes
 

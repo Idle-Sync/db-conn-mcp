@@ -98,6 +98,9 @@ def load(explicit: str | None = None) -> Config:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ConfigError(f"{path} is not valid JSON: {exc.msg} (line {exc.lineno}).") from None
+    except UnicodeDecodeError:
+        # from None: the decode error's .object holds the whole file, DSNs included (Rule 6).
+        raise ConfigError(f"{path} is not valid JSON: the file is not UTF-8 text.") from None
     try:
         config = Config.model_validate(raw)
     except ValidationError as exc:
