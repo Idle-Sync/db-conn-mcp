@@ -876,3 +876,111 @@ def test_doctor_endpoint_returns_findings(cfg_client, monkeypatch):
     r = client.post("/api/doctor", json={"offline": True}, headers=_hdr())
     assert r.status_code == 200
     assert r.json()[0]["status"] == "ok"
+
+
+# ---- the file lock wraps every dashboard read-modify-write ----
+
+
+@pytest.fixture()
+def lock_events(monkeypatch):
+    """Record lock enter/exit and config load/save in call order."""
+    import contextlib
+
+    from db_conn_mcp import config
+
+    events: list[str] = []
+    real_locked, real_load, real_save = config.locked, config.load, config.save
+
+    @contextlib.contextmanager
+    def recording_locked(path):
+        with real_locked(path):
+            events.append("enter")
+            try:
+                yield
+            finally:
+                events.append("exit")
+
+    def recording_load(*args, **kwargs):
+        events.append("load")
+        return real_load(*args, **kwargs)
+
+    def recording_save(*args, **kwargs):
+        events.append("save")
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(config, "locked", recording_locked)
+    monkeypatch.setattr(config, "load", recording_load)
+    monkeypatch.setattr(config, "save", recording_save)
+    return events
+
+
+@pytest.mark.parametrize("verb", ["POST", "PATCH", "DELETE"])
+def test_file_lock_order(verb, cfg_client, lock_events):
+    client, cfg = cfg_client
+    cfg.write_text(
+        json.dumps({"connections": [{"name": "a", "dsn": SECRET_DSN, "mode": "read"}]}),
+        encoding="utf-8",
+    )
+    lock_events.clear()
+    if verb == "POST":
+        r = client.post(
+            "/api/databases",
+            json={"name": "b", "dsn": OTHER_DSN, "mode": "read"},
+            headers=_hdr(),
+        )
+    elif verb == "PATCH":
+        r = client.patch("/api/databases/a", json={"mode": "write"}, headers=_hdr())
+    else:
+        r = client.delete("/api/databases/a", headers=_hdr())
+    assert r.status_code in (200, 201)
+    inside = False
+    loaded_inside = False
+    for event in lock_events:
+        if event == "enter":
+            inside, loaded_inside = True, False
+        elif event == "exit":
+            inside = False
+        elif event == "load":
+            loaded_inside = loaded_inside or inside
+        elif event == "save":
+            assert inside and loaded_inside, lock_events
+    assert "save" in lock_events
+
+
+def test_inject_write_fails_is_a_409_not_a_500(cfg_client, tmp_path, monkeypatch):
+    from db_conn_mcp import clients as clients_mod
+    from db_conn_mcp.clients import ClientSpec
+
+    client, cfg = cfg_client
+    cfg.write_text(json.dumps({"connections": []}), encoding="utf-8")
+    target = ClientSpec("fake", "Fake", tmp_path / "fake.json", "mcpServers")
+    (tmp_path / "fake.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [target])
+
+    def failing_write(spec, data):
+        raise clients_mod.ClientConfigError("Fake: could not be written")
+
+    monkeypatch.setattr(clients_mod, "write_config", failing_write)
+    for verb in ("inject", "uninject"):
+        r = client.post(f"/api/clients/fake/{verb}", headers=_hdr())
+        assert r.status_code == 409
+
+
+def test_junk_key_is_dropped_on_add_but_stored_extras_survive_patch(cfg_client):
+    client, cfg = cfg_client
+    r = client.post(
+        "/api/databases",
+        json={"name": "a", "dsn": SECRET_DSN, "mode": "read", "fallback_port": 5433},
+        headers=_hdr(),
+    )
+    assert r.status_code == 201
+    stored = json.loads(cfg.read_text(encoding="utf-8"))
+    assert "fallback_port" not in stored["connections"][0]
+
+    stored["connections"][0]["comment"] = "keep me"
+    cfg.write_text(json.dumps(stored), encoding="utf-8")
+    r = client.patch("/api/databases/a", json={"mode": "write"}, headers=_hdr())
+    assert r.status_code == 200
+    kept = json.loads(cfg.read_text(encoding="utf-8"))["connections"][0]
+    assert kept["comment"] == "keep me"
+    assert kept["mode"] == "write"

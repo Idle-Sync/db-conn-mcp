@@ -177,10 +177,12 @@ def register_database(scope: Scope, name: str, dsn: str, mode: str, yolo: bool =
 
     Raises ``ValueError`` for an unknown DSN scheme, a duplicate name, or a duplicate DSN.
     """
-    path, cfg = _load_scope(scope)
-    _ensure_new_connection(cfg, name, dsn)
-    cfg.connections.append(Connection(name=name, dsn=dsn, mode=mode, yolo=yolo))
-    config.save(cfg, path)
+    path = scope_to_path(scope)
+    with config.locked(path):
+        _, cfg = _load_scope(scope)
+        _ensure_new_connection(cfg, name, dsn)
+        cfg.connections.append(Connection(name=name, dsn=dsn, mode=mode, yolo=yolo))
+        config.save(cfg, path)
     return path
 
 
@@ -249,16 +251,17 @@ def _inject_into_client(spec: ClientSpec, command: str, args: list[str]) -> None
     """Read-merge-write a server entry into one client's config, in its own format.
 
     A config that exists but does not parse is left untouched: overwriting it would
-    destroy the user's other servers, comments and settings.
+    destroy the user's other servers, comments and settings. One that cannot be
+    written is skipped too, so the remaining clients still get their entry.
     """
     try:
         existing = read_config(spec)
+        updated = inject_entry(existing, spec.fmt, "db-conn-mcp", command, args)
+        write_config(spec, updated)
     except ClientConfigError as exc:
         print(f"  Skipped {spec.label}: {exc}")
         print("    Fix that file by hand, then re-run `db-conn-mcp clients`.")
         return
-    updated = inject_entry(existing, spec.fmt, "db-conn-mcp", command, args)
-    write_config(spec, updated)
     print(f"  Updated {spec.label} config.")
 
 
@@ -308,10 +311,19 @@ def _add_connection_interactive(path: Path) -> bool:
         return False
 
     chosen = _choose_injection_targets()
-    cfg.connections.append(
-        Connection(name=name, dsn=dsn, mode=mode_name, fallback_ports=fallback_ports)
-    )
-    config.save(cfg, path)
+    # The prompts above can take minutes, so the file may have changed since the
+    # first load: read it again under the lock and repeat the checks before saving.
+    try:
+        with config.locked(path):
+            cfg = config.load(str(path)) if path.is_file() else Config()
+            _ensure_new_connection(cfg, name, dsn)
+            cfg.connections.append(
+                Connection(name=name, dsn=dsn, mode=mode_name, fallback_ports=fallback_ports)
+            )
+            config.save(cfg, path)
+    except ValueError as exc:
+        print(f"Could not add: {exc}")
+        return False
     # Echo only the name — never the DSN (Rule 6).
     print(f"Registered {name!r} ({mode_name}) -> {path}")
     command, args = server_launch(path)
@@ -363,6 +375,9 @@ def run_setup_wizard(config_arg: str | None = None) -> int:
         if _add_connection_interactive(path):
             _print_star_cta()
             return 0
+        return 1
+    except config.ConfigError as exc:
+        print(exc)
         return 1
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled. Nothing was saved.")
@@ -417,7 +432,11 @@ def cmd_status(config_arg: str | None = None) -> int:
     if path is None:
         print("No configuration found. Run `db-conn-mcp setup` to create one.")
         return 1
-    _print_status(path)
+    try:
+        _print_status(path)
+    except config.ConfigError as exc:
+        print(exc)
+        return 1
     return 0
 
 
@@ -426,6 +445,9 @@ def cmd_add(config_arg: str | None = None) -> int:
     try:
         path = _existing_config(config_arg) or scope_to_path(_ask_scope())
         return 0 if _add_connection_interactive(path) else 1
+    except config.ConfigError as exc:
+        print(exc)
+        return 1
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled. Nothing was saved.")
         return 130
@@ -482,13 +504,13 @@ def _uninject_from_client(spec: ClientSpec) -> None:
     """Remove the db-conn-mcp entry from one client's config, preserving the rest."""
     try:
         existing = read_config(spec)
-    # Unreachable from `clients --remove`, which only offers configs that parsed
-    # (is_injected is False for the rest). Kept as the guard for any other caller.
+        remove_entry(existing, spec.fmt, "db-conn-mcp")
+        write_config(spec, existing)
+    # A read failure is unreachable from `clients --remove`, which only offers configs
+    # that parsed (is_injected is False for the rest); a write failure is not.
     except ClientConfigError as exc:
         print(f"  Skipped {spec.label}: {exc}")
         return
-    remove_entry(existing, spec.fmt, "db-conn-mcp")
-    write_config(spec, existing)
     print(f"  Removed from {spec.label} config.")
 
 
@@ -558,13 +580,18 @@ def cmd_remove(config_arg: str | None, name: str) -> int:
     if path is None:
         print("No configuration found.")
         return 1
-    cfg = config.load(str(path))
-    if not any(c.name == name for c in cfg.connections):
-        available = ", ".join(c.name for c in cfg.connections) or "(none)"
-        print(f"No connection named {name!r}. Available: {available}.")
+    try:
+        with config.locked(path):
+            cfg = config.load(str(path))
+            if not any(c.name == name for c in cfg.connections):
+                available = ", ".join(c.name for c in cfg.connections) or "(none)"
+                print(f"No connection named {name!r}. Available: {available}.")
+                return 1
+            cfg.connections = [c for c in cfg.connections if c.name != name]
+            config.save(cfg, path)
+    except config.ConfigError as exc:
+        print(exc)
         return 1
-    cfg.connections = [c for c in cfg.connections if c.name != name]
-    config.save(cfg, path)
     print(f"Removed {name!r} from {path}.")
     return 0
 

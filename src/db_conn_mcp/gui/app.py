@@ -208,13 +208,13 @@ def _unknown_client() -> JSONResponse:
 
 
 def _unreadable_client() -> JSONResponse:
-    """The fixed 409 for a client config that will not parse.
+    """The fixed 409 for a client config that could not be read or written.
 
-    Rule 6: the parse failure is described by category only. The file's contents —
+    Rule 6: the failure is described by category only. The file's contents —
     which routinely hold API keys for other MCP servers — never reach a response.
     """
     return JSONResponse(
-        {"error": "that client's config could not be parsed; fix it by hand"},
+        {"error": "that client's config could not be read or written; fix it by hand"},
         status_code=409,
     )
 
@@ -485,22 +485,27 @@ def create_app(
         and is not renameable, so ``edit_database`` merges the stored one and never
         needs the same check.
         """
-        parsed = _parse_connection(await _body(request))
+        body = await _body(request)
+        if isinstance(body, dict):
+            body = {k: v for k, v in body.items() if k in Connection.model_fields}
+        parsed = _parse_connection(body)
         if not isinstance(parsed, Connection):
             return _invalid_connection(parsed)
         if _unaddressable_name(parsed.name):
             return _invalid_connection(["name"])
         path = _config_path_for_writes()
         async with config_lock:
-            cfg = _load_or_empty(path)
-            if cfg is None:
-                return _no_config()
-            if any(c.name == parsed.name for c in cfg.connections):
-                return JSONResponse(
-                    {"error": "a connection with that name exists"}, status_code=409
-                )
-            cfg.connections.append(parsed)
-            config_mod.save(cfg, path)
+            # Blocking the event loop on the file lock is accepted: holders keep it for ms.
+            with config_mod.locked(path):
+                cfg = _load_or_empty(path)
+                if cfg is None:
+                    return _no_config()
+                if any(c.name == parsed.name for c in cfg.connections):
+                    return JSONResponse(
+                        {"error": "a connection with that name exists"}, status_code=409
+                    )
+                cfg.connections.append(parsed)
+                config_mod.save(cfg, path)
         return JSONResponse(parsed.public_view(), status_code=201)
 
     async def edit_database(request: Request) -> JSONResponse:
@@ -515,21 +520,22 @@ def create_app(
             return _invalid_connection([])
         path = _config_path_for_writes()
         async with config_lock:
-            cfg = _load_or_empty(path)
-            if cfg is None:
-                return _no_config()
-            existing = next((c for c in cfg.connections if c.name == name), None)
-            if existing is None:
-                return _no_such_connection()
-            merged = existing.model_dump()
-            for field in ("mode", "yolo", "fallback_ports", "dsn"):
-                if field in body and body[field] not in (None, ""):
-                    merged[field] = body[field]
-            parsed = _parse_connection(merged)
-            if not isinstance(parsed, Connection):
-                return _invalid_connection(parsed)
-            cfg.connections[cfg.connections.index(existing)] = parsed
-            config_mod.save(cfg, path)
+            with config_mod.locked(path):  # see add_database
+                cfg = _load_or_empty(path)
+                if cfg is None:
+                    return _no_config()
+                existing = next((c for c in cfg.connections if c.name == name), None)
+                if existing is None:
+                    return _no_such_connection()
+                merged = existing.model_dump()
+                for field in ("mode", "yolo", "fallback_ports", "dsn"):
+                    if field in body and body[field] not in (None, ""):
+                        merged[field] = body[field]
+                parsed = _parse_connection(merged)
+                if not isinstance(parsed, Connection):
+                    return _invalid_connection(parsed)
+                cfg.connections[cfg.connections.index(existing)] = parsed
+                config_mod.save(cfg, path)
         return JSONResponse(parsed.public_view())
 
     async def delete_database(request: Request) -> JSONResponse:
@@ -537,14 +543,15 @@ def create_app(
         name = request.path_params["name"]
         path = _config_path_for_writes()
         async with config_lock:
-            cfg = _load_or_empty(path)
-            if cfg is None:
-                return _no_config()
-            remaining = [c for c in cfg.connections if c.name != name]
-            if len(remaining) == len(cfg.connections):
-                return _no_such_connection()
-            cfg.connections = remaining
-            config_mod.save(cfg, path)
+            with config_mod.locked(path):  # see add_database
+                cfg = _load_or_empty(path)
+                if cfg is None:
+                    return _no_config()
+                remaining = [c for c in cfg.connections if c.name != name]
+                if len(remaining) == len(cfg.connections):
+                    return _no_such_connection()
+                cfg.connections = remaining
+                config_mod.save(cfg, path)
         return JSONResponse({"removed": name})
 
     async def check_database_route(request: Request) -> JSONResponse:
@@ -590,13 +597,13 @@ def create_app(
         async with config_lock:
             try:
                 data = clients_mod.read_config(spec)
+                clients_mod.write_config(
+                    spec, clients_mod.inject_entry(data, spec.fmt, "db-conn-mcp", command, args)
+                )
             except clients_mod.ClientConfigError:
                 # Re-checked under the lock: the file may have gone bad since the
                 # probe above, and the raised text quotes the source (Rule 6).
                 return _unreadable_client()
-            clients_mod.write_config(
-                spec, clients_mod.inject_entry(data, spec.fmt, "db-conn-mcp", command, args)
-            )
         return JSONResponse({"injected": spec.key})
 
     async def uninject_client(request: Request) -> JSONResponse:
@@ -610,9 +617,11 @@ def create_app(
         async with config_lock:  # see inject_client
             try:
                 data = clients_mod.read_config(spec)
+                clients_mod.write_config(
+                    spec, clients_mod.remove_entry(data, spec.fmt, "db-conn-mcp")
+                )
             except clients_mod.ClientConfigError:
                 return _unreadable_client()
-            clients_mod.write_config(spec, clients_mod.remove_entry(data, spec.fmt, "db-conn-mcp"))
         return JSONResponse({"removed": spec.key})
 
     async def doctor_route(request: Request) -> JSONResponse:
