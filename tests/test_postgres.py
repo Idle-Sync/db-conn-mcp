@@ -507,6 +507,19 @@ async def test_execute_renders_non_utf8_char_as_hex():
     assert result["rows"] == [{"v": "\\xc3"}, {"v": None}]
 
 
+async def test_execute_renders_nul_char_as_an_empty_string():
+    # Postgres' own ''::"char"::text has length 0, though the wire carries one NUL byte.
+    conn = FakeConn(
+        [[{"v": b"\x00", "letters": [b"\x00", b"a"]}]],
+        attributes=[
+            Attribute(name="v", type=CHAR_TYPE),
+            Attribute(name="letters", type=CHAR_ARRAY_TYPE),
+        ],
+    )
+    result = await PostgresDialect().execute(conn, "SELECT v, letters FROM f")
+    assert result["rows"] == [{"v": "", "letters": ["", "a"]}]
+
+
 @pytest.mark.parametrize(
     ("types", "expected"),
     [

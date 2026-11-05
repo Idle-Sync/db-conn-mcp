@@ -14,7 +14,7 @@ from pathlib import Path
 
 import asyncpg
 import pytest
-from asyncpg.types import Attribute
+from asyncpg.types import Attribute, Type
 from mcp import types
 from mcp.types import TextContent
 
@@ -1064,7 +1064,8 @@ class _StatementServingOneRow:
         return [self._row]
 
     def get_attributes(self):
-        return tuple(Attribute(name=name, type=None) for name in self._row)
+        bytea = Type(oid=17, name="bytea", kind="scalar", schema="pg_catalog")
+        return tuple(Attribute(name=name, type=bytea) for name in self._row)
 
     def get_statusmsg(self):
         return "INSERT 0 1"

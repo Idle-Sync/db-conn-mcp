@@ -1248,11 +1248,16 @@ def _json_safe_row(row: Any, attributes: tuple) -> dict:
 
 
 def _char_value_as_text(value: Any) -> Any:
-    """Render a ``"char"`` value as its character, or as hex when it is not valid UTF-8."""
+    """Render a ``"char"`` value as its character, or as hex when it is not valid UTF-8.
+
+    The NUL byte renders as the empty string, which is what ``''::"char"::text`` returns.
+    """
     if isinstance(value, list):
         return [_char_value_as_text(item) for item in value]
     if not isinstance(value, bytes):
         return value
+    if value == b"\x00":
+        return ""
     try:
         return value.decode("utf-8")
     except UnicodeDecodeError:
