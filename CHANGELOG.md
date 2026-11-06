@@ -77,12 +77,13 @@ the time of that release.
   `{rows_affected}`, and a `SELECT` of one raised the driver's raw error; both now raise an error
   saying the statement ran, so treat a commit as applied and check with a read before retrying. A
   dry run that fails this way grants no commit: cast the value to text, or use `skip_dry_run`.
-- **Your `check_database` and `doctor` output for a few messages changes category and advice,
-  from `SSL_REQUIRED`, `POOL_EXHAUSTED` or `HOST_UNREACHABLE` to `UNKNOWN` with the
-  troubleshooting checklist.** The messages are: a server that refuses SSL (`rejected SSL
-  upgrade`), a pg_hba rejection of a connection that already uses SSL, a client-side "too many
-  open files", a statement timeout, and pgbouncer's `query_wait_timeout`. A connection with
-  `fallback_ports` will now stop at those messages instead of probing the next port.
+- **Your `check_database` and `doctor` output for some connection errors changes category and
+  advice, from `SSL_REQUIRED`, `POOL_EXHAUSTED` or `HOST_UNREACHABLE` to `UNKNOWN` with the
+  troubleshooting checklist.** These include: a server that refuses SSL (`rejected SSL upgrade`),
+  a certificate that fails verification, an invalid `sslmode` value, a client-side "too many open
+  files", a statement timeout, Postgres's authentication timeout, and pgbouncer's
+  `query_wait_timeout`. A connection with `fallback_ports` will now stop at these timeouts instead
+  of probing the next port; it already stopped at the other errors.
 
 ## [0.7.1] — 2026-08-13
 
