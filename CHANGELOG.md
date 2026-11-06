@@ -43,6 +43,9 @@ the time of that release.
   a full server for a client-side "too many open files", and no longer report the host
   unreachable (and probe fallback ports) for a message that only mentions a timeout, such as a
   statement timeout or pgbouncer's `query_wait_timeout`, which now reads as unknown (#48).
+- Saving `connections.json` or a client config file on Windows no longer fails when `os.replace`
+  in the atomic save is refused with error 5 for a moment: the swap now retries, up to 20 attempts
+  over about 1 s (#63).
 
 ### Breaking / Behaviour changes
 
@@ -96,6 +99,10 @@ the time of that release.
   files", a statement timeout, Postgres's authentication timeout, and pgbouncer's
   `query_wait_timeout`. A connection with `fallback_ports` will now stop at these timeouts instead
   of probing the next port; it already stopped at the other errors.
+- **A save on Windows that is refused with `Access is denied` now waits before failing.** A save
+  of `connections.json` or of a client config file on Windows that is refused with
+  `Access is denied` while another program holds the file now waits up to 1 s before failing,
+  where it used to fail at once; a read-only `connections.json` still fails at once.
 
 ## [0.7.1] — 2026-08-13
 
