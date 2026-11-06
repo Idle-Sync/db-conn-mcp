@@ -13,6 +13,9 @@ the time of that release.
 
 ### Fixed
 
+- A refused primary port on a host that resolves to both IPv6 and IPv4, such as `localhost`,
+  now probes `fallback_ports`: asyncio's combined `Multiple exceptions: ... Connect call
+  failed` error is classified as `HOST_UNREACHABLE` instead of `UNKNOWN` (#55).
 - `fetch_rows` with `n` of `2**31` or more now returns the remaining rows (at most `2**31 - 1`
   per call) where it used to raise `OverflowError`; the response reports `exhausted: true` and
   `cursor_closed: true`, as for any batch that returned the rest of the rows.
@@ -49,6 +52,9 @@ the time of that release.
 
 ### Breaking / Behaviour changes
 
+- **A refused primary port on a host that resolves to both IPv6 and IPv4, such as `localhost`,
+  now reports `HOST_UNREACHABLE` instead of `UNKNOWN`, and your `fallback_ports` are now probed
+  where they used to be skipped.**
 - **A new connections.json is created user-only (0600); existing modes are kept; unknown keys
   are kept; a connections.json.lock file appears next to it.** Your new file was world-readable
   under a typical umask, and your hand-added keys vanished on the next save. The lock file holds

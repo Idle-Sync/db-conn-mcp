@@ -329,7 +329,7 @@ sequenceDiagram
 | Category | Triggered by (examples) | Sanitized cause + fix shown to agent |
 |---|---|---|
 | `AUTH_FAILED` | invalid password / role does not exist | "Wrong user/password, or the role doesn't exist. Verify credentials and that the role exists." |
-| `HOST_UNREACHABLE` | connection refused / timeout | "DB not accepting connections. Is it running? Check host/port, firewall. In Docker, `localhost` ≠ the DB container." |
+| `HOST_UNREACHABLE` | connection refused / timeout, asyncio's combined `Multiple exceptions: ... Connect call failed` error | "DB not accepting connections. Is it running? Check host/port, firewall. In Docker, `localhost` ≠ the DB container." |
 | `DB_NOT_FOUND` | database "x" does not exist | "Database name is wrong or not created yet. Check spelling/case; create it if needed." |
 | `DNS_FAILURE` | could not translate host name | "Hostname can't be resolved — likely a typo in the host or a missing VPN/network." |
 | `SSL_REQUIRED` | server requires SSL | "Server demands SSL. Add `?sslmode=require` (or appropriate mode) to the DSN." |
