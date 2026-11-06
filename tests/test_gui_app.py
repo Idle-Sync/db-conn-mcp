@@ -679,6 +679,21 @@ def test_static_js_never_uses_innerhtml(client):
     assert "innerHTML" not in js
 
 
+def test_static_js_maps_the_tool_call_failed_verdict(client):
+    js = client.get(f"/static/app.js?token={TOKEN}").text
+    assert "tool_call_failed" in js
+    assert '"tool call failed"' in js
+    assert "list_databases_error" in js
+    assert "the error list_databases returned" in js
+    assert "innerHTML" not in js
+
+
+def test_static_css_wraps_the_verify_output(client):
+    css = client.get(f"/static/style.css?token={TOKEN}").text
+    assert ".v-dbtext" in css
+    assert "pre-wrap" in css
+
+
 def test_static_css_fetches_nothing_from_the_network(client):
     """CSP is ``default-src 'self'``, so an external asset would not fail loudly.
 

@@ -13,6 +13,9 @@ the time of that release.
 
 ### Fixed
 
+- Verify reports `tool_call_failed` when the server starts but `list_databases` returns an error,
+  such as a `connections.json` with a duplicate connection name, where it used to report
+  `answers` (#52).
 - `check_sequences` lists every sequence it could not probe under `skipped`, with a `reason` of
   `no_privilege` or `probe_failed`, where it used to drop them: a role that could read no
   sequence got `behind_count: 0` as if the database had been checked (#51).
@@ -55,6 +58,9 @@ the time of that release.
 
 ### Breaking / Behaviour changes
 
+- **A client whose server starts but cannot read its `connections.json` now gets the verdict
+  `tool_call_failed` instead of `answers`; the result carries the error in
+  `list_databases_error` and `list_databases_text` is empty.**
 - **Your `check_sequences` result now always carries `skipped` and `skipped_count`; read
   `behind_count: 0` as all clear only when `skipped_count` is 0.** A sequence your role could
   not probe used to vanish from the answer. `total_sequences` still counts only the sequences

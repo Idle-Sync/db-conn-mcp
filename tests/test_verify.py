@@ -35,6 +35,26 @@ async def test_verify_stdio_end_to_end_against_this_repo(tmp_path):
     assert result["stale"] is False
     assert result["instructions"]  # the untrusted-data policy arrived
     assert result["list_databases_text"] is not None
+    assert result["list_databases_error"] is None
+
+
+async def test_verify_stdio_reports_tool_call_failed_for_a_malformed_config(tmp_path):
+    """A server that starts but cannot read its config must not look healthy (#52).
+
+    Two connections with one name are valid JSON, so the server starts and answers the
+    handshake; only ``list_databases`` fails, with a sanitized ``ConfigError``.
+    """
+    entry = {"name": "twin", "dsn": "postgresql://u:hunter2-marker@127.0.0.1:1/x", "mode": "read"}
+    cfg = tmp_path / "connections.json"
+    cfg.write_text(json.dumps({"connections": [entry, entry]}), encoding="utf-8")
+    result = await verify_stdio(
+        sys.executable, ["-m", "db_conn_mcp", "--config", str(cfg)], timeout=60.0
+    )
+    assert result["verdict"] == "tool_call_failed", result["detail"]
+    assert result["tool_count"] == EXPECTED_TOOL_COUNT
+    assert result["list_databases_text"] is None
+    assert "Duplicate" in result["list_databases_error"]
+    assert "hunter2-marker" not in json.dumps(result)
 
 
 async def test_verify_stdio_launch_failed_for_missing_binary(tmp_path):
