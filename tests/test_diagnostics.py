@@ -166,3 +166,17 @@ def test_never_leaks_connection_details(exc):
     blob = (result["cause"] + " " + " ".join(result["fixes"])).lower()
     for secret in SECRET_DSN_BITS:
         assert secret.lower() not in blob, f"{secret!r} leaked into diagnostic"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        'FATAL: database "password" does not exist',
+        "ERROR: relation does not exist in database payroll",
+        "operation timed after 5 seconds",
+        "connection was refused by the proxy policy",
+    ],
+)
+def test_loose_wording_does_not_match_a_marker(message):
+    expected = "DB_NOT_FOUND" if "password" in message else "UNKNOWN"
+    assert explain(RuntimeError(message))["category"] == expected
