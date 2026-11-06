@@ -596,6 +596,11 @@ pre {
   overflow-x: auto;
 }
 
+.v-dbtext {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .msg {
   font: 13px/1.5 var(--mono);
 }

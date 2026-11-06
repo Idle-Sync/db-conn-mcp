@@ -40,6 +40,7 @@ const VERDICT_LABEL = {
   answers: "answers",
   launch_failed: "launch failed",
   handshake_failed: "handshake failed",
+  tool_call_failed: "tool call failed",
   wrong_tool_count: "wrong tool count",
   timeout: "timed out",
   port_in_use: "port in use",
@@ -49,6 +50,7 @@ const VERDICT_CLASS = {
   answers: "ok",
   launch_failed: "fail",
   handshake_failed: "fail",
+  tool_call_failed: "fail",
   timeout: "fail",
   wrong_tool_count: "warn",
   port_in_use: "warn",
@@ -677,9 +679,16 @@ function verifyCard(target, result) {
     pre.textContent = line;
     pre.hidden = false;
   }
-  if (result.list_databases_text) {
+  const dbOutput = result.list_databases_error || result.list_databases_text;
+  if (dbOutput) {
     const details = card.querySelector(".v-out");
-    card.querySelector(".v-dbtext").textContent = result.list_databases_text;
+    // An error shown under "what list_databases answered" would call it an answer.
+    const isError = Boolean(result.list_databases_error);
+    details.querySelector("summary").textContent = isError
+      ? "the error list_databases returned"
+      : "what list_databases answered";
+    details.open = isError;
+    card.querySelector(".v-dbtext").textContent = dbOutput;
     details.hidden = false;
   }
   return card;
