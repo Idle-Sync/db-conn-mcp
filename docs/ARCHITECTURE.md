@@ -77,7 +77,7 @@ The **dialect layer is the only place that knows a database is PostgreSQL.** Eve
 | 15 | `close_cursor` | Cursor | safe — release the cursor + its connection; idempotent |
 | 16 | `get_object_definition` | Explore | safe — faithful `pg_get_*def` definition of a view/function/trigger/sequence/index |
 | 17 | `diff_schemas` | Insight | safe — structural schema diff between two configured DBs |
-| 18 | `check_sequences` | Insight | safe — sequences whose next value would collide with existing rows (problems only by default; `behind_only=false` for the census) |
+| 18 | `check_sequences` | Insight | safe — sequences whose next value would collide with existing rows (problems only by default; `behind_only=false` for the census), plus `skipped`: the sequences it could not probe, so `behind_count: 0` is all clear only when `skipped_count` is 0 |
 | 19 | `table_stats` | Insight | safe — approximate rows + disk/index sizes per table (statistics, no scans); optional `table` / `min_size_bytes` / `limit`, the last adding `truncated` |
 | 20 | `show_activity` | Insight | safe — **sanitized** `pg_stat_activity` (no user names/addresses; query text opt-in, truncated) |
 | 21 | `set_yolo_mode` | Config | persists `yolo` flag for one named DB |
@@ -492,7 +492,7 @@ class Dialect(ABC):
     async def get_object_definition(self, conn, object_type, name): ...
     async def cancel_backend(self, conn, pid): ...
     async def explain(self, conn, sql, analyze=False, params=None): ...  # plan the bound query
-    async def check_sequences(self, conn, behind_only=True): ...  # problems only by default
+    async def check_sequences(self, conn, behind_only=True): ...  # problems only by default, plus skipped probes
     async def table_stats(self, conn, limit=None, min_size_bytes=None, table=None): ...
     async def show_activity(self, conn, include_query=False): ...
 ```

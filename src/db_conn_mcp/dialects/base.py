@@ -194,14 +194,22 @@ class Dialect(ABC):
         """Compare every column-owned sequence with the max value in its column.
 
         Returns ``{"total_sequences": int, "sequences": [{sequence_schema, sequence,
-        table_schema, table, column, last_value, is_called, max_id, behind}]}`` where
-        ``behind=True`` means the next sequence value would collide with existing data
-        (the classic post-migration stale-sequence problem).
+        table_schema, table, column, last_value, is_called, max_id, behind}],
+        "skipped": [{sequence_schema, sequence, table_schema, table, column, reason}]}``
+        where ``behind=True`` means the next sequence value would collide with existing
+        data (the classic post-migration stale-sequence problem).
 
         ``behind_only=True`` (the default) keeps only the problem rows in
         ``sequences``; ``False`` returns the full census. ``total_sequences`` always
         counts every sequence actually inspected, so a filtered answer still says how
-        much was checked.
+        much was checked; it does not count skipped ones.
+
+        ``skipped`` is always present (empty when nothing was skipped) and lists every
+        sequence that could not be probed, so the tool's ``behind_count: 0`` means all
+        clear only when ``skipped`` is empty. ``reason`` is ``"no_privilege"`` (grant
+        SELECT on the sequence and its table) or ``"probe_failed"`` (the owning column
+        is not numeric or the sequence could not be read). An entry carries those six
+        keys only, never the database's error text.
         """
 
     @abstractmethod
