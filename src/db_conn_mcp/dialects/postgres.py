@@ -1074,6 +1074,7 @@ class PostgresDialect(Dialect):
         # max, which is one probe pair per sequence — the catalog query can't decide it,
         # so the filtering happens here, over the rows we inspected.
         report: list[dict] = []
+        skipped: list[dict] = []
         scanned = 0
         for r in await conn.fetch(_OWNED_SEQUENCES_SQL):
             d = dict(r)
@@ -1083,7 +1084,13 @@ class PostgresDialect(Dialect):
             try:
                 seq = await conn.fetchrow(f"SELECT last_value, is_called FROM {qseq}")
                 mx = await conn.fetchrow(f"SELECT max({qcol})::bigint AS max_id FROM {qtable}")
-            except asyncpg.PostgresError:  # non-numeric column / no privilege — skip
+            # The reason is a category only: the server's message can name hosts and
+            # roles, which Rule 6 keeps out of the report.
+            except asyncpg.InsufficientPrivilegeError:
+                skipped.append({**d, "reason": "no_privilege"})
+                continue
+            except asyncpg.PostgresError:  # non-numeric column / unreadable sequence
+                skipped.append({**d, "reason": "probe_failed"})
                 continue
             last_value = seq["last_value"]
             is_called = seq["is_called"]
@@ -1104,7 +1111,7 @@ class PostgresDialect(Dialect):
                     "behind": behind,
                 }
             )
-        return {"total_sequences": scanned, "sequences": report}
+        return {"total_sequences": scanned, "sequences": report, "skipped": skipped}
 
     async def table_stats(
         self,

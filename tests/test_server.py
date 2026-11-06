@@ -204,6 +204,7 @@ class FakeDialect:
         return {
             "total_sequences": len(rows),
             "sequences": [r for r in rows if r["behind"]] if behind_only else rows,
+            "skipped": [],
         }
 
     async def table_stats(self, conn, limit=None, min_size_bytes=None, table=None):
@@ -960,7 +961,7 @@ async def test_check_sequences_clean_database_reads_affirmatively(cfg_path, monk
 
     async def no_problems(conn, behind_only=True):
         dialect.sequences_behind_only = behind_only
-        return {"total_sequences": 130, "sequences": []}
+        return {"total_sequences": 130, "sequences": [], "skipped": []}
 
     dialect.check_sequences = no_problems
     _patch_dialect(monkeypatch, dialect)
@@ -971,6 +972,46 @@ async def test_check_sequences_clean_database_reads_affirmatively(cfg_path, monk
         "sequences": [],
         "behind_count": 0,
         "total_sequences": 130,
+        "skipped": [],
+        "skipped_count": 0,
+    }
+
+
+async def test_check_sequences_reports_skipped_probes(cfg_path, monkeypatch):
+    dialect = FakeDialect()
+    skipped = [
+        {
+            "sequence_schema": "public",
+            "sequence": "users_id_seq",
+            "table_schema": "public",
+            "table": "users",
+            "column": "id",
+            "reason": "no_privilege",
+        },
+        {
+            "sequence_schema": "public",
+            "sequence": "orgs_code_seq",
+            "table_schema": "public",
+            "table": "orgs",
+            "column": "code",
+            "reason": "probe_failed",
+        },
+    ]
+
+    async def nothing_inspected(conn, behind_only=True):
+        return {"total_sequences": 0, "sequences": [], "skipped": skipped}
+
+    dialect.check_sequences = nothing_inspected
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.check_sequences("prod")
+    assert result == {
+        "database": "prod",
+        "sequences": [],
+        "behind_count": 0,
+        "total_sequences": 0,
+        "skipped": skipped,
+        "skipped_count": 2,
     }
 
 
@@ -1866,6 +1907,7 @@ async def test_check_sequences_tool_defaults_to_problems_only(tmp_path):
     tool = next(t for t in tools if t.name == "check_sequences")
     assert tool.inputSchema["properties"]["behind_only"]["default"] is True
     assert "behind_only=false" in tool.description
+    assert "skipped_count" in tool.description
 
 
 # ---- the doctor tool is registered on the app ------------------------------------

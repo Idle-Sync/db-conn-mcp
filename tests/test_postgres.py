@@ -8,6 +8,7 @@ in postgres.py).
 """
 
 import asyncio
+import json
 from types import MappingProxyType
 
 import asyncpg
@@ -1087,7 +1088,7 @@ async def test_check_sequences_healthy_and_empty_table():
         )
 
     default = await PostgresDialect().check_sequences(conn())
-    assert default == {"total_sequences": 1, "sequences": []}
+    assert default == {"total_sequences": 1, "sequences": [], "skipped": []}
 
     census = await PostgresDialect().check_sequences(conn(), behind_only=False)
     assert census["total_sequences"] == 1
@@ -1128,7 +1129,7 @@ async def test_check_sequences_skips_unprobeable_sequence_and_excludes_it_from_t
     class Boom(FakeConn):
         async def fetchrow(self, sql, *args):
             if "bad" in sql:
-                raise asyncpg.PostgresError("no privilege")
+                raise asyncpg.InsufficientPrivilegeError("permission denied")
             return await super().fetchrow(sql, *args)
 
     conn = Boom(
@@ -1138,6 +1139,91 @@ async def test_check_sequences_skips_unprobeable_sequence_and_excludes_it_from_t
     report = await PostgresDialect().check_sequences(conn)
     assert report["total_sequences"] == 1  # only the sequences actually inspected
     assert [s["sequence"] for s in report["sequences"]] == ["good_seq"]
+    assert report["skipped"] == [{**_owned("bad_seq", "bad"), "reason": "no_privilege"}]
+
+
+async def test_check_sequences_reports_every_sequence_skipped_when_no_probe_succeeds():
+    # A least-privilege role still enumerates every sequence from the catalog, so a total
+    # lockout must not read like a database that has no sequences.
+    class Locked(FakeConn):
+        async def fetchrow(self, sql, *args):
+            raise asyncpg.InsufficientPrivilegeError("permission denied")
+
+    conn = Locked(fetch_results=[[_owned("a_seq", "a"), _owned("b_seq", "b")]])
+    report = await PostgresDialect().check_sequences(conn)
+    assert report["total_sequences"] == 0
+    assert report["sequences"] == []
+    assert len(report["skipped"]) == 2
+    assert [s["reason"] for s in report["skipped"]] == ["no_privilege", "no_privilege"]
+    assert [s["sequence"] for s in report["skipped"]] == ["a_seq", "b_seq"]
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (asyncpg.InsufficientPrivilegeError, "no_privilege"),
+        (asyncpg.InvalidTextRepresentationError, "probe_failed"),
+        (asyncpg.PostgresError, "probe_failed"),
+    ],
+)
+async def test_check_sequences_skipped_reason_follows_the_error_type(error, reason):
+    # The column probe is the second of the pair: the sequence read succeeds first, as it
+    # does for a sequence owned by a text column whose values do not cast to bigint.
+    class ColumnProbeFails(FakeConn):
+        async def fetchrow(self, sql, *args):
+            if "max(" in sql:
+                raise error("probe error")
+            return await super().fetchrow(sql, *args)
+
+    conn = ColumnProbeFails(
+        fetch_results=[[_owned()]],
+        fetchrow_results=[{"last_value": 1, "is_called": True}],
+    )
+    report = await PostgresDialect().check_sequences(conn)
+    assert report == {
+        "total_sequences": 0,
+        "sequences": [],
+        "skipped": [{**_owned(), "reason": reason}],
+    }
+
+
+async def test_check_sequences_census_keeps_skipped_out_of_sequences():
+    class Boom(FakeConn):
+        async def fetchrow(self, sql, *args):
+            if "bad" in sql:
+                raise asyncpg.InvalidTextRepresentationError("invalid input syntax")
+            return await super().fetchrow(sql, *args)
+
+    conn = Boom(
+        fetch_results=[[_owned("bad_seq", "bad"), _owned("good_seq", "good")]],
+        fetchrow_results=[{"last_value": 99, "is_called": True}, {"max_id": 3}],
+    )
+    report = await PostgresDialect().check_sequences(conn, behind_only=False)
+    assert report["total_sequences"] == 1
+    assert [s["sequence"] for s in report["sequences"]] == ["good_seq"]
+    assert [s["sequence"] for s in report["skipped"]] == ["bad_seq"]
+
+
+@pytest.mark.parametrize(
+    "error", [asyncpg.InsufficientPrivilegeError, asyncpg.InvalidTextRepresentationError]
+)
+async def test_check_sequences_skipped_entry_carries_no_error_text(error):
+    # Rule 6: server error text can name hosts and roles, so only the category leaves.
+    class Leaky(FakeConn):
+        async def fetchrow(self, sql, *args):
+            raise error("could not reach secret-host-marker")
+
+    conn = Leaky(fetch_results=[[_owned()]])
+    report = await PostgresDialect().check_sequences(conn)
+    assert "secret-host-marker" not in json.dumps(report)
+    assert set(report["skipped"][0]) == {
+        "sequence_schema",
+        "sequence",
+        "table_schema",
+        "table",
+        "column",
+        "reason",
+    }
 
 
 # ---- table_stats / show_activity ---------------------------------------------------

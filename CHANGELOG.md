@@ -13,6 +13,9 @@ the time of that release.
 
 ### Fixed
 
+- `check_sequences` lists every sequence it could not probe under `skipped`, with a `reason` of
+  `no_privilege` or `probe_failed`, where it used to drop them: a role that could read no
+  sequence got `behind_count: 0` as if the database had been checked (#51).
 - A refused primary port on a host that resolves to both IPv6 and IPv4, such as `localhost`,
   now probes `fallback_ports`: asyncio's combined `Multiple exceptions: ... Connect call
   failed` error is classified as `HOST_UNREACHABLE` instead of `UNKNOWN` (#55).
@@ -52,6 +55,11 @@ the time of that release.
 
 ### Breaking / Behaviour changes
 
+- **Your `check_sequences` result now always carries `skipped` and `skipped_count`; read
+  `behind_count: 0` as all clear only when `skipped_count` is 0.** A sequence your role could
+  not probe used to vanish from the answer. `total_sequences` still counts only the sequences
+  inspected, so a role locked out of all of them now sees `total_sequences: 0` with each one
+  listed in `skipped`.
 - **A refused primary port on a host that resolves to both IPv6 and IPv4, such as `localhost`,
   now reports `HOST_UNREACHABLE` instead of `UNKNOWN`, and your `fallback_ports` are now probed
   where they used to be skipped.**
