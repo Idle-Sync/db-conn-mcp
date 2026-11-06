@@ -33,6 +33,8 @@ the time of that release.
 - A connections.json that cannot be updated, such as one in a read-only folder, is reported in one
   line by `remove` and as a 409 by the dashboard's add, edit and delete, instead of a traceback or
   500. A mistyped name or a duplicate still gets its usual refusal there, and writes nothing.
+- After a failed `fetch_rows` the cursor and its connection are released, so the failure no
+  longer counts toward the open-cursor limit (#47).
 
 ### Breaking / Behaviour changes
 
@@ -72,6 +74,8 @@ the time of that release.
   `{rows_affected}`, and a `SELECT` of one raised the driver's raw error; both now raise an error
   saying the statement ran, so treat a commit as applied and check with a read before retrying. A
   dry run that fails this way grants no commit: cast the value to text, or use `skip_dry_run`.
+- **Your cursor is gone after a `fetch_rows` call that fails.** A retry on that id now reports an
+  unknown cursor and `close_cursor` reports `was_open: false`; re-open the query to read again.
 
 ## [0.7.1] — 2026-08-13
 

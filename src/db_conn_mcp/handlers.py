@@ -632,7 +632,8 @@ class Handlers:
         """Fetch the next ``n`` rows from an open cursor.
 
         Returns ``{rows, row_count, exhausted, cursor_closed}``; the cursor is
-        closed automatically once exhausted.
+        closed automatically once exhausted, and also when the fetch fails (the
+        error is re-raised and the ``cursor_id`` is no longer valid).
         """
         for state in self._reap_idle_cursors():
             await self._close_cursor_state(state)
@@ -643,7 +644,12 @@ class Handlers:
                 "(15 min idle limit) or already been closed."
             )
         state["last_used"] = time.monotonic()
-        rows = await state["cursor"].fetch(n)
+        try:
+            rows = await state["cursor"].fetch(n)
+        except Exception:
+            self._cursors.pop(cursor_id, None)
+            await self._close_cursor_state(state)
+            raise
         exhausted = len(rows) < max(1, int(n))
         if exhausted:
             del self._cursors[cursor_id]

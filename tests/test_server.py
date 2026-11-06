@@ -53,15 +53,21 @@ class FakeConn:
 class FakeCursor:
     """Serves queued row batches; records whether it was closed."""
 
-    def __init__(self, batches=None):
+    def __init__(self, batches=None, *, raise_on_fetch=None, raise_on_close=None):
         self._batches = list(batches or [])
+        self.raise_on_fetch = raise_on_fetch
+        self.raise_on_close = raise_on_close
         self.closed = False
 
     async def fetch(self, n):
+        if self.raise_on_fetch:
+            raise self.raise_on_fetch
         return self._batches.pop(0) if self._batches else []
 
     async def close(self):
         self.closed = True
+        if self.raise_on_close:
+            raise self.raise_on_close
 
 
 class FakeDialect:
@@ -74,6 +80,8 @@ class FakeDialect:
         exec_result=None,
         dump_result=None,
         cursor_batches=None,
+        cursor_raises=None,
+        cursor_close_raises=None,
         db_schema=None,
         table_stats_rows=None,
     ):
@@ -85,7 +93,9 @@ class FakeDialect:
         self.conn = FakeConn()
         self.exec_calls: list[dict] = []
         self.dry_run_calls: list[dict] = []
-        self.cursor = FakeCursor(cursor_batches)
+        self.cursor = FakeCursor(
+            cursor_batches, raise_on_fetch=cursor_raises, raise_on_close=cursor_close_raises
+        )
         self.db_schema = db_schema
         self.explained: list[tuple] = []
         self.cancelled_pids: list[int] = []
@@ -701,6 +711,39 @@ async def test_cursor_limit_enforced(cfg_path, monkeypatch):
         await h.open_query_cursor("prod", "SELECT 1")
     with pytest.raises(ValueError, match="Too many open cursors"):
         await h.open_query_cursor("prod", "SELECT 1")
+
+
+async def test_fetch_rows_error_closes_cursor(cfg_path, monkeypatch):
+    dialect = FakeDialect(cursor_raises=RuntimeError("connection lost"))
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    opened = await h.open_query_cursor("prod", "SELECT 1")
+    with pytest.raises(RuntimeError, match="connection lost"):
+        await h.fetch_rows(opened["cursor_id"], 10)
+    assert h._cursors == {}
+    assert dialect.cursor.closed is True
+
+
+async def test_failed_fetches_do_not_count_toward_cursor_limit(cfg_path, monkeypatch):
+    _patch_dialect(monkeypatch, FakeDialect(cursor_raises=RuntimeError("boom")))
+    h = Handlers(cfg_path)
+    for _ in range(handlers_mod.MAX_OPEN_CURSORS):
+        opened = await h.open_query_cursor("prod", "SELECT 1")
+        with pytest.raises(RuntimeError):
+            await h.fetch_rows(opened["cursor_id"], 10)
+    await h.open_query_cursor("prod", "SELECT 1")
+
+
+async def test_fetch_error_survives_a_failing_close(cfg_path, monkeypatch):
+    dialect = FakeDialect(
+        cursor_raises=RuntimeError("fetch failed"), cursor_close_raises=OSError("close failed")
+    )
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    opened = await h.open_query_cursor("prod", "SELECT 1")
+    with pytest.raises(RuntimeError, match="fetch failed"):
+        await h.fetch_rows(opened["cursor_id"], 10)
+    assert h._cursors == {}
 
 
 async def test_idle_cursors_are_reaped(cfg_path, monkeypatch):
