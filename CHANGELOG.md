@@ -13,6 +13,9 @@ the time of that release.
 
 ### Fixed
 
+- `fetch_rows` with `n` of `2**31` or more now returns the remaining rows (at most `2**31 - 1`
+  per call) where it used to raise `OverflowError`; the response reports `exhausted: true` and
+  `cursor_closed: true`, as for any batch that returned the rest of the rows.
 - A read query whose leading block comment contains a nested comment (`/* /* */ ... */`) is
   now rejected by the read tool instead of reaching the server.
 - A `--` comment ending in a carriage return (`\r`) now ends the comment for both the read
