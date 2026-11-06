@@ -35,6 +35,11 @@ the time of that release.
   500. A mistyped name or a duplicate still gets its usual refusal there, and writes nothing.
 - After a `fetch_rows` whose read fails, the cursor and its connection are released, so the
   failure no longer counts toward the open-cursor limit (#47).
+- `check_database` and `doctor` no longer tell you to fix credentials when the missing
+  database's name contains "role" or to add `sslmode` when it contains "ssl", no longer report
+  a full server for a client-side "too many open files", and no longer report the host
+  unreachable (and probe fallback ports) for a message that only mentions a timeout, such as a
+  statement timeout or pgbouncer's `query_wait_timeout`, which now reads as unknown (#48).
 
 ### Breaking / Behaviour changes
 
@@ -81,6 +86,13 @@ the time of that release.
   another is running on that cursor raises an error saying so, in place of the driver's "another
   operation is in progress"; the cursor and the running call carry on, so wait for it to return and
   fetch again.
+- **Your `check_database` and `doctor` output for some connection errors changes category and
+  advice, from `SSL_REQUIRED`, `POOL_EXHAUSTED` or `HOST_UNREACHABLE` to `UNKNOWN` with the
+  troubleshooting checklist.** These include: a server that refuses SSL (`rejected SSL upgrade`),
+  a certificate that fails verification, an invalid `sslmode` value, a client-side "too many open
+  files", a statement timeout, Postgres's authentication timeout, and pgbouncer's
+  `query_wait_timeout`. A connection with `fallback_ports` will now stop at these timeouts instead
+  of probing the next port; it already stopped at the other errors.
 
 ## [0.7.1] — 2026-08-13
 
