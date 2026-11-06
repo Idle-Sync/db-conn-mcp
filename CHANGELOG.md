@@ -13,6 +13,9 @@ the time of that release.
 
 ### Fixed
 
+- `fetch_rows` with `n` of `2**31` or more now returns rows (at most `2**31 - 1` per call)
+  and the `cursor_id` stays valid; it used to raise `OverflowError` and invalidate the
+  `cursor_id`.
 - A read query whose leading block comment contains a nested comment (`/* /* */ ... */`) is
   now rejected by the read tool instead of reaching the server.
 - A `--` comment ending in a carriage return (`\r`) now ends the comment for both the read

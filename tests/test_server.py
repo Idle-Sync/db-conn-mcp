@@ -817,8 +817,14 @@ async def test_overlapping_fetch_is_refused_and_leaves_the_running_fetch_alone(
     assert (await h.fetch_rows(cursor_id, 2))["rows"] == [{"id": 3}]
 
 
-async def test_cancelled_fetch_leaves_the_cursor_fetchable(cfg_path, monkeypatch):
-    """A cancelled tool call is not a failed fetch, and must not refuse the next one."""
+async def test_cancelled_fetch_does_not_close_the_cursor_or_refuse_the_next_call(
+    cfg_path, monkeypatch
+):
+    """A cancelled tool call is not a failed fetch, and must not refuse the next one.
+
+    On real Postgres that next fetch then fails with InFailedSQLTransactionError, because
+    the cancel aborted the transaction; the fake cursor here cannot show that.
+    """
     dialect = FakeDialect()
     dialect.cursor = HeldFakeCursor([[{"id": 1}]])
     _patch_dialect(monkeypatch, dialect)

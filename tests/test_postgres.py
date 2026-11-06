@@ -54,8 +54,10 @@ class FakeAsyncpgCursor:
 
     def __init__(self, batches):
         self._batches = list(batches)
+        self.fetch_sizes = []
 
     async def fetch(self, n):
+        self.fetch_sizes.append(n)
         return self._batches.pop(0) if self._batches else []
 
 
@@ -83,6 +85,7 @@ class FakePreparedStatement:
         self.fetch_args: list[tuple] = []
         self.fetch_timeouts: list = []
         self.cursor_args: list[tuple] = []
+        self.cursors: list[FakeAsyncpgCursor] = []
         self._cursor_batches = cursor_batches
         self._transactions = transactions
         self._rows = rows
@@ -105,7 +108,9 @@ class FakePreparedStatement:
                 "cursor cannot be created outside of a transaction"
             )
         self.cursor_args.append(args)
-        return FakeAsyncpgCursor(self._cursor_batches)
+        cursor = FakeAsyncpgCursor(self._cursor_batches)
+        self.cursors.append(cursor)
+        return cursor
 
     def get_attributes(self):
         return self._attributes
@@ -878,6 +883,15 @@ async def test_open_cursor_starts_tx_and_fetch_maps_dicts():
     assert await cursor.fetch(2) == [{"id": 1}, {"id": 2}]
     assert await cursor.fetch(2) == [{"id": 3}]
     assert await cursor.fetch(2) == []
+
+
+async def test_cursor_fetch_clamps_the_limit_to_int32():
+    # asyncpg packs the row count as a signed 32-bit int and raises OverflowError above it.
+    conn = FakeConn(cursor_batches=[[{"id": 1}], [], []], attributes=["id"])
+    cursor = await PostgresDialect().open_cursor(conn, "SELECT 1", [])
+    for n in (2**31 - 1, 2**31, 2**40):
+        await cursor.fetch(n)
+    assert conn.prepared[0].cursors[0].fetch_sizes == [2**31 - 1, 2**31 - 1, 2**31 - 1]
 
 
 async def test_cursor_fetch_maps_bytes_by_column_type():

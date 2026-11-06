@@ -698,7 +698,8 @@ class _PostgresCursor:
 
     async def fetch(self, n: int) -> list[dict]:
         """Fetch up to ``n`` more rows; fewer (or none) means the cursor is exhausted."""
-        rows = await self._cursor.fetch(max(1, int(n)))
+        # asyncpg packs the count as a signed 32-bit int; a larger one raises OverflowError.
+        rows = await self._cursor.fetch(min(max(1, int(n)), 2**31 - 1))
         return [_json_safe_row(r, self._attributes) for r in rows]
 
     async def close(self) -> None:
