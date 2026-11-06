@@ -11,7 +11,7 @@ from db_conn_mcp.diagnostics import explain
 # Distinctive credential *values* that would only appear if the original exception
 # message were echoed. (Generic English words like "user" are intentionally excluded —
 # the canned advice legitimately says "username".)
-SECRET_DSN_BITS = ["SUPERSECRET", "dbadmin", "myhost.example.com", "5432"]
+SECRET_DSN_BITS = ["SUPERSECRET", "dbadmin", "myhost.example.com", "5432", "127.0.0.1", "::1"]
 
 
 def _make(exc_type, message="boom"):
@@ -152,6 +152,19 @@ def test_timeout_markers_match_server_phrasing(message):
     assert explain(RuntimeError(message))["category"] == "HOST_UNREACHABLE"
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Multiple exceptions: [Errno 61] Connect call failed ('::1', 5432, 0, 0), "
+        "[Errno 61] Connect call failed ('127.0.0.1', 5432)",
+        "[Errno 111] Connect call failed ('127.0.0.1', 5432)",
+        "[Errno 110] Connect call failed ('127.0.0.1', 5432)",
+    ],
+)
+def test_connect_call_failed_wrapper_is_host_unreachable(message):
+    assert explain(OSError(message))["category"] == "HOST_UNREACHABLE"
+
+
 def test_query_wait_timeout_is_unknown():
     result = explain(RuntimeError("FATAL: query_wait_timeout"))
     assert result["category"] == "UNKNOWN"
@@ -164,6 +177,10 @@ def test_query_wait_timeout_is_unknown():
         ConnectionRefusedError("refused connecting to myhost.example.com:5432 as dbadmin"),
         OSError("could not translate host name myhost.example.com to address"),
         ConnectionError('PostgreSQL server at "myhost.example.com:5432" rejected SSL upgrade'),
+        OSError(
+            "Multiple exceptions: [Errno 61] Connect call failed ('::1', 5432, 0, 0), "
+            "[Errno 61] Connect call failed ('127.0.0.1', 5432)"
+        ),
     ],
 )
 def test_never_leaks_connection_details(exc):
@@ -203,6 +220,8 @@ def test_missing_database_named_like_password_is_db_not_found():
         "proxy: upstream authentication failed, retrying",
         "password authentication is disabled",
         "server_login_timeout reached",
+        "the connect call has failed",
+        "call failed to connect",
     ],
 )
 def test_loose_wording_does_not_match_a_marker(message):

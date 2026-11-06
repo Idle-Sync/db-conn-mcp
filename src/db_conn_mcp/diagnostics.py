@@ -128,6 +128,8 @@ def _classify(error: Exception) -> Category:
         return "DB_NOT_FOUND"
     if (
         "connection refused" in message
+        # asyncio's combined dual-stack error is a plain OSError: errno None, no __cause__
+        or "connect call failed" in message
         or "timed out" in message
         or "client_login_timeout" in message
     ):

@@ -1528,9 +1528,12 @@ class InvalidPasswordError(Exception):
 class PortFakeDialect(FakeDialect):
     """Refuses, auth-rejects, or black-holes specific ports; records every port dialed."""
 
-    def __init__(self, refuse_ports=(), auth_fail_ports=(), hang_ports=(), **kw):
+    def __init__(
+        self, refuse_ports=(), auth_fail_ports=(), hang_ports=(), dual_stack_refuse_ports=(), **kw
+    ):
         super().__init__(**kw)
         self.refuse_ports = set(refuse_ports)
+        self.dual_stack_refuse_ports = set(dual_stack_refuse_ports)
         self.auth_fail_ports = set(auth_fail_ports)
         self.hang_ports = set(hang_ports)
         self.dialed: list[int] = []
@@ -1540,6 +1543,12 @@ class PortFakeDialect(FakeDialect):
         self.dialed.append(port)
         if port in self.refuse_ports:
             raise ConnectionRefusedError("connection refused")
+        if port in self.dual_stack_refuse_ports:
+            # asyncio's combined error for a host resolving to IPv6 and IPv4: a plain OSError
+            raise OSError(
+                f"Multiple exceptions: [Errno 61] Connect call failed ('::1', {port}, 0, 0), "
+                f"[Errno 61] Connect call failed ('127.0.0.1', {port})"
+            )
         if port in self.auth_fail_ports:
             raise InvalidPasswordError("bad password")
         if port in self.hang_ports:
@@ -1601,6 +1610,30 @@ async def test_all_ports_refused_reports_tried_ports_sanitized(tunnel_cfg_path, 
     assert "SECRET" not in msg
     assert "tunnelhost.invalid" not in msg
     assert "SECRET" not in cause and "tunnelhost.invalid" not in cause
+
+
+async def test_dual_stack_refused_primary_probes_fallbacks(tunnel_cfg_path, monkeypatch):
+    dialect = PortFakeDialect(dual_stack_refuse_ports={5432})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    await h.list_tables("tunnel")
+    assert dialect.dialed == [5432, 5433]
+    assert h._active_ports == {"tunnel": 5433}
+
+
+async def test_dual_stack_all_ports_failing_reports_tried_ports_sanitized(
+    tunnel_cfg_path, monkeypatch
+):
+    dialect = PortFakeDialect(dual_stack_refuse_ports={5432, 5433, 15432})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(tunnel_cfg_path)
+    with pytest.raises(handlers_mod.ConnectionFailedError) as exc:
+        await h.list_tables("tunnel")
+    cause = exc.value.diag["cause"]
+    assert exc.value.diag["category"] == "HOST_UNREACHABLE"
+    assert "5433" in cause and "15432" in cause
+    for secret in ("::1", "127.0.0.1", "SECRET", "tunnelhost.invalid"):
+        assert secret not in str(exc.value) and secret not in cause
 
 
 async def test_hanging_fallback_times_out_and_probing_continues(tunnel_cfg_path, monkeypatch):
