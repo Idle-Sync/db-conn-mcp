@@ -171,18 +171,44 @@ def test_never_leaks_connection_details(exc):
         assert secret.lower() not in blob, f"{secret!r} leaked into diagnostic"
 
 
+def test_missing_database_named_like_password_is_db_not_found():
+    result = explain(RuntimeError('FATAL: database "password" does not exist'))
+    assert result["category"] == "DB_NOT_FOUND"
+
+
 @pytest.mark.parametrize(
     "message",
     [
-        'FATAL: database "password" does not exist',
         "ERROR: relation does not exist in database payroll",
         "operation timed after 5 seconds",
         "connection was refused by the proxy policy",
         'FATAL: role "app" is not permitted to log in',
         'ERROR: role "app" already exists',
         'ERROR: database "payroll" already exists',
+        "FATAL: unsupported ssl of this version",
+        "server certificate is insecure",
+        "cannot perform operation: connection is closed",
+        "too many connect attempts",
+        "too many closed sockets",
+        "remaining retries: 0",
+        "proxy: upstream authentication failed, retrying",
+        "password authentication is disabled",
+        "server_login_timeout reached",
     ],
 )
 def test_loose_wording_does_not_match_a_marker(message):
-    expected = "DB_NOT_FOUND" if "password" in message else "UNKNOWN"
+    assert explain(RuntimeError(message))["category"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("could not translate host name: SSL required", "DNS_FAILURE"),
+        ("SSL required: too many clients", "SSL_REQUIRED"),
+        ("password authentication failed: too many clients", "POOL_EXHAUSTED"),
+        ('role "app" does not exist in database "payroll"', "AUTH_FAILED"),
+        ('database "timed out" does not exist', "DB_NOT_FOUND"),
+    ],
+)
+def test_message_with_two_markers_takes_the_earlier_branch(message, expected):
     assert explain(RuntimeError(message))["category"] == expected
