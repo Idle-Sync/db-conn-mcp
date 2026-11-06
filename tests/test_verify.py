@@ -3,10 +3,12 @@
 import json
 import socket
 import sys
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 
-from db_conn_mcp import __version__
+from db_conn_mcp import __version__, verify
 from db_conn_mcp.verify import EXPECTED_TOOL_COUNT, verify_http, verify_stdio
 
 
@@ -55,6 +57,47 @@ async def test_verify_stdio_reports_tool_call_failed_for_a_malformed_config(tmp_
     assert result["list_databases_text"] is None
     assert "Duplicate" in result["list_databases_error"]
     assert "hunter2-marker" not in json.dumps(result)
+
+
+class _FakeSession:
+    """A client session whose ``list_databases`` fails with no text, on a wrong tool count."""
+
+    def __init__(self, *_streams):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return None
+
+    async def initialize(self):
+        server_info = SimpleNamespace(name="db-conn-mcp", version="0.0.0-stale")
+        return SimpleNamespace(serverInfo=server_info, instructions=None)
+
+    async def list_tools(self):
+        return SimpleNamespace(tools=[object()])
+
+    async def call_tool(self, _name, _arguments):
+        return SimpleNamespace(isError=True, content=[])
+
+
+@asynccontextmanager
+async def _fake_stdio_client(_params):
+    yield None, None
+
+
+async def test_verify_stdio_tool_call_failed_wins_over_count_and_keeps_stale(monkeypatch):
+    """A failed tool call is not downgraded to a count warning, even with no error text."""
+    monkeypatch.setattr(verify, "ClientSession", _FakeSession)
+    monkeypatch.setattr(verify, "stdio_client", _fake_stdio_client)
+    result = await verify_stdio("ignored", [])
+    assert result["verdict"] == "tool_call_failed"
+    assert result["tool_count"] == 1
+    assert result["stale"] is True
+    assert result["list_databases_error"] is None
+    assert result["list_databases_text"] is None
+    assert result["suggested_action"].startswith("fix the connections.json")
 
 
 async def test_verify_stdio_launch_failed_for_missing_binary(tmp_path):
