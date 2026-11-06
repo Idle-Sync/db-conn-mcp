@@ -625,6 +625,7 @@ class Handlers:
             "cursor": cursor,
             "database": database,
             "last_used": time.monotonic(),
+            "fetching": False,
         }
         return {"cursor_id": cursor_id, "database": database}
 
@@ -632,8 +633,10 @@ class Handlers:
         """Fetch the next ``n`` rows from an open cursor.
 
         Returns ``{rows, row_count, exhausted, cursor_closed}``; the cursor is
-        closed automatically once exhausted, and also when the fetch fails (the
-        error is re-raised and the ``cursor_id`` is no longer valid).
+        closed automatically once exhausted, and also when the read fails (the
+        error is re-raised and the ``cursor_id`` is no longer valid). A call made
+        while another fetch is running on the cursor is refused with ``ValueError``
+        and changes nothing.
         """
         for state in self._reap_idle_cursors():
             await self._close_cursor_state(state)
@@ -643,13 +646,23 @@ class Handlers:
                 f"Unknown cursor_id {cursor_id!r} — it may have expired "
                 "(15 min idle limit) or already been closed."
             )
+        # Refused here because the driver's "another operation is in progress" error
+        # would look like a failed read and close the connection under the running fetch.
+        if state["fetching"]:
+            raise ValueError(
+                f"A fetch is already running on cursor {cursor_id!r} — "
+                "wait for it to return, then fetch again."
+            )
         state["last_used"] = time.monotonic()
+        state["fetching"] = True
         try:
             rows = await state["cursor"].fetch(n)
         except Exception:
             self._cursors.pop(cursor_id, None)
             await self._close_cursor_state(state)
             raise
+        finally:
+            state["fetching"] = False
         exhausted = len(rows) < max(1, int(n))
         if exhausted:
             del self._cursors[cursor_id]

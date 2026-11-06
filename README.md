@@ -203,7 +203,7 @@ The server exposes **23 tools** and **2 prompts**:
 | `explain_query` | execute | `EXPLAIN` (optionally `ANALYZE`) a validated read-only query — confirm index usage without any write access. Takes the same `params` (`$1`/`$2` bind parameters) as `execute_read_query`, so you explain the query you will actually run rather than a literal-substituted rewrite of it. |
 | `cancel_query` | execute | Cancel the statement in a given backend `pid` (native `pg_cancel_backend`); the session survives. Find pids via `show_activity`. |
 | `open_query_cursor` | cursor | Open a server-side cursor over a read-only query for **large result sets**; returns a `cursor_id`. Max 5 open; 15-min idle auto-reap. |
-| `fetch_rows` | cursor | Fetch the next N rows from an open cursor; auto-closes when drained. Values render as on `execute_read_query`: bytea as `\x` hex text, a `"char"` column as its character. |
+| `fetch_rows` | cursor | Fetch the next N rows from an open cursor; auto-closes when drained or when the read fails. A call made while another is running on the same cursor is refused and changes nothing. Values render as on `execute_read_query`: bytea as `\x` hex text, a `"char"` column as its character. |
 | `close_cursor` | cursor | Close a cursor and release its connection (idempotent). |
 | `diff_schemas` | insight | Structural schema diff between two configured databases (tables, columns, types, defaults, PK/FK) — verify a migrated copy matches its source. |
 | `check_sequences` | insight | Find sequences **behind** their column's max value (the silent post-migration breakage); fix with `setval()`. Lists only the problem sequences by default, with `total_sequences` saying how many were checked; pass `behind_only=false` for the full census. |

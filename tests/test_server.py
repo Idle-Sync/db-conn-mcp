@@ -70,6 +70,27 @@ class FakeCursor:
             raise self.raise_on_close
 
 
+class HeldFakeCursor(FakeCursor):
+    """Holds each fetch open until released; a second fetch meanwhile raises, as asyncpg does."""
+
+    def __init__(self, batches=None):
+        super().__init__(batches)
+        self.fetch_entered = asyncio.Event()
+        self.release_fetch = asyncio.Event()
+        self.in_fetch = False
+
+    async def fetch(self, n):
+        if self.in_fetch:
+            raise asyncpg.InterfaceError("another operation is in progress")
+        self.in_fetch = True
+        self.fetch_entered.set()
+        try:
+            await self.release_fetch.wait()
+        finally:
+            self.in_fetch = False
+        return await super().fetch(n)
+
+
 class FakeDialect:
     """Records how it was connected and serves canned results."""
 
@@ -744,6 +765,75 @@ async def test_fetch_error_survives_a_failing_close(cfg_path, monkeypatch):
     with pytest.raises(RuntimeError, match="fetch failed"):
         await h.fetch_rows(opened["cursor_id"], 10)
     assert h._cursors == {}
+
+
+async def test_fetch_error_of_any_type_closes_cursor(cfg_path, monkeypatch):
+    dialect = FakeDialect(cursor_raises=OSError("gone"))
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    opened = await h.open_query_cursor("prod", "SELECT 1")
+    with pytest.raises(OSError, match="gone"):
+        await h.fetch_rows(opened["cursor_id"], 10)
+    assert h._cursors == {}
+    assert dialect.cursor.closed is True
+
+
+async def test_failed_fetch_unregisters_cursor_before_closing_it(cfg_path, monkeypatch):
+    """The close awaits the network, so a registered dying cursor would still count."""
+    dialect = FakeDialect(cursor_raises=RuntimeError("boom"))
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    opened = await h.open_query_cursor("prod", "SELECT 1")
+    registered_during_close = []
+
+    async def recording_close():
+        registered_during_close.append(dict(h._cursors))
+
+    dialect.cursor.close = recording_close
+    with pytest.raises(RuntimeError, match="boom"):
+        await h.fetch_rows(opened["cursor_id"], 10)
+    assert registered_during_close == [{}]
+
+
+async def test_overlapping_fetch_is_refused_and_leaves_the_running_fetch_alone(
+    cfg_path, monkeypatch
+):
+    """The driver's "in progress" error says nothing is wrong with the cursor."""
+    dialect = FakeDialect()
+    dialect.cursor = HeldFakeCursor([[{"id": 1}, {"id": 2}], [{"id": 3}]])
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    cursor_id = (await h.open_query_cursor("prod", "SELECT 1"))["cursor_id"]
+
+    running_fetch = asyncio.create_task(h.fetch_rows(cursor_id, 2))
+    await asyncio.wait_for(dialect.cursor.fetch_entered.wait(), 5)
+    with pytest.raises(ValueError, match="already running"):
+        await h.fetch_rows(cursor_id, 2)
+    assert cursor_id in h._cursors
+    assert dialect.cursor.closed is False
+
+    dialect.cursor.release_fetch.set()
+    assert (await running_fetch)["rows"] == [{"id": 1}, {"id": 2}]
+    assert (await h.fetch_rows(cursor_id, 2))["rows"] == [{"id": 3}]
+
+
+async def test_cancelled_fetch_leaves_the_cursor_fetchable(cfg_path, monkeypatch):
+    """A cancelled tool call is not a failed fetch, and must not refuse the next one."""
+    dialect = FakeDialect()
+    dialect.cursor = HeldFakeCursor([[{"id": 1}]])
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    cursor_id = (await h.open_query_cursor("prod", "SELECT 1"))["cursor_id"]
+
+    cancelled_fetch = asyncio.create_task(h.fetch_rows(cursor_id, 2))
+    await asyncio.wait_for(dialect.cursor.fetch_entered.wait(), 5)
+    cancelled_fetch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_fetch
+    assert dialect.cursor.closed is False
+
+    dialect.cursor.release_fetch.set()
+    assert (await h.fetch_rows(cursor_id, 2))["rows"] == [{"id": 1}]
 
 
 async def test_idle_cursors_are_reaped(cfg_path, monkeypatch):
