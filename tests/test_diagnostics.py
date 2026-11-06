@@ -96,6 +96,8 @@ def test_missing_database_named_like_ssl_is_db_not_found():
         'FATAL: no pg_hba.conf entry for host "10.0.0.5", user "app", database "payroll", SSL off',
         "FATAL: SSL required",
         "connection is insecure (try using `sslmode=require`)",
+        "SSL connection is required for user: app",
+        "SSL is required",
     ],
 )
 def test_ssl_markers_match_server_phrasing(message):
@@ -186,6 +188,13 @@ def test_missing_database_named_like_password_is_db_not_found():
         'ERROR: role "app" already exists',
         'ERROR: database "payroll" already exists',
         "FATAL: unsupported ssl of this version",
+        "SSL is not supported by this build",
+        "ssl is requested but unavailable",
+        "client certificate is required",
+        "could not initialize SSL connection: EOF detected",
+        "ssl connection is closed",
+        "ssl connection is requested but unavailable",
+        "authenticated connection is required",
         "server certificate is insecure",
         "cannot perform operation: connection is closed",
         "too many connect attempts",

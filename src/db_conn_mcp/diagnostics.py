@@ -106,7 +106,13 @@ def _classify(error: Exception) -> Category:
 
     if any(marker in message for marker in _DNS_MARKERS):
         return "DNS_FAILURE"
-    if "ssl off" in message or "ssl required" in message or "connection is insecure" in message:
+    if (
+        "ssl off" in message
+        or "ssl required" in message
+        or "ssl is required" in message
+        or "ssl connection is required" in message
+        or "connection is insecure" in message
+    ):
         return "SSL_REQUIRED"
     if (
         "too many connections" in message
