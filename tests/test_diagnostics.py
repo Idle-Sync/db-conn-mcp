@@ -95,6 +95,7 @@ def test_missing_database_named_like_ssl_is_db_not_found():
     [
         'FATAL: no pg_hba.conf entry for host "10.0.0.5", user "app", database "payroll", SSL off',
         "FATAL: SSL required",
+        "connection is insecure (try using `sslmode=require`)",
     ],
 )
 def test_ssl_markers_match_server_phrasing(message):
@@ -107,6 +108,7 @@ def test_ssl_markers_match_server_phrasing(message):
         'FATAL: no pg_hba.conf entry for host "10.0.0.5", user "app", database "payroll", '
         "SSL encryption",
         'PostgreSQL server at "h:5432" rejected SSL upgrade',
+        "FATAL: ssl requested but unavailable",
     ],
 )
 def test_ssl_messages_not_about_requiring_ssl_are_unknown(message):
@@ -141,6 +143,7 @@ def test_statement_timeout_is_not_host_unreachable():
     [
         "[Errno 110] Connection timed out",
         "FATAL: client_login_timeout (server down)",
+        "[Errno 111] Connection refused",
     ],
 )
 def test_timeout_markers_match_server_phrasing(message):
@@ -175,6 +178,9 @@ def test_never_leaks_connection_details(exc):
         "ERROR: relation does not exist in database payroll",
         "operation timed after 5 seconds",
         "connection was refused by the proxy policy",
+        'FATAL: role "app" is not permitted to log in',
+        'ERROR: role "app" already exists',
+        'ERROR: database "payroll" already exists',
     ],
 )
 def test_loose_wording_does_not_match_a_marker(message):
