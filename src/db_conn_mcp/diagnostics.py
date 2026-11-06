@@ -106,15 +106,31 @@ def _classify(error: Exception) -> Category:
 
     if any(marker in message for marker in _DNS_MARKERS):
         return "DNS_FAILURE"
-    if "ssl" in message:
+    if (
+        "ssl off" in message
+        or "ssl required" in message
+        or "ssl is required" in message
+        or "ssl connection is required" in message
+        or "connection is insecure" in message
+    ):
         return "SSL_REQUIRED"
-    if "too many" in message or "remaining connection slots" in message:
+    if (
+        "too many connections" in message
+        or "too many clients" in message
+        or "remaining connection slots" in message
+    ):
         return "POOL_EXHAUSTED"
-    if "password authentication failed" in message or "role" in message and "exist" in message:
+    if "password authentication failed" in message:
         return "AUTH_FAILED"
-    if "does not exist" in message and "database" in message:
+    if 'role "' in message and "does not exist" in message:
+        return "AUTH_FAILED"
+    if 'database "' in message and "does not exist" in message:
         return "DB_NOT_FOUND"
-    if "connection refused" in message or "timed out" in message or "timeout" in message:
+    if (
+        "connection refused" in message
+        or "timed out" in message
+        or "client_login_timeout" in message
+    ):
         return "HOST_UNREACHABLE"
 
     return "UNKNOWN"

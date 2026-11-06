@@ -444,7 +444,10 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         """Fetch the next N rows from an open cursor (see open_query_cursor).
 
         Returns {rows, row_count, exhausted, cursor_closed}; the cursor closes itself
-        once fully drained.
+        once fully drained, and also when the read fails: the error is raised and the
+        cursor_id stops working, so re-open the query to read again. Fetch one batch at
+        a time: a call made while another is running on the same cursor is refused, and
+        the cursor and the running call carry on.
 
         Rows arrive on the text channel only, inside the untrusted-data banner: this
         tool emits no structuredContent.

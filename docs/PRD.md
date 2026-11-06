@@ -65,7 +65,7 @@ To provide the best Agent Experience (AgentX), the server exposes **23 tools + 2
 
 ### Cursor Tools (large result sets)
 13. **`open_query_cursor`**: Opens a **native server-side cursor** over a validated read-only query and returns a `cursor_id`. The one deliberately stateful corner of the server: each cursor pins a dedicated read-only connection until closed, bounded hard — max **5** open cursors, **15-minute** idle reaping, auto-close on exhaustion.
-14. **`fetch_rows`**: Fetches the next *N* rows (default 100) from an open cursor; reports `exhausted` and closes the cursor automatically when drained.
+14. **`fetch_rows`**: Fetches the next *N* rows (default 100) from an open cursor; reports `exhausted` and closes the cursor automatically when drained or when the read fails. A call made while another is running on the same cursor is refused and changes nothing.
 15. **`close_cursor`**: Explicitly closes a cursor and releases its connection. Idempotent. Per **Rule 10**, open/fetch/close are three tools — one job each.
 
 ### Object-Definition Tool

@@ -13,6 +13,9 @@ the time of that release.
 
 ### Fixed
 
+- `fetch_rows` with `n` of `2**31` or more now returns the remaining rows (at most `2**31 - 1`
+  per call) where it used to raise `OverflowError`; the response reports `exhausted: true` and
+  `cursor_closed: true`, as for any batch that returned the rest of the rows.
 - A read query whose leading block comment contains a nested comment (`/* /* */ ... */`) is
   now rejected by the read tool instead of reaching the server.
 - A `--` comment ending in a carriage return (`\r`) now ends the comment for both the read
@@ -33,6 +36,16 @@ the time of that release.
 - A connections.json that cannot be updated, such as one in a read-only folder, is reported in one
   line by `remove` and as a 409 by the dashboard's add, edit and delete, instead of a traceback or
   500. A mistyped name or a duplicate still gets its usual refusal there, and writes nothing.
+- After a `fetch_rows` whose read fails, the cursor and its connection are released, so the
+  failure no longer counts toward the open-cursor limit (#47).
+- `check_database` and `doctor` no longer tell you to fix credentials when the missing
+  database's name contains "role" or to add `sslmode` when it contains "ssl", no longer report
+  a full server for a client-side "too many open files", and no longer report the host
+  unreachable (and probe fallback ports) for a message that only mentions a timeout, such as a
+  statement timeout or pgbouncer's `query_wait_timeout`, which now reads as unknown (#48).
+- Saving `connections.json` or a client config file on Windows no longer fails when `os.replace`
+  in the atomic save is refused with error 5 for a moment: the swap now retries, up to 20 attempts
+  over about 1 s (#63).
 
 ### Breaking / Behaviour changes
 
@@ -72,6 +85,24 @@ the time of that release.
   `{rows_affected}`, and a `SELECT` of one raised the driver's raw error; both now raise an error
   saying the statement ran, so treat a commit as applied and check with a read before retrying. A
   dry run that fails this way grants no commit: cast the value to text, or use `skip_dry_run`.
+- **Your cursor is gone after a `fetch_rows` call whose read fails.** A retry on that id now
+  reports an unknown cursor and `close_cursor` reports `was_open: false`; re-open the query to read
+  again.
+- **Your overlapping `fetch_rows` calls on one cursor now get a clear refusal.** A call made while
+  another is running on that cursor raises an error saying so, in place of the driver's "another
+  operation is in progress"; the cursor and the running call carry on, so wait for it to return and
+  fetch again.
+- **Your `check_database` and `doctor` output for some connection errors changes category and
+  advice, from `SSL_REQUIRED`, `POOL_EXHAUSTED` or `HOST_UNREACHABLE` to `UNKNOWN` with the
+  troubleshooting checklist.** These include: a server that refuses SSL (`rejected SSL upgrade`),
+  a certificate that fails verification, an invalid `sslmode` value, a client-side "too many open
+  files", a statement timeout, Postgres's authentication timeout, and pgbouncer's
+  `query_wait_timeout`. A connection with `fallback_ports` will now stop at these timeouts instead
+  of probing the next port; it already stopped at the other errors.
+- **A save on Windows that is refused with `Access is denied` now waits before failing.** A save
+  of `connections.json` or of a client config file on Windows that is refused with
+  `Access is denied` while another program holds the file now waits up to 1 s before failing,
+  where it used to fail at once; a read-only `connections.json` still fails at once.
 
 ## [0.7.1] — 2026-08-13
 

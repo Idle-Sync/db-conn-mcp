@@ -3,10 +3,36 @@
 Standard library only: ``clients.py`` imports this and stays free of ``asyncpg``.
 """
 
+import errno
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
+
+# Windows can refuse a swap with error 5 for a moment while another handle is on the target.
+_TRANSIENT_WINERRORS = (5,)
+_REPLACE_ATTEMPTS = 20
+
+
+def _replace_with_retry(temp_name: str, target: Path) -> None:
+    """Swap the temp file over ``target``, waiting out a brief refusal from Windows."""
+    # Asked once, before any attempt: os.access is also False while the target's attributes
+    # can't be read, the state being waited out. A read-only target never clears.
+    read_only = target.exists() and not os.access(target, os.W_OK)
+    attempts_left = _REPLACE_ATTEMPTS
+    while True:
+        attempts_left -= 1
+        try:
+            os.replace(temp_name, target)
+        except OSError as exc:
+            winerror = getattr(exc, "winerror", None)  # the attribute exists on Windows only
+            transient = exc.errno == errno.EACCES and winerror in _TRANSIENT_WINERRORS
+            if read_only or not transient or attempts_left == 0:
+                raise
+            time.sleep(0.05)
+        else:
+            return
 
 
 def write_text_atomically(path: Path, text: str) -> None:
@@ -21,6 +47,9 @@ def write_text_atomically(path: Path, text: str) -> None:
     for the window in between, readable by every local user. An existing target's mode
     is copied over before the swap, so only a file created from nothing ends up 0600.
     The mode is advisory on Windows, where NTFS ignores POSIX bits.
+
+    A swap Windows refuses with error 5 is retried for up to about a second before the
+    error reaches the caller, unless the target is read-only.
     """
     target = path.resolve()
     fd, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
@@ -29,7 +58,7 @@ def write_text_atomically(path: Path, text: str) -> None:
             handle.write(text)
         if target.exists():
             shutil.copymode(target, temp_name)
-        os.replace(temp_name, target)
+        _replace_with_retry(temp_name, target)
     except BaseException:  # Ctrl-C must not leave the temp file behind either
         # missing_ok: a Ctrl-C landing just after the replace must stay a Ctrl-C.
         Path(temp_name).unlink(missing_ok=True)
