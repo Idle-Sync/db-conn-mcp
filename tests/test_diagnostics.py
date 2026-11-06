@@ -58,12 +58,107 @@ def test_shape_is_category_cause_fixes():
     assert isinstance(result["fixes"], list)
 
 
+def test_missing_database_named_like_role_is_db_not_found():
+    result = explain(RuntimeError('FATAL: database "user_roles_db" does not exist'))
+    assert result["category"] == "DB_NOT_FOUND"
+
+
+def test_missing_role_named_like_database_is_auth_failed():
+    # Rejects a plain reorder of the AUTH and DB branches.
+    result = explain(RuntimeError('FATAL: role "database_admin" does not exist'))
+    assert result["category"] == "AUTH_FAILED"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        'FATAL: role "reporting" does not exist',
+        'FATAL: password authentication failed for user "x"',
+    ],
+)
+def test_untyped_auth_messages_are_auth_failed(message):
+    assert explain(RuntimeError(message))["category"] == "AUTH_FAILED"
+
+
+def test_untyped_missing_database_is_db_not_found():
+    result = explain(RuntimeError('FATAL: database "payroll" does not exist'))
+    assert result["category"] == "DB_NOT_FOUND"
+
+
+def test_missing_database_named_like_ssl_is_db_not_found():
+    result = explain(RuntimeError('FATAL: database "ssl_audit" does not exist'))
+    assert result["category"] == "DB_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        'FATAL: no pg_hba.conf entry for host "10.0.0.5", user "app", database "payroll", SSL off',
+        "FATAL: SSL required",
+    ],
+)
+def test_ssl_markers_match_server_phrasing(message):
+    assert explain(RuntimeError(message))["category"] == "SSL_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        'FATAL: no pg_hba.conf entry for host "10.0.0.5", user "app", database "payroll", '
+        "SSL encryption",
+        'PostgreSQL server at "h:5432" rejected SSL upgrade',
+    ],
+)
+def test_ssl_messages_not_about_requiring_ssl_are_unknown(message):
+    assert explain(RuntimeError(message))["category"] == "UNKNOWN"
+
+
+def test_too_many_open_files_is_not_pool_exhausted():
+    result = explain(OSError("[Errno 24] Too many open files"))
+    assert result["category"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        'FATAL: too many connections for role "app"',
+        "FATAL: sorry, too many clients already",
+        "FATAL: remaining connection slots are reserved for roles with privileges of the "
+        '"pg_use_reserved_connections" role',
+    ],
+)
+def test_pool_markers_match_server_phrasing(message):
+    assert explain(RuntimeError(message))["category"] == "POOL_EXHAUSTED"
+
+
+def test_statement_timeout_is_not_host_unreachable():
+    result = explain(RuntimeError("FATAL: canceling statement due to statement timeout"))
+    assert result["category"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "[Errno 110] Connection timed out",
+        "FATAL: client_login_timeout (server down)",
+    ],
+)
+def test_timeout_markers_match_server_phrasing(message):
+    assert explain(RuntimeError(message))["category"] == "HOST_UNREACHABLE"
+
+
+def test_query_wait_timeout_is_unknown():
+    result = explain(RuntimeError("FATAL: query_wait_timeout"))
+    assert result["category"] == "UNKNOWN"
+
+
 @pytest.mark.parametrize(
     "exc",
     [
         asyncpg.InvalidPasswordError("auth failed for 'dbadmin' at myhost.example.com:5432"),
         ConnectionRefusedError("refused connecting to myhost.example.com:5432 as dbadmin"),
         OSError("could not translate host name myhost.example.com to address"),
+        ConnectionError('PostgreSQL server at "myhost.example.com:5432" rejected SSL upgrade'),
     ],
 )
 def test_never_leaks_connection_details(exc):

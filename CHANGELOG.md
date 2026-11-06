@@ -33,6 +33,11 @@ the time of that release.
 - A connections.json that cannot be updated, such as one in a read-only folder, is reported in one
   line by `remove` and as a 409 by the dashboard's add, edit and delete, instead of a traceback or
   500. A mistyped name or a duplicate still gets its usual refusal there, and writes nothing.
+- `check_database` and `doctor` no longer tell you to fix credentials when the missing
+  database's name contains "role" or to add `sslmode` when it contains "ssl", no longer report
+  a full server for a client-side "too many open files", and no longer report the host
+  unreachable (and probe fallback ports) for a message that only mentions a timeout, such as a
+  statement timeout or pgbouncer's `query_wait_timeout`, which now reads as unknown (#48).
 
 ### Breaking / Behaviour changes
 
@@ -72,6 +77,12 @@ the time of that release.
   `{rows_affected}`, and a `SELECT` of one raised the driver's raw error; both now raise an error
   saying the statement ran, so treat a commit as applied and check with a read before retrying. A
   dry run that fails this way grants no commit: cast the value to text, or use `skip_dry_run`.
+- **Your `check_database` and `doctor` output for a few messages changes category and advice,
+  from `SSL_REQUIRED`, `POOL_EXHAUSTED` or `HOST_UNREACHABLE` to `UNKNOWN` with the
+  troubleshooting checklist.** The messages are: a server that refuses SSL (`rejected SSL
+  upgrade`), a pg_hba rejection of a connection that already uses SSL, a client-side "too many
+  open files", a statement timeout, and pgbouncer's `query_wait_timeout`. A connection with
+  `fallback_ports` will now stop at those messages instead of probing the next port.
 
 ## [0.7.1] — 2026-08-13
 
