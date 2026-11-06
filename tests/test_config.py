@@ -374,7 +374,8 @@ def test_cross_process_set_yolo_loses_no_update(tmp_path):
     with ThreadPoolExecutor(max_workers=8) as pool:
         children = list(pool.map(run_child, range(8)))
 
-    assert [c.returncode for c in children] == [0] * 8, [c.stderr for c in children]
+    report = "\n".join(f"child {i} rc={c.returncode}\n{c.stderr}" for i, c in enumerate(children))
+    assert [c.returncode for c in children] == [0] * 8, report
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert [conn["yolo"] for conn in saved["connections"]] == [True] * 8
     assert sorted(p.name for p in config_dir.iterdir()) == [
