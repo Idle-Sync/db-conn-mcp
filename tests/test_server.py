@@ -745,6 +745,22 @@ async def test_fetch_rows_error_closes_cursor(cfg_path, monkeypatch):
     assert dialect.cursor.closed is True
 
 
+async def test_fetch_rows_above_int32_returns_rows_and_closes_the_cursor(cfg_path, monkeypatch):
+    """The response the changelog promises for ``n >= 2**31``: the rest of the rows, then closed."""
+    dialect = FakeDialect()
+    dialect.cursor = FakeCursor([[{"id": 1}]])
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    opened = await h.open_query_cursor("prod", "SELECT 1")
+    result = await h.fetch_rows(opened["cursor_id"], 2**31)
+    assert result["rows"] == [{"id": 1}]
+    assert result["exhausted"] is True
+    assert result["cursor_closed"] is True
+    assert dialect.cursor.closed is True
+    with pytest.raises(ValueError, match="Unknown cursor_id"):
+        await h.fetch_rows(opened["cursor_id"], 2)
+
+
 async def test_failed_fetches_do_not_count_toward_cursor_limit(cfg_path, monkeypatch):
     _patch_dialect(monkeypatch, FakeDialect(cursor_raises=RuntimeError("boom")))
     h = Handlers(cfg_path)
