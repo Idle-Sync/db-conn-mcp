@@ -6,6 +6,7 @@ driving it with scripted ``input``.
 """
 
 import builtins
+import contextlib
 import io
 import json
 import sys
@@ -14,6 +15,8 @@ import pytest
 
 from db_conn_mcp import cli, clients, config
 from db_conn_mcp import cli as cli_module
+
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX folder permissions")
 
 
 def _scripted_input(answers):
@@ -1246,3 +1249,283 @@ def test_status_marks_an_unreadable_config(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Broken Client: config unreadable" in out
     assert "secret-token-abc123" not in out  # Rule 6
+
+
+# ---- malformed connections.json: a message and exit 1, never a traceback -----
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b'{"connections": [,]}', '{"connections": []}'.encode("utf-16")],
+    ids=["bad_json", "utf16"],
+)
+@pytest.mark.parametrize(
+    "run",
+    [
+        lambda p: cli.cmd_status(p),
+        lambda p: cli.cmd_remove(p, "x"),
+        lambda p: cli.cmd_add(p),
+        lambda p: cli.run_setup_wizard(p),
+    ],
+    ids=["status", "remove", "add", "setup"],
+)
+def test_malformed_config_is_reported_not_raised(run, content, tmp_path, capsys):
+    p = tmp_path / "connections.json"
+    p.write_bytes(content)
+    assert run(str(p)) == 1
+    assert "is not valid JSON" in capsys.readouterr().out
+
+
+def test_malformed_config_status_names_the_field_not_the_dsn(tmp_path, capsys):
+    p = tmp_path / "connections.json"
+    p.write_text(
+        json.dumps(
+            {"connections": [{"name": "a", "dsn": "postgresql://u:SEKRET@h/db", "mode": "banana"}]}
+        ),
+        encoding="utf-8",
+    )
+    assert cli.cmd_status(str(p)) == 1
+    out = capsys.readouterr().out
+    assert "mode" in out
+    assert "SEKRET" not in out
+
+
+# ---- the file lock wraps every read-modify-write ------------------------------
+
+
+@pytest.fixture()
+def lock_events(monkeypatch):
+    """Record lock enter/exit, config load/save and input() calls in call order."""
+    events: list[str] = []
+    real_locked, real_load, real_save = config.locked, config.load, config.save
+
+    @contextlib.contextmanager
+    def recording_locked(path):
+        with real_locked(path):
+            events.append("enter")
+            try:
+                yield
+            finally:
+                events.append("exit")
+
+    def recording_load(*args, **kwargs):
+        events.append("load")
+        return real_load(*args, **kwargs)
+
+    def recording_save(*args, **kwargs):
+        events.append("save")
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(config, "locked", recording_locked)
+    monkeypatch.setattr(config, "load", recording_load)
+    monkeypatch.setattr(config, "save", recording_save)
+    return events
+
+
+def _assert_saved_inside_lock_after_a_load(events):
+    inside = False
+    loaded_inside = False
+    for event in events:
+        if event == "enter":
+            inside, loaded_inside = True, False
+        elif event == "exit":
+            inside = False
+        elif event == "load":
+            loaded_inside = loaded_inside or inside
+        elif event == "save":
+            assert inside, events
+            assert loaded_inside, events
+        elif event == "input":
+            assert not inside, events
+    assert "save" in events
+
+
+def _seed_repo_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    return config.repo_config_path()
+
+
+def _recording_input(events, answers):
+    scripted = _scripted_input(answers)
+
+    def _input(prompt=""):
+        events.append("input")
+        return scripted(prompt)
+
+    return _input
+
+
+@pytest.mark.parametrize("case", ["register_database", "remove", "add_interactive"])
+def test_file_lock_order(case, tmp_path, monkeypatch, lock_events):
+    path = _seed_repo_config(tmp_path, monkeypatch)
+    lock_events.clear()
+    # A detected client makes the selection prompt run: without one it returns early,
+    # and a prompt moved inside the lock would go unnoticed.
+    client = cli.ClientSpec("one", "First", tmp_path / "one.json", "mcpServers")
+    client.path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [client])
+    answers = ["b", "postgresql://h/b", "r", "", ""]
+    monkeypatch.setattr(builtins, "input", _recording_input(lock_events, answers))
+    if case == "register_database":
+        cli.register_database("repo", "b", "postgresql://h/b", "read")
+    elif case == "remove":
+        assert cli.cmd_remove(str(path), "a") == 0
+    else:
+        assert cli._add_connection_interactive(path) is True
+        assert lock_events.count("input") == len(answers)
+    _assert_saved_inside_lock_after_a_load(lock_events)
+
+
+def _add_with_sibling_writing_during_prompts(path, typed_name, sibling, monkeypatch):
+    """Run the real add path while another writer appends ``sibling`` mid-prompt."""
+    scripted = _scripted_input([typed_name, "postgresql://h/typed", "r", ""])
+
+    def _input(prompt=""):
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if sibling not in raw["connections"]:
+            raw["connections"].append(sibling)
+            path.write_text(json.dumps(raw), encoding="utf-8")
+        return scripted(prompt)
+
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    monkeypatch.setattr(builtins, "input", _input)
+    return cli._add_connection_interactive(path)
+
+
+def test_add_while_another_writer_keeps_both_connections(tmp_path, monkeypatch):
+    path = _seed_repo_config(tmp_path, monkeypatch)
+    sibling = {"name": "c", "dsn": "postgresql://h/c", "mode": "read"}
+    assert _add_with_sibling_writing_during_prompts(path, "b", sibling, monkeypatch) is True
+    names = [c.name for c in config.load(str(path)).connections]
+    assert names == ["a", "c", "b"]
+
+
+def test_add_while_another_writer_used_the_same_name_saves_nothing(tmp_path, monkeypatch, capsys):
+    path = _seed_repo_config(tmp_path, monkeypatch)
+    sibling = {"name": "b", "dsn": "postgresql://h/sibling", "mode": "read"}
+    assert _add_with_sibling_writing_during_prompts(path, "b", sibling, monkeypatch) is False
+    assert "already exists" in capsys.readouterr().out
+    stored = config.load(str(path)).connections
+    assert [(c.name, c.dsn) for c in stored] == [
+        ("a", "postgresql://h/a"),
+        ("b", "postgresql://h/sibling"),
+    ]
+
+
+# ---- a client config that cannot be written is skipped, not a traceback ------
+
+
+def test_clients_write_fails_skips_that_client_and_continues(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    first = cli.ClientSpec("one", "First", tmp_path / "one.json", "mcpServers")
+    second = cli.ClientSpec("two", "Second", tmp_path / "two.json", "mcpServers")
+    for spec in (first, second):
+        spec.path.write_text("{}", encoding="utf-8")
+    real_write = cli.write_config
+
+    def failing_first(spec, data):
+        if spec is first:
+            raise clients.ClientConfigError("First: could not be written")
+        real_write(spec, data)
+
+    monkeypatch.setattr(cli, "detected_clients", lambda: [first, second])
+    monkeypatch.setattr(cli, "write_config", failing_first)
+    monkeypatch.setattr(builtins, "input", _scripted_input(["all"]))
+    assert cli.cmd_clients(str(config.repo_config_path())) == 0
+    out = capsys.readouterr().out
+    assert "Skipped First" in out
+    # A write can fail because of the folder, so editing the file may not be the fix.
+    assert "Fix that file" not in out
+    assert "Fix the problem above by hand" in out
+    assert "db-conn-mcp" in json.loads(second.path.read_text(encoding="utf-8"))["mcpServers"]
+
+
+def test_clients_remove_write_fails_skips_that_client(tmp_path, monkeypatch, capsys):
+    entry = {"mcpServers": {"db-conn-mcp": {"command": "x"}}}
+    first = cli.ClientSpec("one", "First", tmp_path / "one.json", "mcpServers")
+    second = cli.ClientSpec("two", "Second", tmp_path / "two.json", "mcpServers")
+    for spec in (first, second):
+        spec.path.write_text(json.dumps(entry), encoding="utf-8")
+    real_write = cli.write_config
+
+    def failing_first(spec, data):
+        if spec is first:
+            raise clients.ClientConfigError("First: could not be written")
+        real_write(spec, data)
+
+    monkeypatch.setattr(cli, "detected_clients", lambda: [first, second])
+    monkeypatch.setattr(cli, "write_config", failing_first)
+    monkeypatch.setattr(builtins, "input", _scripted_input(["all"]))
+    assert cli.cmd_clients(remove=True) == 0
+    assert "Skipped First" in capsys.readouterr().out
+    assert json.loads(second.path.read_text(encoding="utf-8"))["mcpServers"] == {}
+
+
+# ---- remove: a mistyped name stays off the disk, a stuck folder is one line ---
+
+
+def _seed_config(path):
+    path.write_text(
+        json.dumps(
+            {"connections": [{"name": "a", "dsn": "postgresql://u:SEKRET@h/d", "mode": "read"}]}
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+@posix_only
+def test_remove_unknown_name_in_a_read_only_folder_names_the_problem(tmp_path, capsys):
+    folder = tmp_path / "read_only"
+    folder.mkdir()
+    path = _seed_config(folder / "connections.json")
+    folder.chmod(0o555)
+    try:
+        assert cli.cmd_remove(str(path), "typo") == 1
+    finally:
+        folder.chmod(0o755)
+    assert "No connection named 'typo'. Available: a." in capsys.readouterr().out
+
+
+@posix_only
+@pytest.mark.parametrize("sidecar_exists", [False, True], ids=["lock_fails", "save_fails"])
+def test_remove_in_a_read_only_folder_is_one_sanitized_line(tmp_path, sidecar_exists, capsys):
+    folder = tmp_path / "read_only"
+    folder.mkdir()
+    path = _seed_config(folder / "connections.json")
+    before = path.read_text(encoding="utf-8")
+    if sidecar_exists:
+        (folder / "connections.json.lock").touch()
+    folder.chmod(0o555)
+    try:
+        assert cli.cmd_remove(str(path), "a") == 1
+    finally:
+        folder.chmod(0o755)
+    out = capsys.readouterr().out
+    assert "PermissionError" in out
+    assert "SEKRET" not in out
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_remove_unknown_name_leaves_no_lock_file(tmp_path, capsys):
+    path = _seed_config(tmp_path / "connections.json")
+    assert cli.cmd_remove(str(path), "typo") == 1
+    assert not (tmp_path / "connections.json.lock").exists()
+
+
+def test_remove_rechecks_the_name_under_the_lock(tmp_path, monkeypatch, capsys):
+    """Another writer can drop the name between the first check and the lock."""
+    path = _seed_config(tmp_path / "connections.json")
+    real_locked = config.locked
+
+    @contextlib.contextmanager
+    def locked_after_another_writer(locked_path):
+        path.write_text(json.dumps({"connections": []}), encoding="utf-8")
+        with real_locked(locked_path):
+            yield
+
+    monkeypatch.setattr(config, "locked", locked_after_another_writer)
+    assert cli.cmd_remove(str(path), "a") == 1
+    assert "No connection named 'a'. Available: (none)." in capsys.readouterr().out

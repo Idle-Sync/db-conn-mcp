@@ -18,9 +18,34 @@ the time of that release.
 - A `--` comment ending in a carriage return (`\r`) now ends the comment for both the read
   gate and the single-statement check, so such a comment can no longer hide a write from the
   read tool or let `; COMMIT` escape a dry run.
+- Saving `connections.json` no longer resets its file mode: a `0600` file used to come back
+  world-readable (`0644`) after any save (#43).
+- Two processes changing `connections.json` at once, such as two MCP servers calling
+  `set_yolo_mode`, no longer lose an update or crash on a shared temp file (#45).
+- Unknown keys in `connections.json`, on a connection or at the top level, are no longer
+  dropped when the file is saved (#46).
+- A failed write to an MCP client's config file no longer truncates it: the file keeps its old
+  contents, no temp file stays behind, and the error says the file is unchanged (#53).
+- `status`, `setup`, `add` and `remove` print the config error and exit 1 instead of a traceback
+  when connections.json is malformed, including a file that is not UTF-8 text (#54).
+- A client config that cannot be written is skipped with a message (CLI) or a 409 (dashboard)
+  instead of a traceback or 500.
+- A connections.json that cannot be updated, such as one in a read-only folder, is reported in one
+  line by `remove` and as a 409 by the dashboard's add, edit and delete, instead of a traceback or
+  500. A mistyped name or a duplicate still gets its usual refusal there, and writes nothing.
 
 ### Breaking / Behaviour changes
 
+- **A new connections.json is created user-only (0600); existing modes are kept; unknown keys
+  are kept; a connections.json.lock file appears next to it.** Your new file was world-readable
+  under a typical umask, and your hand-added keys vanished on the next save. The lock file holds
+  no data and stays there; it sits beside the target when `connections.json` is a symlink.
+- **A client config file this tool creates from scratch is user-only (0600); existing files keep
+  their mode.**
+- **A client config file must be replaceable: a single-file bind mount or a read-only directory
+  now reports an error and leaves the file unchanged.** Your config is now swapped into place
+  rather than rewritten in place, so a file that could only be overwritten in place, and not
+  replaced, can no longer be updated.
 - **`execute_write_query` now returns `{columns, rows}` for statements with `RETURNING`.** Your
   `INSERT`, `UPDATE` or `DELETE ... RETURNING` call, dry-run and commit alike, returned
   `{rows_affected}` before; read `rows` instead. `RETURNING` values from a dry-run are rolled

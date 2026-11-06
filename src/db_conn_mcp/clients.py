@@ -14,6 +14,8 @@ from typing import Literal
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
 
+from .atomic_write import write_text_atomically
+
 #: How an MCP client stores server entries. Each value maps to a container key, an
 #: entry shape (:func:`_build_entry`) and a file syntax (:data:`_CODEC`) — the three
 #: axes on which known clients differ. Values are NOT all JSON: ``codex`` is TOML.
@@ -46,7 +48,7 @@ _CONTAINER_KEY: dict[ClientFormat, str] = {
 
 
 class ClientConfigError(Exception):
-    """A client config file exists but could not be read, parsed, or used as a mapping.
+    """A client config file could not be read, parsed, used as a mapping, or written.
 
     Raised instead of returning an empty document, so a read-merge-write can never
     silently overwrite a file whose contents we failed to understand. Messages name
@@ -137,8 +139,17 @@ def read_config(spec: ClientSpec) -> dict:
 
 
 def write_config(spec: ClientSpec, data: dict) -> None:
-    """Serialize ``data`` back to the client's config file in its own syntax."""
-    spec.path.write_text(_CODEC[spec.fmt].dumps(data), encoding="utf-8")
+    """Serialize ``data`` back to the client's config file in its own syntax.
+
+    Raises :class:`ClientConfigError` if the file cannot be replaced; it is then unchanged.
+    """
+    try:
+        write_text_atomically(spec.path, _CODEC[spec.fmt].dumps(data))
+    except OSError as exc:
+        raise ClientConfigError(
+            f"{spec.label}: {spec.path} could not be written ({type(exc).__name__}); "
+            "the file is unchanged"
+        ) from None
 
 
 def _build_entry(fmt: ClientFormat, command: str, args: list[str]) -> dict:
