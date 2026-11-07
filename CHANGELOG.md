@@ -13,6 +13,8 @@ the time of that release.
 
 ### Fixed
 
+- The `check_sequences` advice for a skipped sequence with reason `no_privilege` now tells you
+  to grant USAGE on the schema as well as SELECT on the sequence and its table.
 - Verify reports `tool_call_failed` when the server starts but `list_databases` returns an error,
   such as a `connections.json` with a duplicate connection name, where it used to report
   `answers` (#52).

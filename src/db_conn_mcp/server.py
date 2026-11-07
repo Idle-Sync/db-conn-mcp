@@ -499,11 +499,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         default only the problem sequences are listed, with `total_sequences` reporting
         how many were checked and `skipped` listing the ones that could not be probed —
         so `behind_count: 0` means "all clear" only when `skipped_count` is 0. A skipped
-        entry's `reason` is `no_privilege` (grant SELECT on the sequence and its table)
-        or `probe_failed` (the owning column is not numeric or the sequence could not be
-        read). Pass `behind_only=false` for the full census; on a large schema that is
-        one row per sequence (hundreds), so ask for it only when you need every
-        sequence's state.
+        entry's `reason` is `no_privilege` (grant USAGE on the schema and SELECT on the
+        sequence and its table) or `probe_failed` (the owning column is not numeric or the
+        sequence could not be read). Pass `behind_only=false` for the full census; on a
+        large schema that is one row per sequence (hundreds), so ask for it only when you
+        need every sequence's state.
         """
         return await handlers.check_sequences(database, behind_only)
 

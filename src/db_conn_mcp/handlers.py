@@ -718,8 +718,9 @@ class Handlers:
         the full census. Either way ``total_sequences`` says how many were inspected and
         ``skipped`` lists the ones that could not be probed, so ``behind_count: 0`` means
         all clear only when ``skipped_count`` is 0. A skipped entry's ``reason`` is
-        ``no_privilege`` (grant SELECT on the sequence and its table) or ``probe_failed``
-        (the owning column is not numeric or the sequence could not be read).
+        ``no_privilege`` (grant USAGE on the schema and SELECT on the sequence and its
+        table) or ``probe_failed`` (the owning column is not numeric or the sequence
+        could not be read).
         """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)

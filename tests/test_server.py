@@ -1910,6 +1910,15 @@ async def test_check_sequences_tool_defaults_to_problems_only(tmp_path):
     assert "skipped_count" in tool.description
 
 
+async def test_check_sequences_tool_advice_names_schema_usage(tmp_path):
+    cfg = {"connections": [{"name": "db", "dsn": "postgresql://u:p@h:5432/db", "mode": "read"}]}
+    path = tmp_path / "connections.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    app = build_server(config_path=path)
+    tool = next(t for t in await app.list_tools() if t.name == "check_sequences")
+    assert "USAGE" in tool.description
+
+
 # ---- the doctor tool is registered on the app ------------------------------------
 
 
