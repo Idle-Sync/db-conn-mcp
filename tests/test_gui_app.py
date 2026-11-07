@@ -696,8 +696,7 @@ def test_static_css_wraps_the_verify_output(client):
 
 def test_static_css_spaces_the_verify_disclosure(client):
     css = client.get(f"/static/style.css?token={TOKEN}").text
-    assert ".v-out {" in css
-    assert "margin-top: 6px" in css
+    assert ".v-out {\n  margin-top: 6px;\n}" in css
 
 
 def test_static_css_fetches_nothing_from_the_network(client):
