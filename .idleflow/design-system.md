@@ -97,6 +97,7 @@ Lamps and state edges (3:1 needed) use the same state colours on panel: ok 6.20 
 ## Space, radius, elevation, motion, breakpoints
 
 - **Space (px):** 2, 4, 5, 6, 8, 9, 10, 12, 14, 16, 17, 20, 30. The values are literals, not tokens. 17 exists so a banner with a 3px rule stays on the 20px gutter.
+- **Card rhythm:** paragraphs, wells and the verify disclosure sit 6px below the block before them; the first sits flush under the header's 8px margin.
 - **Column:** max 900px, 20px gutter, shared by banner, head and body so left edges align down to about 360px.
 - **Radius:** 3px on everything; 50% on the lamp only. Chips, not pills.
 - **Elevation:** none and no `box-shadow`. A raised surface is `--panel` on `--paper` with a 1px `--line` edge.
