@@ -98,7 +98,7 @@ async def verify_stdio(command: str, args: list[str], timeout: float = 20.0) -> 
                 list_databases_listed = any(tool.name == "list_databases" for tool in tools.tools)
                 dbs = await session.call_tool("list_databases", {})
                 first_text = next(
-                    (block.text for block in dbs.content if hasattr(block, "text")), None
+                    (block.text for block in dbs.content if getattr(block, "text", None)), None
                 )
                 dbs_failed = dbs.isError
                 if dbs_failed:
