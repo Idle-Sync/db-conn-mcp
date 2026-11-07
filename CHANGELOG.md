@@ -67,6 +67,9 @@ the time of that release.
 - **A client whose server starts but cannot read its `connections.json` now gets the verdict
   `tool_call_failed` instead of `answers`; the result carries the error in
   `list_databases_error` and `list_databases_text` is empty.**
+- **A launch line that starts another MCP server now carries that server's error (`Unknown tool:
+  list_databases`) in `list_databases_error`, and `list_databases_text` is empty.** In 0.7.1 the
+  text appeared in `list_databases_text`.
 - **Your `check_sequences` result now always carries `skipped` and `skipped_count`; read
   `behind_count: 0` as all clear only when `skipped_count` is 0.** A sequence your role could
   not probe used to vanish from the answer. `total_sequences` still counts only the sequences

@@ -195,6 +195,36 @@ async def test_verify_stdio_answer_uses_the_first_text_block(monkeypatch):
     assert result["list_databases_error"] is None
 
 
+async def test_verify_stdio_error_skips_an_empty_text_block(monkeypatch):
+    """An empty text block ahead of the error must not blank the card's error."""
+    content = [SimpleNamespace(text=""), SimpleNamespace(text="real error")]
+    _use_fake_session(monkeypatch, _tools(3, listed=True), is_error=True, content=content)
+    result = await verify_stdio("ignored", [])
+    assert result["verdict"] == "tool_call_failed"
+    assert result["list_databases_error"] == "real error"
+    assert result["list_databases_text"] is None
+
+
+async def test_verify_stdio_answer_skips_an_empty_text_block(monkeypatch):
+    """An empty text block ahead of the answer must not blank the card's answer."""
+    content = [SimpleNamespace(text=""), SimpleNamespace(text="real error")]
+    _use_fake_session(
+        monkeypatch, _tools(EXPECTED_TOOL_COUNT, listed=True), is_error=False, content=content
+    )
+    result = await verify_stdio("ignored", [])
+    assert result["verdict"] == "answers"
+    assert result["list_databases_text"] == "real error"
+    assert result["list_databases_error"] is None
+
+
+async def test_verify_stdio_all_empty_text_blocks_give_none(monkeypatch):
+    """With no text anywhere the card gets None, never an empty string."""
+    content = [SimpleNamespace(text="")]
+    _use_fake_session(monkeypatch, _tools(3, listed=True), is_error=True, content=content)
+    result = await verify_stdio("ignored", [])
+    assert result["list_databases_error"] is None
+
+
 async def test_verify_stdio_launch_failed_for_missing_binary(tmp_path):
     result = await verify_stdio(str(tmp_path / "no-such-binary.exe"), [], timeout=15.0)
     assert result["verdict"] == "launch_failed"
