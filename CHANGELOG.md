@@ -16,6 +16,10 @@ the time of that release.
 - Verify reports `tool_call_failed` when the server starts but `list_databases` returns an error,
   such as a `connections.json` with a duplicate connection name, where it used to report
   `answers` (#52).
+- A launch line that starts another MCP server still gets `wrong_tool_count`, and its card now
+  shows that server's error (`Unknown tool: list_databases`) as an error, where it used to appear
+  under "what list_databases answered". Verify also reads the first block of the `list_databases`
+  result that holds text, so a non-text first block no longer hides the text.
 - `check_sequences` lists every sequence it could not probe under `skipped`, with a `reason` of
   `no_privilege` or `probe_failed`, where it used to drop them: a role that could read no
   sequence got `behind_count: 0` as if the database had been checked (#51).
