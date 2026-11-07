@@ -13,6 +13,18 @@ the time of that release.
 
 ### Fixed
 
+- The `check_sequences` advice for a skipped sequence with reason `no_privilege` now tells you
+  to grant USAGE on the schema as well as SELECT on the sequence and its table.
+- Verify reports `tool_call_failed` when the server starts but `list_databases` returns an error,
+  such as a `connections.json` with a duplicate connection name, where it used to report
+  `answers` (#52).
+- A launch line that starts another MCP server still gets `wrong_tool_count`, and its card now
+  shows that server's error (`Unknown tool: list_databases`) as an error, where it used to appear
+  under "what list_databases answered". Verify also reads the first block of the `list_databases`
+  result that holds text, so a non-text first block no longer hides the text.
+- `check_sequences` lists every sequence it could not probe under `skipped`, with a `reason` of
+  `no_privilege` or `probe_failed`, where it used to drop them: a role that could read no
+  sequence got `behind_count: 0` as if the database had been checked (#51).
 - A refused primary port on a host that resolves to both IPv6 and IPv4, such as `localhost`,
   now probes `fallback_ports`: asyncio's combined `Multiple exceptions: ... Connect call
   failed` error is classified as `HOST_UNREACHABLE` instead of `UNKNOWN` (#55).
@@ -52,6 +64,17 @@ the time of that release.
 
 ### Breaking / Behaviour changes
 
+- **A client whose server starts but cannot read its `connections.json` now gets the verdict
+  `tool_call_failed` instead of `answers`; the result carries the error in
+  `list_databases_error` and `list_databases_text` is empty.**
+- **A launch line that starts another MCP server now carries that server's error (`Unknown tool:
+  list_databases`) in `list_databases_error`, and `list_databases_text` is empty.** In 0.7.1 the
+  text appeared in `list_databases_text`.
+- **Your `check_sequences` result now always carries `skipped` and `skipped_count`; read
+  `behind_count: 0` as all clear only when `skipped_count` is 0.** A sequence your role could
+  not probe used to vanish from the answer. `total_sequences` still counts only the sequences
+  inspected, so a role locked out of all of them now sees `total_sequences: 0` with each one
+  listed in `skipped`.
 - **A refused primary port on a host that resolves to both IPv6 and IPv4, such as `localhost`,
   now reports `HOST_UNREACHABLE` instead of `UNKNOWN`, and your `fallback_ports` are now probed
   where they used to be skipped.**

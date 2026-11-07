@@ -715,9 +715,12 @@ class Handlers:
         """Report sequences whose next value would collide with existing rows.
 
         By default only the problem sequences are listed; ``behind_only=False`` returns
-        the full census. Either way ``total_sequences`` says how many were inspected, so
-        ``behind_count: 0`` is an affirmative "nothing is stale" answer rather than an
-        empty one.
+        the full census. Either way ``total_sequences`` says how many were inspected and
+        ``skipped`` lists the ones that could not be probed, so ``behind_count: 0`` means
+        all clear only when ``skipped_count`` is 0. A skipped entry's ``reason`` is
+        ``no_privilege`` (grant USAGE on the schema and SELECT on the sequence and its
+        table) or ``probe_failed`` (the owning column is not numeric or the sequence
+        could not be read).
         """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
@@ -731,6 +734,8 @@ class Handlers:
             "sequences": sequences,
             "behind_count": sum(1 for s in sequences if s["behind"]),
             "total_sequences": report["total_sequences"],
+            "skipped": report["skipped"],
+            "skipped_count": len(report["skipped"]),
         }
 
     async def table_stats(

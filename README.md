@@ -206,7 +206,7 @@ The server exposes **23 tools** and **2 prompts**:
 | `fetch_rows` | cursor | Fetch the next N rows from an open cursor; auto-closes when drained or when the read fails. A call made while another is running on the same cursor is refused and changes nothing. Values render as on `execute_read_query`: bytea as `\x` hex text, a `"char"` column as its character. |
 | `close_cursor` | cursor | Close a cursor and release its connection (idempotent). |
 | `diff_schemas` | insight | Structural schema diff between two configured databases (tables, columns, types, defaults, PK/FK) — verify a migrated copy matches its source. |
-| `check_sequences` | insight | Find sequences **behind** their column's max value (the silent post-migration breakage); fix with `setval()`. Lists only the problem sequences by default, with `total_sequences` saying how many were checked; pass `behind_only=false` for the full census. |
+| `check_sequences` | insight | Find sequences **behind** their column's max value (the silent post-migration breakage); fix with `setval()`. Lists only the problem sequences by default, with `total_sequences` saying how many were checked and `skipped` listing the ones it could not probe; `behind_count: 0` means all clear only when `skipped_count` is 0. Pass `behind_only=false` for the full census. |
 | `table_stats` | insight | Approximate row counts + disk/index sizes per table, largest first (statistics only, no scans). Ask the narrower question directly: `table` for one table, `min_size_bytes` to skip anything smaller, `limit` for the top N by total size (which adds `truncated` to the result). |
 | `show_activity` | insight | Sanitized `pg_stat_activity`: pid, state, wait events, query age — **no user names, client addresses, or query text** (text is opt-in and truncated). |
 | `set_yolo_mode` | config | Enable/disable `yolo` for one database (persisted). |
@@ -304,7 +304,8 @@ That is the question the dashboard exists to answer, and it answers it with evid
 | `answers` | The handshake, `tools/list` and `list_databases` all came back. This client is genuinely wired up. |
 | `launch_failed` | The command in that client's config could not be started at all (wrong path, moved venv, uninstalled). |
 | `handshake_failed` | The process started but did not speak MCP — a broken or unrelated binary. |
-| `wrong_tool_count` | It answered, with a different number of tools than this build ships — usually an older copy. |
+| `tool_call_failed` | The server started and answered the handshake, but `list_databases` came back as an error, usually a malformed `connections.json`. The card shows the error text. |
+| `wrong_tool_count` | It answered, with a different number of tools than this build ships — usually an older copy, or a launch line that starts another MCP server, whose error for `list_databases` the card shows. |
 | `timeout` | No complete conversation in time. |
 | `port_in_use` | HTTP check only: something already listens on port 8000. |
 
