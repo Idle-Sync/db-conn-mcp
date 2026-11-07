@@ -207,8 +207,9 @@ class Dialect(ABC):
         ``skipped`` is always present (empty when nothing was skipped) and lists every
         sequence that could not be probed, so the tool's ``behind_count: 0`` means all
         clear only when ``skipped`` is empty. ``reason`` is ``"no_privilege"`` (grant
-        SELECT on the sequence and its table) or ``"probe_failed"`` (the owning column
-        is not numeric or the sequence could not be read). An entry carries those six
+        USAGE on the schema and SELECT on the sequence and its table) or
+        ``"probe_failed"`` (the owning column is not numeric or the sequence could not
+        be read). An entry carries those six
         keys only, never the database's error text.
         """
 
