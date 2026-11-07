@@ -601,6 +601,10 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.v-out {
+  margin-top: 6px;
+}
+
 .msg {
   font: 13px/1.5 var(--mono);
 }

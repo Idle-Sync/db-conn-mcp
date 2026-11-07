@@ -694,6 +694,12 @@ def test_static_css_wraps_the_verify_output(client):
     assert "pre-wrap" in css
 
 
+def test_static_css_spaces_the_verify_disclosure(client):
+    css = client.get(f"/static/style.css?token={TOKEN}").text
+    assert ".v-out {" in css
+    assert "margin-top: 6px" in css
+
+
 def test_static_css_fetches_nothing_from_the_network(client):
     """CSP is ``default-src 'self'``, so an external asset would not fail loudly.
 
