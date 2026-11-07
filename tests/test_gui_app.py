@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -695,7 +696,21 @@ def test_static_css_wraps_the_verify_output(client):
 
 
 def test_static_css_spaces_the_verify_disclosure(client):
-    css = client.get(f"/static/style.css?token={TOKEN}").text
+    css = client.get(f"/static/style.css?token={TOKEN}").text.replace("\r\n", "\n")
+    assert ".v-out {\n  margin-top: 6px;\n}" in css
+
+
+def test_static_css_spaces_the_verify_disclosure_with_crlf(tmp_path, monkeypatch):
+    """A Windows checkout serves CRLF; the pin must not depend on the line ending."""
+    from db_conn_mcp.gui import app as gui_app
+
+    static_copy = tmp_path / "static"
+    shutil.copytree(gui_app._static_dir(), static_copy)
+    style = static_copy / "style.css"
+    style.write_bytes(style.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    monkeypatch.setattr(gui_app, "_static_dir", lambda: static_copy)
+    crlf_client = TestClient(create_app(TOKEN, config_arg=None), base_url=f"http://{HOST}")
+    css = crlf_client.get(f"/static/style.css?token={TOKEN}").text.replace("\r\n", "\n")
     assert ".v-out {\n  margin-top: 6px;\n}" in css
 
 
