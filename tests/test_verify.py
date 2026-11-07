@@ -60,7 +60,13 @@ async def test_verify_stdio_reports_tool_call_failed_for_a_malformed_config(tmp_
 
 
 class _FakeSession:
-    """A client session whose ``list_databases`` fails with no text, on a wrong tool count."""
+    """A client session; by default ``list_databases`` fails with no text, on a wrong tool count.
+
+    ``_use_fake_session`` replaces ``tools`` and ``call_result`` for the other shapes.
+    """
+
+    tools = [SimpleNamespace(name="list_databases")]
+    call_result = SimpleNamespace(isError=True, content=[])
 
     def __init__(self, *_streams):
         pass
@@ -76,15 +82,32 @@ class _FakeSession:
         return SimpleNamespace(serverInfo=server_info, instructions=None)
 
     async def list_tools(self):
-        return SimpleNamespace(tools=[object()])
+        return SimpleNamespace(tools=self.tools)
 
     async def call_tool(self, _name, _arguments):
-        return SimpleNamespace(isError=True, content=[])
+        return self.call_result
 
 
 @asynccontextmanager
 async def _fake_stdio_client(_params):
     yield None, None
+
+
+def _tools(count, *, listed):
+    """``count`` fake tools, with ``list_databases`` last when ``listed``."""
+    tools = [SimpleNamespace(name="other_tool") for _ in range(count)]
+    if listed:
+        tools[-1] = SimpleNamespace(name="list_databases")
+    return tools
+
+
+def _use_fake_session(monkeypatch, tools, *, is_error, content):
+    """Point ``verify_stdio`` at a fake session with these tools and this call result."""
+    monkeypatch.setattr(_FakeSession, "tools", tools)
+    call_result = SimpleNamespace(isError=is_error, content=content)
+    monkeypatch.setattr(_FakeSession, "call_result", call_result)
+    monkeypatch.setattr(verify, "ClientSession", _FakeSession)
+    monkeypatch.setattr(verify, "stdio_client", _fake_stdio_client)
 
 
 async def test_verify_stdio_tool_call_failed_wins_over_count_and_keeps_stale(monkeypatch):
@@ -98,6 +121,78 @@ async def test_verify_stdio_tool_call_failed_wins_over_count_and_keeps_stale(mon
     assert result["list_databases_error"] is None
     assert result["list_databases_text"] is None
     assert result["suggested_action"].startswith("fix the connections.json")
+    assert (
+        result["detail"]
+        == "handshake and tools/list answered, but list_databases returned an error"
+    )
+
+
+@pytest.mark.parametrize("count", [3, EXPECTED_TOOL_COUNT + 1])
+async def test_verify_stdio_wrong_server_is_wrong_tool_count_with_the_error_kept(
+    monkeypatch, count
+):
+    """A launch line that starts another MCP server is not a broken ``connections.json``."""
+    error = SimpleNamespace(text="Unknown tool: list_databases")
+    _use_fake_session(monkeypatch, _tools(count, listed=False), is_error=True, content=[error])
+    result = await verify_stdio("ignored", [])
+    assert result["verdict"] == "wrong_tool_count"
+    assert result["detail"] == f"expected {EXPECTED_TOOL_COUNT} tools, got {count}"
+    assert result["suggested_action"].startswith("upgrade")
+    assert result["list_databases_error"] == "Unknown tool: list_databases"
+    assert result["list_databases_text"] is None
+
+
+async def test_verify_stdio_absent_list_databases_with_expected_count_is_tool_call_failed(
+    monkeypatch,
+):
+    """The count cannot explain this error, and falling through would paint ``answers``."""
+    error = SimpleNamespace(text="Unknown tool: list_databases")
+    _use_fake_session(
+        monkeypatch, _tools(EXPECTED_TOOL_COUNT, listed=False), is_error=True, content=[error]
+    )
+    result = await verify_stdio("ignored", [])
+    assert result["verdict"] == "tool_call_failed"
+    assert result["list_databases_error"] == "Unknown tool: list_databases"
+
+
+@pytest.mark.parametrize("listed", [True, False])
+@pytest.mark.parametrize(
+    ("count", "verdict"),
+    [
+        (EXPECTED_TOOL_COUNT, "answers"),
+        (3, "wrong_tool_count"),
+        (EXPECTED_TOOL_COUNT + 1, "wrong_tool_count"),
+    ],
+)
+async def test_verify_stdio_working_call_goes_by_the_count_alone(
+    monkeypatch, listed, count, verdict
+):
+    """Without an error, a tool missing from the list says nothing the count does not."""
+    _use_fake_session(monkeypatch, _tools(count, listed=listed), is_error=False, content=[])
+    result = await verify_stdio("ignored", [])
+    assert result["verdict"] == verdict
+
+
+async def test_verify_stdio_error_uses_the_first_text_block(monkeypatch):
+    """A non-text block ahead of the error must not hide it from the card."""
+    content = [SimpleNamespace(), SimpleNamespace(text="first"), SimpleNamespace(text="second")]
+    _use_fake_session(monkeypatch, _tools(3, listed=True), is_error=True, content=content)
+    result = await verify_stdio("ignored", [])
+    assert result["verdict"] == "tool_call_failed"
+    assert result["list_databases_error"] == "first"
+    assert result["list_databases_text"] is None
+
+
+async def test_verify_stdio_answer_uses_the_first_text_block(monkeypatch):
+    """A non-text block ahead of the answer must not hide it from the card."""
+    content = [SimpleNamespace(), SimpleNamespace(text="first"), SimpleNamespace(text="second")]
+    _use_fake_session(
+        monkeypatch, _tools(EXPECTED_TOOL_COUNT, listed=True), is_error=False, content=content
+    )
+    result = await verify_stdio("ignored", [])
+    assert result["verdict"] == "answers"
+    assert result["list_databases_text"] == "first"
+    assert result["list_databases_error"] is None
 
 
 async def test_verify_stdio_launch_failed_for_missing_binary(tmp_path):
