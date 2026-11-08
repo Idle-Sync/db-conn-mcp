@@ -6,6 +6,8 @@ raises, so the retry's bound and its refusals are checked without a Windows runn
 
 import errno
 import os
+import stat
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -205,3 +207,65 @@ def test_refused_copymode_is_not_retried(tmp_path, monkeypatch, sleeps):
     assert sleeps == []
     assert target.read_bytes() == b"old"
     assert list(tmp_path.iterdir()) == [target]
+
+
+def _refuse_to_unlink_read_only_files(monkeypatch) -> None:
+    """Model Windows ``DeleteFileW``, which refuses a file that has the read-only attribute."""
+    real_unlink = os.unlink
+
+    def fake_unlink(path, *args, **kwargs) -> None:
+        if os.stat(path).st_mode & stat.S_IWUSR == 0:
+            raise PermissionError(13, "Access is denied", str(path))
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(atomic_write.os, "unlink", fake_unlink)
+
+
+def test_read_only_target_leaves_no_temp_file_and_keeps_the_swap_error(
+    tmp_path, monkeypatch, sleeps, request
+):
+    """The temp file inherits the target's read-only mode; it must still be removable."""
+    target = tmp_path / "connections.json"
+    target.write_bytes(b"old")
+    target.chmod(0o444)
+    request.addfinalizer(lambda: target.chmod(0o644))
+    raised = _refuse_replace_always(monkeypatch)
+    monkeypatch.setattr(atomic_write.os, "access", lambda path, mode: False)
+    _refuse_to_unlink_read_only_files(monkeypatch)
+    with pytest.raises(PermissionError) as excinfo:
+        write_text_atomically(target, "new")
+    assert excinfo.value is raised[0]
+    assert list(tmp_path.iterdir()) == [target]
+    assert target.read_bytes() == b"old"
+    assert sleeps == []
+
+
+def test_interrupt_after_the_swap_stays_an_interrupt(tmp_path, monkeypatch):
+    """The swap already consumed the temp file, so the cleanup finds nothing to remove."""
+    real_replace = os.replace
+    target = tmp_path / "connections.json"
+    target.write_bytes(b"old")
+
+    def replace_then_interrupt(source: str, destination: Path) -> None:
+        real_replace(source, destination)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(atomic_write.os, "replace", replace_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        write_text_atomically(target, "new")
+    assert list(tmp_path.iterdir()) == [target]
+    assert target.read_bytes() == b"new"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the read-only refusal is Windows behaviour")
+def test_read_only_target_on_windows_leaves_no_temp_file(tmp_path, request):
+    target = tmp_path / "connections.json"
+    target.write_bytes(b"old")
+    target.chmod(0o444)
+    request.addfinalizer(lambda: target.chmod(0o644))
+    with pytest.raises(PermissionError) as excinfo:
+        write_text_atomically(target, "new")
+    # Only os.replace raises an error naming two paths, so this is the swap's own error.
+    assert excinfo.value.filename2 is not None
+    assert list(tmp_path.iterdir()) == [target]
+    assert target.read_bytes() == b"old"
