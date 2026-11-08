@@ -30,9 +30,13 @@ the time of that release.
   and continue to the client injection, the dashboard answers 500 with `the configuration was
   changed, but its audit line could not be written`, and `set_yolo_mode` returns `persisted: true`
   with `audit_recorded: false` and a `warning`.
+- A `connections.json.lock` that is a symlink, a hard link or not a regular file now refuses the
+  change and says so; replace it with a regular file.
 
 ### Fixed
 
+- Taking the config lock no longer follows a `connections.json.lock` symlink and creates or locks
+  its target: the lock file gets the audit log's refusal of a link or a non-regular file (#74).
 - On Windows, a config save that is being retried no longer freezes the MCP server or the
   dashboard for up to a second: `set_yolo_mode` and the dashboard's database and client writes
   now save in a worker thread (#64).

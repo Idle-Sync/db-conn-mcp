@@ -185,12 +185,13 @@ def locked(path: Path) -> Iterator[None]:
     :func:`save` swaps the config's inode, so a lock on it would guard a file that is
     gone. The sidecar is derived from the resolved path, so a symlink and its target
     contend on one lock. It is never deleted, for the same reason: a process blocked on
-    the old inode would then hold a lock nobody else can see.
+    the old inode would then hold a lock nobody else can see. A sidecar that is a link
+    or not a regular file raises ``OSError``, as the audit log's does.
     """
     real = path.resolve()
     sidecar = real.with_name(real.name + ".lock")
     sidecar.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(sidecar, os.O_RDWR | os.O_CREAT, 0o600)
+    fd = audit.open_own_file(sidecar, os.O_RDWR, "lock file")
     try:
         _acquire_lock(fd)
         try:
