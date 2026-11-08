@@ -534,7 +534,6 @@ def test_symlinked_sidecar_refuses_the_change(tmp_path):
     _assert_linked_sidecar_refuses_the_change(tmp_path, path, target)
 
 
-@posix_only
 def test_symlinked_sidecar_is_refused_where_open_cannot_refuse_links(tmp_path, monkeypatch):
     """Windows has no O_NOFOLLOW; the link check by path stands in for it there."""
     from db_conn_mcp import audit
@@ -543,7 +542,10 @@ def test_symlinked_sidecar_is_refused_where_open_cannot_refuse_links(tmp_path, m
     path = _write(tmp_path / "connections.json", YOLO_OFF)
     target = tmp_path / "bashrc"
     target.write_text("export PATH=/usr/bin\n", encoding="utf-8")
-    (tmp_path / "connections.json.audit.log").symlink_to(target)
+    try:
+        (tmp_path / "connections.json.audit.log").symlink_to(target)
+    except OSError:
+        pytest.skip("creating a symlink needs Developer Mode or admin rights on Windows")
     _assert_linked_sidecar_refuses_the_change(tmp_path, path, target)
 
 
