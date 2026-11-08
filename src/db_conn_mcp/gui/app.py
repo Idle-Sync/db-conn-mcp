@@ -693,17 +693,22 @@ def create_app(
             try:
 
                 def _write() -> None:
-                    data = clients_mod.read_config(spec)
-                    clients_mod.write_config(
-                        spec,
-                        clients_mod.inject_entry(data, spec.fmt, "db-conn-mcp", command, args),
-                    )
+                    with audit_mod.recording_client_change(path, "gui", "inject", spec.label):
+                        data = clients_mod.read_config(spec)
+                        clients_mod.write_config(
+                            spec,
+                            clients_mod.inject_entry(data, spec.fmt, "db-conn-mcp", command, args),
+                        )
 
                 await asyncio.to_thread(_write)
             except clients_mod.ClientConfigError:
                 # Re-checked under the lock: the file may have gone bad since the
                 # probe above, and the raised text quotes the source (Rule 6).
                 return _unreadable_client()
+            except OSError:
+                return _unusable_config_file()
+            except audit_mod.UnrecordedChangeError:
+                return _unrecorded_change()
         return JSONResponse({"injected": spec.key})
 
     async def uninject_client(request: Request) -> JSONResponse:
@@ -718,14 +723,23 @@ def create_app(
             try:
 
                 def _write() -> None:
-                    data = clients_mod.read_config(spec)
-                    clients_mod.write_config(
-                        spec, clients_mod.remove_entry(data, spec.fmt, "db-conn-mcp")
-                    )
+                    # Read before the entry is removed: the removal erases the path.
+                    config_path = clients_mod.injected_config_path(spec)
+                    with audit_mod.recording_client_change(
+                        config_path, "gui", "uninject", spec.label
+                    ):
+                        data = clients_mod.read_config(spec)
+                        clients_mod.write_config(
+                            spec, clients_mod.remove_entry(data, spec.fmt, "db-conn-mcp")
+                        )
 
                 await asyncio.to_thread(_write)
             except clients_mod.ClientConfigError:
                 return _unreadable_client()
+            except OSError:
+                return _unusable_config_file()
+            except audit_mod.UnrecordedChangeError:
+                return _unrecorded_change()
         return JSONResponse({"removed": spec.key})
 
     async def doctor_route(request: Request) -> JSONResponse:

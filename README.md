@@ -140,10 +140,11 @@ Every write replaces the file in one step, so a failed write leaves it as it was
 
 ### Audit log
 
-Every change to `connections.json` is recorded in **`connections.json.audit.log`**, beside the real
-file (beside the target when `connections.json` is a symlink), created `0600` the first time a change
-is made. It is append-only text, one line per changed connection, four or five tab-separated
-columns (remove and reset have no changes column):
+Every change to `connections.json`, and every injection into or removal from a client's config, is
+recorded in **`connections.json.audit.log`**, beside the real file (beside the target when
+`connections.json` is a symlink), created `0600` the first time a change is made. It is append-only
+text, one line per changed connection or client, four or five tab-separated columns (remove, reset,
+inject and uninject have no changes column):
 
 ```
 2026-11-08T14:03:21+05:30	cli	add	"dev"	mode: "write", yolo: false, fallback_ports: null
@@ -151,21 +152,36 @@ columns (remove and reset have no changes column):
 2026-11-08T14:09:47+05:30	gui	edit	"dev"	mode: "write" -> "read", dsn: (replaced)
 2026-11-08T14:11:10+05:30	cli	remove	"dev"
 2026-11-08T14:12:00+05:30	cli	reset	-
+2026-11-08T21:03:21+05:30	cli	inject	"Claude Desktop"
+2026-11-08T21:07:45+05:30	gui	uninject	"Claude Desktop"
 ```
 
 | Column | Value |
 |--------|-------|
 | time | ISO 8601 with the UTC offset, to the second. |
 | source | `cli`, `gui` (the dashboard) or `mcp` (the `set_yolo_mode` tool). |
-| action | `add`, `edit`, `remove` or `reset`. |
-| name | The connection name as a JSON string, or `-` for `reset`, which has no one name. |
+| action | `add`, `edit`, `remove`, `reset`, `inject` or `uninject`. |
+| name | The connection name as a JSON string, or `-` for `reset`, which has no one name. For `inject` and `uninject`, the client's display name (`"Claude Desktop"`). |
 | changes | Changed field names: `old -> new` for an edit, the values for an add, nothing for a remove or reset. A new DSN is only ever written as `dsn: (replaced)`. |
 
-The file holds names, modes and flags, never a DSN, host, user or password. A name that looks like a
+The file holds names, modes and flags, never a DSN, host, user or password, and never the command
+or arguments written into a client's config. A name that looks like a
 DSN (it contains `://`, `@` or `=`) is written as `(withheld)`. Nothing is written to the terminal.
 
 Order and failure:
 
+- An `inject` or `uninject` line goes in the sidecar of the `connections.json` the client entry's
+  `--config` names. An `uninject` of an entry that names no `connections.json` (no `--config`, a
+  relative or directory value, or a folder that no longer exists) goes ahead and is not recorded;
+  `clients --remove` says so: `Removed from <client> config; its entry named no connections.json,
+  so nothing was recorded.`
+- A client whose audit log cannot be opened, is a link or is not a regular file is skipped for
+  `inject` and `uninject` alike, and its config is left as it was: `clients`, `clients --remove` and
+  `setup` print `Skipped <client>: Could not update <path> (...); the file is unchanged.` and go on
+  to the next client with the exit code unchanged. If the line cannot be appended after the
+  client's config was written, the config stays changed, the usual `Updated <client> config.` or
+  `Removed from <client> config.` line is followed by a line saying the change was not recorded,
+  and the exit code is unchanged. The dashboard answers 409 and 500 as for a database.
 - A sidecar that cannot be opened, is a link or is not a regular file refuses the change, and
   `connections.json` is left as it was.
 - If the line cannot be appended after the change was written (a full disk), the change stays in
@@ -276,8 +292,8 @@ The server exposes **23 tools** and **2 prompts**:
 | `db-conn-mcp setup` | Guided setup; shows status + an action menu if already configured. With `--config PATH` and no file there, creates it at `PATH` without asking global or repo. |
 | `db-conn-mcp status` | List configured databases (including `fallback_ports` where configured) and which clients have the server injected. |
 | `db-conn-mcp add` | Add another database connection. With `--config PATH` and no file there, creates it at `PATH` without asking global or repo. |
-| `db-conn-mcp clients` | Inject the server into detected MCP clients. |
-| `db-conn-mcp clients --remove` | Uninject the server from chosen clients. |
+| `db-conn-mcp clients` | Inject the server into detected MCP clients; each injection is recorded in the [audit log](#audit-log). |
+| `db-conn-mcp clients --remove` | Uninject the server from chosen clients; each removal is recorded in the [audit log](#audit-log). |
 | `db-conn-mcp check [name]` | Probe connectivity (exit `0` all-OK, `2` if any unreachable). |
 | `db-conn-mcp doctor` | Diagnose the **whole setup** — stale processes, a newer release, config-schema typos, secrets exposure, client entries, connectivity (exit `0` if nothing failed, `2` if any check fails). `--offline` skips **only** the PyPI version lookup; the database probes still run. |
 | `db-conn-mcp remove <name>` | Remove one connection. |
