@@ -67,6 +67,8 @@ _COLUMNS_SQL = """
 
 # Primary- and foreign-key columns for one table, with the FK target as "table.column".
 # confkey is NULL for a PK, so unnest pads its side with NULL.
+# A foreign key into a partitioned table gets one extra row per referenced partition, on
+# the same conrelid as the declared one; the parent-on-same-table test drops those rows.
 _KEYS_SQL = """
     SELECT a.attname AS column,
            CASE con.contype WHEN 'p' THEN 'PRIMARY KEY' ELSE 'FOREIGN KEY' END AS constraint_type,
@@ -83,6 +85,10 @@ _KEYS_SQL = """
     LEFT JOIN pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = k.referenced_attnum
     WHERE t.relname = $1 AND ($2::text IS NULL OR n.nspname = $2)
       AND con.contype IN ('p', 'f')
+      AND NOT EXISTS (
+          SELECT 1 FROM pg_constraint parent
+          WHERE parent.oid = con.conparentid AND parent.conrelid = con.conrelid
+      )
     ORDER BY constraint_type, con.conname, k.ordinal
 """
 
@@ -129,6 +135,7 @@ _DB_COLUMNS_SQL = """
 """
 
 #: Every PK/FK column of every base table (FK target as "table.column"), stably ordered.
+#: Skips the per-referenced-partition foreign-key rows, as _KEYS_SQL does.
 _DB_KEYS_SQL = """
     SELECT n.nspname AS schema,
            t.relname AS table,
@@ -147,6 +154,10 @@ _DB_KEYS_SQL = """
     LEFT JOIN pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = k.referenced_attnum
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
       AND con.contype IN ('p', 'f')
+      AND NOT EXISTS (
+          SELECT 1 FROM pg_constraint parent
+          WHERE parent.oid = con.conparentid AND parent.conrelid = con.conrelid
+      )
     ORDER BY n.nspname, t.relname, constraint_type, con.conname, k.ordinal
 """
 
