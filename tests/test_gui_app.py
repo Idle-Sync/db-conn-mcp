@@ -587,6 +587,11 @@ def test_inject_and_uninject_roundtrip(cfg_client, tmp_path, monkeypatch):
     assert client.post("/api/clients/fake/uninject", headers=_hdr()).status_code == 200
     stored = jsonlib.loads((tmp_path / "fake.json").read_text(encoding="utf-8"))
     assert "db-conn-mcp" not in stored["mcpServers"]
+    lines = _audit_lines(cfg)
+    assert [line.split("\t")[1:] for line in lines] == [
+        ["gui", "inject", '"Fake"'],
+        ["gui", "uninject", '"Fake"'],
+    ]
 
 
 def test_inject_refuses_unreadable_config(cfg_client, tmp_path, monkeypatch):
@@ -1012,6 +1017,74 @@ def test_inject_write_fails_is_a_409_not_a_500(cfg_client, tmp_path, monkeypatch
         r = client.post(f"/api/clients/fake/{verb}", headers=_hdr())
         assert r.status_code == 409
         assert "could not be read or written" in r.json()["error"]
+    assert audit.audit_path(cfg).read_text(encoding="utf-8") == ""
+
+
+def _fake_client(tmp_path, monkeypatch, args=None):
+    """A detected client named Fake; with ``args`` it already holds our entry."""
+    from db_conn_mcp import clients as clients_mod
+    from db_conn_mcp.clients import ClientSpec
+
+    target = ClientSpec("fake", "Fake", tmp_path / "fake.json", "mcpServers")
+    data = {}
+    if args is not None:
+        data = clients_mod.inject_entry({}, "mcpServers", "db-conn-mcp", "db-conn-mcp", args)
+    target.path.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(clients_mod, "client_specs", lambda: [target])
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [target])
+    return target
+
+
+@pytest.mark.parametrize("verb", ["inject", "uninject"])
+def test_client_route_is_409_when_sidecar_refuses(verb, cfg_client, tmp_path, monkeypatch):
+    client, cfg = cfg_client
+    cfg.write_text(json.dumps({"connections": []}), encoding="utf-8")
+    args = ["--config", str(cfg)] if verb == "uninject" else None
+    target = _fake_client(tmp_path, monkeypatch, args)
+    before = target.path.read_bytes()
+    audit.audit_path(cfg).mkdir()
+
+    r = client.post(f"/api/clients/fake/{verb}", headers=_hdr())
+
+    assert r.status_code == 409
+    assert r.json() == {"error": "the configuration could not be read or written"}
+    assert target.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("verb", ["inject", "uninject"])
+def test_client_route_is_500_when_line_cannot_be_written(verb, cfg_client, tmp_path, monkeypatch):
+    client, cfg = cfg_client
+    cfg.write_text(json.dumps({"connections": []}), encoding="utf-8")
+    args = ["--config", str(cfg)] if verb == "uninject" else None
+    target = _fake_client(tmp_path, monkeypatch, args)
+
+    def failing_write(fd, data):
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(audit.os, "write", failing_write)
+
+    r = client.post(f"/api/clients/fake/{verb}", headers=_hdr())
+
+    assert r.status_code == 500
+    assert r.json() == {
+        "error": "the configuration was changed, but its audit line could not be written"
+    }
+    entry_present = "db-conn-mcp" in json.loads(target.path.read_text(encoding="utf-8")).get(
+        "mcpServers", {}
+    )
+    assert entry_present == (verb == "inject")
+
+
+def test_uninject_without_config_records_nothing(cfg_client, tmp_path, monkeypatch):
+    client, cfg = cfg_client
+    target = _fake_client(tmp_path, monkeypatch, ["serve"])
+
+    r = client.post("/api/clients/fake/uninject", headers=_hdr())
+
+    assert r.status_code == 200
+    assert r.json() == {"removed": "fake"}
+    assert "db-conn-mcp" not in json.loads(target.path.read_text(encoding="utf-8"))["mcpServers"]
+    assert list(tmp_path.glob("*.audit.log")) == []
 
 
 def test_junk_key_is_dropped_on_add_but_stored_extras_survive_patch(cfg_client):
