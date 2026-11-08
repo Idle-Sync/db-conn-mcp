@@ -22,6 +22,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from . import audit
 from .atomic_write import write_text_atomically
 from .dialects.registry import dialect_for, supported_schemes
 from .models import Config, Connection
@@ -128,15 +129,25 @@ def _dump_connection(conn: Connection) -> dict:
     return {**conn.model_dump(exclude_none=True), **(conn.model_extra or {})}
 
 
-def save(config: Config, path: Path) -> None:
-    """Atomically rewrite ``connections.json``, keeping its mode and any unknown keys."""
+def save(config: Config, path: Path, *, previous: Config, source: audit.Source) -> None:
+    """Atomically rewrite ``connections.json``, keeping its mode and any unknown keys.
+
+    Each connection that differs from ``previous`` gets one line in the audit sidecar,
+    tagged with ``source``. The sidecar is opened before the config is written, so a
+    change that cannot be recorded is not made either.
+    """
+    lines = [
+        audit.line(source, action, name, changes)
+        for action, name, changes in audit.changes_between(previous, config)
+    ]
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         **config.model_dump(exclude_none=True, exclude={"connections"}),
         "connections": [_dump_connection(conn) for conn in config.connections],
         **(config.model_extra or {}),
     }
-    write_text_atomically(path, json.dumps(payload, indent=2) + "\n")
+    with audit.appending(audit.audit_path(path), lines):
+        write_text_atomically(path, json.dumps(payload, indent=2) + "\n")
 
 
 def _acquire_lock(fd: int) -> None:
@@ -188,10 +199,11 @@ def locked(path: Path) -> Iterator[None]:
         os.close(fd)
 
 
-def set_yolo(path: Path, name: str, enabled: bool) -> Config:
+def set_yolo(path: Path, name: str, enabled: bool, *, source: audit.Source) -> Config:
     """Persist the ``yolo`` flag for one named DB and return the updated config."""
     with locked(path):
         config = load(str(path))
+        previous = config.model_copy(deep=True)
         get(config, name).yolo = enabled  # raises ConfigError if the name is unknown
-        save(config, path)
+        save(config, path, previous=previous, source=source)
     return config
