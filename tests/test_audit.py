@@ -326,3 +326,40 @@ def test_no_secret_leaks_into_the_sidecar(tmp_path):
     assert data.count(b"(withheld)") == 3
     for secret in (b"SECRET", b"OTHER", b"@h"):
         assert secret not in data
+
+
+# ---- recording_client_change ----------------------------------------------------
+
+
+@pytest.mark.parametrize("action", ["inject", "uninject"])
+def test_recording_client_change_appends_one_four_column_line(tmp_path, action):
+    cfg = tmp_path / "connections.json"
+    with audit.recording_client_change(cfg, "cli", action, "Claude Desktop"):
+        pass
+    lines = audit.audit_path(cfg).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    columns = lines[0].split("\t")
+    assert len(columns) == 4
+    assert re.fullmatch(_TIMESTAMP, columns[0])
+    assert columns[1:] == ["cli", action, '"Claude Desktop"']
+
+
+@posix_only
+def test_recording_client_change_refuses_a_link_before_the_body(tmp_path):
+    cfg = tmp_path / "connections.json"
+    target = tmp_path / "elsewhere.log"
+    target.write_text("", encoding="utf-8")
+    audit.audit_path(cfg).symlink_to(target)
+    entered = False
+    with pytest.raises(OSError), audit.recording_client_change(cfg, "gui", "inject", "Cursor"):
+        entered = True
+    assert not entered
+    assert target.read_bytes() == b""
+
+
+def test_recording_client_change_none_path_touches_nothing(tmp_path):
+    entered = False
+    with audit.recording_client_change(None, "cli", "inject", "Cursor"):
+        entered = True
+    assert entered
+    assert list(tmp_path.iterdir()) == []

@@ -30,6 +30,7 @@ from .models import Config, Connection
 
 #: The front-end a change came through.
 Source = Literal["cli", "gui", "mcp"]
+ClientAction = Literal["inject", "uninject"]
 
 #: Fields whose values are safe to record, in the order a line lists them.
 _RECORDED_FIELDS = ("mode", "yolo", "fallback_ports")
@@ -189,3 +190,19 @@ def appending(sidecar: Path, lines: list[str]) -> Iterator[None]:
     except OSError as exc:
         # NFS reports a deferred write error here, after the config was replaced.
         raise _unrecorded(sidecar, type(exc).__name__) from None
+
+
+@contextlib.contextmanager
+def recording_client_change(
+    config_path: Path | None, source: Source, action: ClientAction, client_label: str
+) -> Iterator[None]:
+    """Record that a client's config was injected into or removed from, around that change.
+
+    Same order as :func:`appending`: opened before the body, written after it succeeds.
+    With no ``config_path`` there is no sidecar to record in and the filesystem is not touched.
+    """
+    if config_path is None:
+        yield
+        return
+    with appending(audit_path(config_path), [line(source, action, client_label)]):
+        yield

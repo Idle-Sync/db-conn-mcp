@@ -313,3 +313,27 @@ def injected_launch(spec: ClientSpec, name: str = "db-conn-mcp") -> tuple[str, l
     if not isinstance(entry.get("command"), str):
         return None
     return entry["command"], list(entry.get("args") or [])
+
+
+def injected_config_path(spec: ClientSpec, name: str = "db-conn-mcp") -> Path | None:
+    """Return the ``connections.json`` an injected entry points at, or None.
+
+    None when there is no entry, or no usable ``--config PATH`` in it: absolute, not a
+    directory, in a folder that exists (the audit sidecar is created beside it). Never raises.
+    """
+    try:
+        launch = injected_launch(spec, name)
+    except TypeError:  # args is not a list, e.g. 5 or true
+        return None
+    if launch is None:
+        return None
+    args = launch[1]
+    if "--config" not in args:
+        return None
+    position = args.index("--config") + 1
+    if position >= len(args) or not isinstance(args[position], str):
+        return None
+    path = Path(args[position])
+    if not path.is_absolute() or path.is_dir() or not path.parent.is_dir():
+        return None
+    return path
