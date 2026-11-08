@@ -9,14 +9,21 @@ spawns a separate process; it never answers from this process's own imports.
 import asyncio
 import socket
 import subprocess
+from http import HTTPStatus
 from typing import Literal, TypedDict
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
 
 from . import __version__
 from .clients import ClientSpec, injected_launch
+
+#: Error codes the SDK client makes itself (dropped connection, request timeout); the
+#: server did not send them, so they are not a failed call.
+SDK_MADE_ERROR_CODES = (CONNECTION_CLOSED, HTTPStatus.REQUEST_TIMEOUT)
 
 #: The tool count the smoke test pins; a live server must agree.
 EXPECTED_TOOL_COUNT = 23
@@ -36,7 +43,8 @@ class VerifyResult(TypedDict):
     """One verification outcome, in the fixed vocabulary the GUI may render (Rule 6).
 
     ``list_databases_text`` holds the database list and nothing else; when the call
-    returned an error, its text goes in ``list_databases_error``, whatever the verdict.
+    returned an error result or the server answered with a JSON-RPC error, its text goes in
+    ``list_databases_error``, whatever the verdict.
     """
 
     verdict: Verdict
@@ -96,15 +104,23 @@ async def verify_stdio(command: str, args: list[str], timeout: float = 20.0) -> 
                 tools = await session.list_tools()
                 result["tool_count"] = len(tools.tools)
                 list_databases_listed = any(tool.name == "list_databases" for tool in tools.tools)
-                dbs = await session.call_tool("list_databases", {})
-                first_text = next(
-                    (block.text for block in dbs.content if getattr(block, "text", None)), None
-                )
-                dbs_failed = dbs.isError
-                if dbs_failed:
-                    result["list_databases_error"] = first_text
+                try:
+                    dbs = await session.call_tool("list_databases", {})
+                except McpError as exc:
+                    if exc.error.code in SDK_MADE_ERROR_CODES:
+                        raise
+                    dbs_failed = True
+                    result["list_databases_error"] = str(exc)
                 else:
-                    result["list_databases_text"] = first_text
+                    first_text = next(
+                        (block.text for block in dbs.content if getattr(block, "text", None)),
+                        None,
+                    )
+                    dbs_failed = dbs.isError
+                    if dbs_failed:
+                        result["list_databases_error"] = first_text
+                    else:
+                        result["list_databases_text"] = first_text
     except TimeoutError:
         result["verdict"] = "timeout"
         result["detail"] = f"no complete MCP conversation within {timeout:.0f}s"
