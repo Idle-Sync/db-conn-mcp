@@ -35,7 +35,7 @@ This document shows how `db-conn-mcp` is structured and traces the **end-to-end 
 |---|---|---|
 | `cli.py` | Parse args (`--config`, `--transport`, `--no-gui`); run server or a management subcommand (`setup`/`status`/`add`/`clients`/`remove`/`yolo`/`doctor`/`gui`); drive the interactive wizard | No |
 | `clients.py` | Known MCP clients: `ClientSpec` (config path + entry format + file syntax), the per-syntax `Codec` + `read_config`/`write_config` seam, and the pure inject/remove/detect helpers. Shared by `cli.py` and the doctor | No |
-| `config.py` | Resolve, load, validate, **and save** `connections.json`. Saves are atomic, keep the file's mode and any unknown keys, and run under the cross-process `locked()` file lock | No |
+| `config.py` | Resolve, load, validate, **and save** `connections.json`. Saves are atomic, keep the file's mode and any unknown keys, and run under the cross-process `locked()` file lock. Async callers (`set_yolo_mode`, the dashboard write routes) run the whole locked load-and-save in a worker thread (`asyncio.to_thread`), so a retried save never stalls an event loop | No |
 | `atomic_write.py` | `write_text_atomically`: write a temp file beside the target, copy the target's mode, swap it in, retrying a swap Windows refuses with error 5 (at most 20 attempts, about 1 s). Used by `config.save` and `clients.write_config`; standard library only | No |
 | `models.py` | Pydantic types: `Connection{name, dsn, mode, yolo}`, `Config` | No |
 | `dialects/base.py` | The `Dialect` ABC — the extensibility contract | No |

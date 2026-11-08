@@ -539,7 +539,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
     # ---- Configuration tool --------------------------------------------------
     @app.tool()
     async def set_yolo_mode(database: str, enabled: bool) -> dict:
-        """Enable/disable yolo (skip the write-consent prompt) for one database, persisted."""
+        """Enable/disable yolo (skip the write-consent prompt) for one database, persisted.
+
+        A call cancelled while the write was in progress may still have been applied;
+        list_databases shows the stored value.
+        """
         return await handlers.set_yolo_mode(database, enabled)
 
     # ---- Diagnostics tool ----------------------------------------------------

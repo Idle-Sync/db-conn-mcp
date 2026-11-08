@@ -782,7 +782,7 @@ class Handlers:
 
     async def set_yolo_mode(self, database: str, enabled: bool) -> dict:
         """Persist the ``yolo`` flag for one database to ``connections.json``."""
-        config.set_yolo(self.config_path, database, enabled)
+        await asyncio.to_thread(config.set_yolo, self.config_path, database, enabled)
         return {"database": database, "yolo": enabled, "persisted": True}
 
     # ---- Diagnostics tool ----------------------------------------------------
