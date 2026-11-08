@@ -175,10 +175,16 @@ def _ensure_new_connection(cfg: Config, name: str, dsn: str) -> None:
         )
 
 
+def _could_not_update_line(path: Path, exc: OSError) -> str:
+    """The one line printed when the lock or a save fails; ``exc`` holds no DSN."""
+    return f"Could not update {path} ({type(exc).__name__}: {exc}); the file is unchanged."
+
+
 def register_database(scope: Scope, name: str, dsn: str, mode: str, yolo: bool = False) -> Path:
     """Validate and append a connection to the scoped config; return its path.
 
     Raises ``ValueError`` for an unknown DSN scheme, a duplicate name, or a duplicate DSN.
+    An ``OSError`` from the lock or the save propagates and means the file is unchanged.
     """
     path = scope_to_path(scope)
     with config.locked(path):
@@ -336,6 +342,9 @@ def _add_connection_interactive(path: Path) -> bool:
     except ValueError as exc:
         print(f"Could not add: {exc}")
         return False
+    except OSError as exc:
+        print(_could_not_update_line(path, exc))
+        return False
     except audit.UnrecordedChangeError as exc:
         print(exc)  # the connection is saved, so registration carries on
     # Echo only the name — never the DSN (Rule 6).
@@ -376,12 +385,13 @@ def _print_status(path: Path) -> None:
 def run_setup_wizard(config_arg: str | None = None) -> int:
     """Guided setup. First run registers a database; if already configured, shows
     status and offers follow-up actions. Ctrl+C / EOF cancels cleanly (nothing saved)."""
+    path = None
     try:
-        existing = _existing_config(config_arg)
-        if existing is not None:
+        path = _existing_config(config_arg)
+        if path is not None:
             print("db-conn-mcp is already configured.\n")
-            _print_status(existing)
-            rc = _setup_menu(existing)
+            _print_status(path)
+            rc = _setup_menu(path)
             _print_star_cta()
             return rc
         print("db-conn-mcp setup")
@@ -392,6 +402,9 @@ def run_setup_wizard(config_arg: str | None = None) -> int:
         return 1
     except config.ConfigError as exc:
         print(exc)
+        return 1
+    except OSError as exc:
+        print(_could_not_update_line(path, exc))
         return 1
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled. Nothing was saved.")
@@ -456,11 +469,15 @@ def cmd_status(config_arg: str | None = None) -> int:
 
 def cmd_add(config_arg: str | None = None) -> int:
     """Add another database connection (creating the config if none exists yet)."""
+    path = None
     try:
         path = _existing_config(config_arg) or _new_config_path(config_arg)
         return 0 if _add_connection_interactive(path) else 1
     except config.ConfigError as exc:
         print(exc)
+        return 1
+    except OSError as exc:
+        print(_could_not_update_line(path, exc))
         return 1
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled. Nothing was saved.")
@@ -619,7 +636,7 @@ def cmd_remove(config_arg: str | None, name: str) -> int:
         print(exc)
         return 1
     except OSError as exc:
-        print(f"Could not update {path} ({type(exc).__name__}); the file is unchanged.")
+        print(_could_not_update_line(path, exc))
         return 1
     except audit.UnrecordedChangeError as exc:
         print(exc)
@@ -649,6 +666,9 @@ def cmd_reset(config_arg: str | None = None) -> int:
     try:
         with config.locked(path), audit.appending(sidecar, [reset_line]):
             path.unlink()
+    except OSError as exc:
+        print(_could_not_update_line(path, exc))
+        return 1
     except audit.UnrecordedChangeError as exc:
         print(exc)
         return 1
@@ -667,6 +687,9 @@ def cmd_yolo(config_arg: str | None, name: str, state: str) -> int:
         updated = config.set_yolo(path, name, enabled, source="cli")
     except config.ConfigError as exc:
         print(exc)
+        return 1
+    except OSError as exc:
+        print(_could_not_update_line(path, exc))
         return 1
     except audit.UnrecordedChangeError as exc:
         print(exc)

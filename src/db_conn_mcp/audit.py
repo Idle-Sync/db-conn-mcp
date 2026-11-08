@@ -10,12 +10,14 @@ the MCP protocol. A sidecar that cannot be opened raises ``OSError`` to the call
 which then makes no change. So does a sidecar that is a link: a cloned repo can commit
 ``connections.json.audit.log`` as a symlink to a shell profile, and every config
 change would then append to that file. The open does not wait on a FIFO with no
-reader: it fails at once, so the config lock is never held behind it. An append or a
+reader: it fails at once, so the config lock is never held behind it. The config lock's
+own ``.lock`` sidecar is opened by :func:`open_own_file` too. An append or a
 close that fails after the config was written raises :class:`UnrecordedChangeError`,
 not ``OSError``, so no caller reports such a change as not made.
 """
 
 import contextlib
+import errno
 import json
 import os
 import stat
@@ -111,28 +113,36 @@ def line(source: Source, action: str, name: str | None, changes: str = "") -> st
     return "\t".join(columns) + "\n"
 
 
-def _not_a_plain_file(sidecar: Path) -> OSError:
+def _not_a_plain_file(sidecar: Path, kind: str) -> OSError:
     """The error for a sidecar that is not a plain file of its own; names no DSN."""
     return OSError(
-        f"The audit log {sidecar} is a link or not a regular file; refusing to append to it. "
-        "Replace it with a regular file."
+        f"The {kind} {sidecar} is a link or not a regular file; replace it with a regular file"
     )
 
 
-def _open_own_file(sidecar: Path) -> int:
-    """Open ``sidecar`` for appending, refusing a symlink, a hard link or a non-file."""
+def open_own_file(sidecar: Path, access_flags: int, kind: str) -> int:
+    """Open or create ``sidecar``, refusing a symlink, a hard link or a non-file.
+
+    ``access_flags`` is the access mode (``os.O_WRONLY | os.O_APPEND``, ``os.O_RDWR``);
+    ``kind`` names the sidecar in the refusal (``"audit log"``, ``"lock file"``).
+    """
     if not _NO_FOLLOW and os.path.islink(sidecar):
-        raise _not_a_plain_file(sidecar)
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0) | _NO_FOLLOW
-    # A FIFO with no reader then fails with ENXIO instead of blocking under the config lock.
+        raise _not_a_plain_file(sidecar, kind)
+    flags = access_flags | os.O_CREAT | getattr(os, "O_BINARY", 0) | _NO_FOLLOW
+    # Write-only, a FIFO with no reader fails with ENXIO instead of blocking under the lock.
     flags |= getattr(os, "O_NONBLOCK", 0)
-    fd = os.open(sidecar, flags, 0o600)
+    try:
+        fd = os.open(sidecar, flags, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:  # what O_NOFOLLOW raises for a symlink
+            raise _not_a_plain_file(sidecar, kind) from None
+        raise
     status = os.fstat(fd)
     # A hard link shares the target's inode, so it is the symlink attack without a link.
     hard_linked = os.name == "posix" and status.st_nlink != 1
     if not stat.S_ISREG(status.st_mode) or hard_linked:
         os.close(fd)
-        raise _not_a_plain_file(sidecar)
+        raise _not_a_plain_file(sidecar, kind)
     return fd
 
 
@@ -166,7 +176,7 @@ def appending(sidecar: Path, lines: list[str]) -> Iterator[None]:
     if not lines:
         yield
         return
-    fd = _open_own_file(sidecar)
+    fd = open_own_file(sidecar, os.O_WRONLY | os.O_APPEND, "audit log")
     try:
         yield
         _append(fd, sidecar, lines)

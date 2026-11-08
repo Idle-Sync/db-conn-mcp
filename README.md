@@ -135,7 +135,8 @@ Every write replaces the file in one step, so a failed write leaves it as it was
   it may be a typo.
 - **Lock file** — a `connections.json.lock` file sits beside the real file (beside the target
   when `connections.json` is a symlink), so two processes changing the file at once cannot lose
-  each other's update. It holds no data and stays there after the write.
+  each other's update. It holds no data and stays there after the write. A `.lock` that is a
+  link or not a regular file refuses the change.
 
 ### Audit log
 
@@ -171,8 +172,12 @@ Order and failure:
   effect and says so: `remove`, `yolo` and `reset` exit 1 saying so; `setup` and `add` say so and
   continue to the client injection; the dashboard answers 500; and `set_yolo_mode` returns
   `persisted: true` with `audit_recorded: false` and a `warning`.
-- On Windows the link check runs by path before the open, so a link planted between the two calls
-  is followed, and a hard link is not detected.
+- A lock file or save that fails (a refused sidecar, a folder that cannot be written): `add`, a
+  first-run `setup`, `remove`, `reset` and `yolo` print one `Could not update <path> (...); the
+  file is unchanged.` line and exit 1; from the `setup` menu the line prints and the menu
+  continues; the dashboard answers 409; `set_yolo_mode` returns an error result with that line.
+- On Windows the link check for the lock file and the audit log runs by path before the open,
+  so a link planted between the two calls is followed, and a hard link is not detected.
 
 The audit log is git-ignored beside `connections.json`; if you keep your own ignore rules, add it.
 
