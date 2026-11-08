@@ -504,3 +504,72 @@ def test_unopenable_sidecar_refuses_the_change(tmp_path):
         sidecar.chmod(0o644)
     assert path.read_bytes() == before
     assert list(tmp_path.glob(".connections.json.*.tmp")) == []
+
+
+def _yolo_flip(path: Path) -> tuple[Config, Config]:
+    """The loaded config with dev's yolo turned on, and the config it replaces."""
+    loaded = config.load(str(path))
+    previous = loaded.model_copy(deep=True)
+    config.get(loaded, "dev").yolo = True
+    return loaded, previous
+
+
+def _assert_linked_sidecar_refuses_the_change(tmp_path: Path, path: Path, target: Path) -> None:
+    before, target_before = path.read_bytes(), target.read_bytes()
+    loaded, previous = _yolo_flip(path)
+    with pytest.raises(OSError):
+        config.save(loaded, path, previous=previous, source="cli")
+    assert target.read_bytes() == target_before
+    assert path.read_bytes() == before
+    assert list(tmp_path.glob(".connections.json.*.tmp")) == []
+
+
+@posix_only
+def test_symlinked_sidecar_refuses_the_change(tmp_path):
+    """A cloned repo can commit the sidecar as a link to a shell profile."""
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    target = tmp_path / "bashrc"
+    target.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+    (tmp_path / "connections.json.audit.log").symlink_to(target)
+    _assert_linked_sidecar_refuses_the_change(tmp_path, path, target)
+
+
+@posix_only
+def test_symlinked_sidecar_is_refused_where_open_cannot_refuse_links(tmp_path, monkeypatch):
+    """Windows has no O_NOFOLLOW; the link check by path stands in for it there."""
+    from db_conn_mcp import audit
+
+    monkeypatch.setattr(audit, "_NO_FOLLOW", 0)
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    target = tmp_path / "bashrc"
+    target.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+    (tmp_path / "connections.json.audit.log").symlink_to(target)
+    _assert_linked_sidecar_refuses_the_change(tmp_path, path, target)
+
+
+@posix_only
+def test_hard_linked_sidecar_refuses_the_change(tmp_path):
+    """A hard link shares the other file's inode: the same attack, with no link to see."""
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    target = tmp_path / "bashrc"
+    target.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+    os.link(target, tmp_path / "connections.json.audit.log")
+    _assert_linked_sidecar_refuses_the_change(tmp_path, path, target)
+
+
+@posix_only
+def test_a_sidecar_that_is_not_a_regular_file_refuses_the_change(tmp_path):
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    sidecar = tmp_path / "connections.json.audit.log"
+    os.mkfifo(sidecar)
+    # A reader keeps the sidecar's write-only open from waiting for one.
+    reader = os.open(sidecar, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        before = path.read_bytes()
+        loaded, previous = _yolo_flip(path)
+        with pytest.raises(OSError, match="not a regular file"):
+            config.save(loaded, path, previous=previous, source="cli")
+        assert os.read(reader, 100) == b""  # the refused writer appended nothing
+    finally:
+        os.close(reader)
+    assert path.read_bytes() == before

@@ -7,12 +7,15 @@ never holds a DSN, host, user or password (Rule 6): a DSN change is only named a
 
 Nothing here writes to the terminal: under the stdio transport, standard output is
 the MCP protocol. A sidecar that cannot be opened raises ``OSError`` to the caller,
-which then makes no change.
+which then makes no change. So does a sidecar that is a link: a cloned repo can commit
+``connections.json.audit.log`` as a symlink to a shell profile, and every config
+change would then append to that file.
 """
 
 import contextlib
 import json
 import os
+import stat
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +31,9 @@ _RECORDED_FIELDS = ("mode", "yolo", "fallback_ports")
 
 #: Text that marks a name as a pasted URL DSN, a credential, or a libpq ``key=value`` DSN.
 _DSN_MARKERS = ("://", "@", "=")
+
+#: ``0`` on Windows, which has no ``O_NOFOLLOW``; the link is checked by path there instead.
+_NO_FOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
 def audit_path(config_path: Path) -> Path:
@@ -95,6 +101,29 @@ def line(source: Source, action: str, name: str | None, changes: str = "") -> st
     return "\t".join(columns) + "\n"
 
 
+def _not_a_plain_file(sidecar: Path) -> OSError:
+    """The error for a sidecar that is not a plain file of its own; names no DSN."""
+    return OSError(
+        f"The audit log {sidecar} is a link or not a regular file; refusing to append to it. "
+        "Replace it with a regular file."
+    )
+
+
+def _open_own_file(sidecar: Path) -> int:
+    """Open ``sidecar`` for appending, refusing a symlink, a hard link or a non-file."""
+    if not _NO_FOLLOW and os.path.islink(sidecar):
+        raise _not_a_plain_file(sidecar)
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0) | _NO_FOLLOW
+    fd = os.open(sidecar, flags, 0o600)
+    status = os.fstat(fd)
+    # A hard link shares the target's inode, so it is the symlink attack without a link.
+    hard_linked = os.name == "posix" and status.st_nlink != 1
+    if not stat.S_ISREG(status.st_mode) or hard_linked:
+        os.close(fd)
+        raise _not_a_plain_file(sidecar)
+    return fd
+
+
 @contextlib.contextmanager
 def appending(sidecar: Path, lines: list[str]) -> Iterator[None]:
     """Open ``sidecar`` before the ``with`` body, append ``lines`` only if the body succeeds.
@@ -106,8 +135,7 @@ def appending(sidecar: Path, lines: list[str]) -> Iterator[None]:
     if not lines:
         yield
         return
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
-    fd = os.open(sidecar, flags, 0o600)
+    fd = _open_own_file(sidecar)
     try:
         yield
         os.write(fd, "".join(lines).encode("utf-8"))

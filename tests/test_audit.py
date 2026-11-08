@@ -128,14 +128,20 @@ def test_a_reset_line_names_no_connection():
 
 @pytest.mark.parametrize(
     "name",
-    ["postgresql://u:SECRET@h/db", "u@h", "password=SECRET host=h"],
-    ids=["url", "at-sign", "key-value"],
+    [
+        "postgresql://u:SECRET@h/db",
+        "postgresql://db.internal/prod",
+        "u@h",
+        "password=SECRET host=h",
+    ],
+    ids=["url", "url-without-credentials", "at-sign", "key-value"],
 )
 def test_a_dsn_shaped_name_is_withheld(name):
+    """A host alone is Rule 6 territory too, so a URL without credentials is withheld."""
     rendered = audit.line("cli", "add", name, "mode: ...")
     assert rendered.split("\t")[3] == "(withheld)"
-    assert "SECRET" not in rendered
-    assert "@h" not in rendered
+    for fragment in ("SECRET", "@h", "db.internal"):
+        assert fragment not in rendered
 
 
 # ---- appending ------------------------------------------------------------------
