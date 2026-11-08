@@ -141,10 +141,11 @@ Every write replaces the file in one step, so a failed write leaves it as it was
 
 Every change to `connections.json` is recorded in **`connections.json.audit.log`**, beside the real
 file (beside the target when `connections.json` is a symlink), created `0600` the first time a change
-is made. It is append-only text, one line per changed connection, five tab-separated columns:
+is made. It is append-only text, one line per changed connection, four or five tab-separated
+columns (remove and reset have no changes column):
 
 ```
-2026-11-08T14:03:21+05:30	cli	add	"dev"	mode: "write", yolo: false, fallback_ports: []
+2026-11-08T14:03:21+05:30	cli	add	"dev"	mode: "write", yolo: false, fallback_ports: null
 2026-11-08T14:05:02+05:30	mcp	edit	"dev"	yolo: false -> true
 2026-11-08T14:09:47+05:30	gui	edit	"dev"	mode: "write" -> "read", dsn: (replaced)
 2026-11-08T14:11:10+05:30	cli	remove	"dev"
@@ -167,10 +168,11 @@ Order and failure:
 - A sidecar that cannot be opened, is a link or is not a regular file refuses the change, and
   `connections.json` is left as it was.
 - If the line cannot be appended after the change was written (a full disk), the change stays in
-  effect and says so: the CLI exits 1, the dashboard answers 500, and `set_yolo_mode` returns
+  effect and says so: `remove`, `yolo` and `reset` exit 1 saying so; `setup` and `add` say so and
+  continue to the client injection; the dashboard answers 500; and `set_yolo_mode` returns
   `persisted: true` with `audit_recorded: false` and a `warning`.
 - On Windows the link check runs by path before the open, so a link planted between the two calls
-  is followed.
+  is followed, and a hard link is not detected.
 
 The audit log is git-ignored beside `connections.json`; if you keep your own ignore rules, add it.
 

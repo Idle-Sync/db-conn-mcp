@@ -129,8 +129,8 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 ## Phase 6.11: Issue #37 — the configuration audit log
 > A `mode` or `yolo` flip, an add or a removal left no record of what changed, when, or through which front-end.
 - [x] **`audit.py`:** the sidecar `connections.json.audit.log` beside the resolved config, one tab-separated line per changed connection, with changes derived by diffing the previous and new `Config`. Never a DSN: a replaced DSN is `dsn: (replaced)`, a DSN-shaped name is `(withheld)`. A sidecar that cannot be opened, is a link or is not a regular file refuses the change before it is made.
-- [x] **Every front-end:** the CLI (`setup`/`add`/`remove`/`yolo`/`reset`), the dashboard write routes and `set_yolo_mode` pass their source; a line that cannot be written after the change landed leaves the change in effect and is reported (CLI exit 1, dashboard 500, `audit_recorded: false`).
-- [x] **Docs (Rule 7):** README (Audit log section), PRD, ARCHITECTURE, `.gitignore`, and CHANGELOG with two **Breaking / Behaviour changes**.
+- [x] **Every front-end:** the CLI (`setup`/`add`/`remove`/`yolo`/`reset`), the dashboard write routes and `set_yolo_mode` pass their source; a line that cannot be written after the change landed leaves the change in effect and is reported (`remove`, `yolo` and `reset` exit 1 saying so; `setup` and `add` say so and continue to the client injection; dashboard 500; `audit_recorded: false`).
+- [x] **Docs (Rule 7):** README (Audit log section), PRD, ARCHITECTURE, `.gitignore`, and CHANGELOG with three **Breaking / Behaviour changes**.
 
 ## Phase 7: Future Dialects (Post-v1, Extensibility Payoff)
 > Not part of v1. Listed to prove the seam works — each is a single new file + one registry line, no changes above the dialect layer.

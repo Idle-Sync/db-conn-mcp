@@ -27,8 +27,9 @@ the time of that release.
   and `connections.json` is left as it was.
 - If the audit line cannot be written after `connections.json` was already updated (disk full), the
   change stays in effect: `remove`, `yolo` and `reset` exit 1 saying so, `setup` and `add` say so
-  and continue to the client injection, the dashboard answers 500 with that message, and
-  `set_yolo_mode` returns `persisted: true` with `audit_recorded: false` and a `warning`.
+  and continue to the client injection, the dashboard answers 500 with `the configuration was
+  changed, but its audit line could not be written`, and `set_yolo_mode` returns `persisted: true`
+  with `audit_recorded: false` and a `warning`.
 
 ### Fixed
 
