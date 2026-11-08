@@ -573,3 +573,17 @@ def test_a_sidecar_that_is_not_a_regular_file_refuses_the_change(tmp_path):
     finally:
         os.close(reader)
     assert path.read_bytes() == before
+
+
+@posix_only
+def test_a_refused_sidecar_closes_its_descriptor(tmp_path):
+    """The refusal comes after the open, so it must close what it opened."""
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    target = tmp_path / "bashrc"
+    target.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+    os.link(target, tmp_path / "connections.json.audit.log")
+    loaded, previous = _yolo_flip(path)
+    open_before = len(os.listdir("/dev/fd"))
+    with pytest.raises(OSError):
+        config.save(loaded, path, previous=previous, source="cli")
+    assert len(os.listdir("/dev/fd")) == open_before
