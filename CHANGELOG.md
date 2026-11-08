@@ -13,6 +13,9 @@ the time of that release.
 
 ### Fixed
 
+- `get_table_schema` and `get_database_schema` list each column of a composite primary key
+  once, in declared order, and pair each column of a composite foreign key with its own
+  referenced column, where they used to repeat every column once per key column (#49).
 - The `check_sequences` advice for a skipped sequence with reason `no_privilege` now tells you
   to grant USAGE on the schema as well as SELECT on the sequence and its table.
 - Verify reports `tool_call_failed` when the server starts but `list_databases` returns an error,
@@ -67,6 +70,14 @@ the time of that release.
 
 ### Breaking / Behaviour changes
 
+- **A composite primary key now lists each column once, in declared order, and a composite
+  foreign key gives one `{column, references}` entry per column with its own referenced
+  column.** It used to give every column paired with every referenced column, so your
+  `get_database_schema` dumps and `diff_schemas` results change for such tables. A table with
+  several foreign keys now lists them by constraint name, where the order used to be
+  unspecified. Keys now come from `pg_catalog`, so a role that can only SELECT from a table it
+  does not own now sees that table's keys in `get_table_schema` and `get_database_schema`;
+  `information_schema` used to hide them.
 - **A client whose server starts but cannot read its `connections.json` now gets the verdict
   `tool_call_failed` instead of `answers`; the result carries the error in
   `list_databases_error` and `list_databases_text` is empty.**
