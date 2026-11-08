@@ -184,6 +184,7 @@ def test_appending_whose_write_fails_raises_unrecorded_not_oserror(tmp_path, mon
     with pytest.raises(audit.UnrecordedChangeError) as caught, audit.appending(sidecar, ["one\n"]):
         pass
     assert not isinstance(caught.value, OSError)
+    assert caught.value.__suppress_context__  # Rule 6: no chained error in a traceback
     message = str(caught.value)
     assert "in effect and unrecorded" in message
     assert "OSError" in message
