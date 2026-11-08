@@ -1,9 +1,12 @@
 """Tests for config resolution, validation, lookup, and atomic persistence."""
 
+import errno
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -153,7 +156,7 @@ def test_non_utf8_file_is_a_config_error_with_no_file_contents(tmp_path):
 def test_save_round_trip(tmp_path):
     path = tmp_path / "c.json"
     cfg = Config(connections=[Connection(name="dev", dsn="postgresql://h/d", mode="write")])
-    config.save(cfg, path)
+    config.save(cfg, path, previous=Config(), source="cli")
     reloaded = config.load(str(path))
     assert reloaded.connections[0].name == "dev"
 
@@ -161,7 +164,7 @@ def test_save_round_trip(tmp_path):
 def test_save_creates_the_config_directory(tmp_path):
     """The first `setup` writes into `~/.db-conn-mcp`, which does not exist yet."""
     path = tmp_path / "new_dir" / "connections.json"
-    config.save(Config(), path)
+    config.save(Config(), path, previous=Config(), source="cli")
     assert config.load(str(path)).connections == []
 
 
@@ -169,7 +172,7 @@ def test_save_writes_two_space_json_with_a_trailing_newline(tmp_path):
     """Hand-edited and diffed by users, so the layout is part of what a save must keep."""
     path = tmp_path / "connections.json"
     cfg = Config(connections=[Connection(name="dev", dsn="postgresql://h/d", mode="write")])
-    config.save(cfg, path)
+    config.save(cfg, path, previous=Config(), source="cli")
     document = {
         "connections": [{"name": "dev", "dsn": "postgresql://h/d", "mode": "write", "yolo": False}]
     }
@@ -178,7 +181,7 @@ def test_save_writes_two_space_json_with_a_trailing_newline(tmp_path):
 
 def test_set_yolo_persists(tmp_path):
     path = _write(tmp_path / "c.json", VALID)
-    updated = config.set_yolo(path, "prod", True)
+    updated = config.set_yolo(path, "prod", True, source="cli")
     assert config.get(updated, "prod").yolo is True
     # persisted to disk, survives reload
     assert config.get(config.load(str(path)), "prod").yolo is True
@@ -187,7 +190,7 @@ def test_set_yolo_persists(tmp_path):
 def test_set_yolo_unknown_db_errors(tmp_path):
     path = _write(tmp_path / "c.json", VALID)
     with pytest.raises(ConfigError, match="ghost"):
-        config.set_yolo(path, "ghost", True)
+        config.set_yolo(path, "ghost", True, source="cli")
 
 
 # ---- fallback_ports (issue #10) -----------------------------------------------
@@ -221,7 +224,7 @@ def test_save_never_injects_fallback_ports_into_old_files(tmp_path):
         ),
         encoding="utf-8",
     )
-    config.set_yolo(path, "a", True)
+    config.set_yolo(path, "a", True, source="cli")
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert "fallback_ports" not in saved["connections"][0]
     assert saved["connections"][0]["yolo"] is True  # existing dump behavior kept
@@ -236,7 +239,7 @@ def test_save_round_trips_fallback_ports(tmp_path):
             )
         ]
     )
-    config.save(cfg, path)
+    config.save(cfg, path, previous=Config(), source="cli")
     reloaded = config.load(str(path))
     assert reloaded.connections[0].fallback_ports == [5433, 15432]
 
@@ -254,7 +257,7 @@ def _mode(path: Path) -> int:
 def test_file_mode_0600_survives_set_yolo(tmp_path):
     path = _write(tmp_path / "connections.json", VALID)
     path.chmod(0o600)
-    config.set_yolo(path, "prod", True)
+    config.set_yolo(path, "prod", True, source="cli")
     assert _mode(path) == 0o600
 
 
@@ -263,7 +266,8 @@ def test_file_mode_0640_survives_save(tmp_path):
     """A mode the user chose on purpose (group-readable, say) is theirs to keep."""
     path = _write(tmp_path / "connections.json", VALID)
     path.chmod(0o640)
-    config.save(config.load(str(path)), path)
+    loaded = config.load(str(path))
+    config.save(loaded, path, previous=loaded, source="cli")
     assert _mode(path) == 0o640
 
 
@@ -271,7 +275,7 @@ def test_file_mode_0640_survives_save(tmp_path):
 def test_file_mode_of_a_file_save_creates_is_0600(tmp_path):
     """The file holds plaintext DSNs: it must never start out world-readable."""
     path = tmp_path / "connections.json"
-    config.save(Config(), path)
+    config.save(Config(), path, previous=Config(), source="cli")
     assert _mode(path) == 0o600
 
 
@@ -295,7 +299,7 @@ WITH_UNKNOWN_KEYS = {
 def test_unknown_keys_survive_set_yolo(tmp_path):
     """Null-valued keys too: `exclude_none` is only meant for this tool's own optionals."""
     path = _write(tmp_path / "connections.json", WITH_UNKNOWN_KEYS)
-    config.set_yolo(path, "a", True)
+    config.set_yolo(path, "a", True, source="cli")
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["notes"] == "y"
     assert saved["owner"] is None and "owner" in saved
@@ -309,7 +313,7 @@ def test_unknown_keys_survive_set_yolo(tmp_path):
 def test_saved_layout_with_unknown_keys_is_pinned(tmp_path):
     """Non-null unknown top-level keys stay ahead of ``connections``; null ones follow."""
     path = _write(tmp_path / "connections.json", WITH_UNKNOWN_KEYS)
-    config.set_yolo(path, "a", True)
+    config.set_yolo(path, "a", True, source="cli")
     document = {
         "notes": "y",
         "connections": [
@@ -343,7 +347,7 @@ from db_conn_mcp import config
 
 path, name, writes = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
 for j in range(writes):
-    config.set_yolo(path, name, j % 2 == 1)
+    config.set_yolo(path, name, j % 2 == 1, source="cli")
 """
 
 
@@ -380,8 +384,12 @@ def test_cross_process_set_yolo_loses_no_update(tmp_path):
     assert [conn["yolo"] for conn in saved["connections"]] == [True] * 8
     assert sorted(p.name for p in config_dir.iterdir()) == [
         "connections.json",
+        "connections.json.audit.log",
         "connections.json.lock",
     ]
+    # Each child's first write keeps the default False, so it records nothing.
+    audit_lines = (config_dir / "connections.json.audit.log").read_text(encoding="utf-8")
+    assert len(audit_lines.splitlines()) == 8 * (writes - 1)
 
 
 @posix_only
@@ -416,3 +424,201 @@ def test_locked_creates_the_sidecar_directory_for_a_config_not_yet_written(tmp_p
     with config.locked(path):
         pass
     assert path.with_name("connections.json.lock").exists()
+
+
+# ---- audit sidecar (issue #37) -------------------------------------------------
+
+YOLO_OFF = {"connections": [{"name": "dev", "dsn": "postgresql://u:SECRET@h/dev", "mode": "write"}]}
+
+
+def _audit_lines(config_path: Path) -> list[str]:
+    sidecar = config_path.with_name(config_path.name + ".audit.log")
+    return sidecar.read_text(encoding="utf-8").splitlines()
+
+
+def test_save_without_audit_keywords_is_a_type_error(tmp_path):
+    """The keywords are what make every save leave its line: none may skip them."""
+    with pytest.raises(TypeError):
+        config.save(Config(), tmp_path / "connections.json")
+
+
+def test_save_with_no_change_creates_no_audit_sidecar(tmp_path):
+    path = _write(tmp_path / "connections.json", VALID)
+    loaded = config.load(str(path))
+    config.save(loaded, path, previous=loaded.model_copy(deep=True), source="cli")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["connections.json"]
+
+
+def test_set_yolo_appends_one_audit_line_and_none_when_unchanged(tmp_path):
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    config.set_yolo(path, "dev", True, source="cli")
+    lines = _audit_lines(path)
+    assert len(lines) == 1
+    timestamp = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}"
+    assert re.fullmatch(timestamp + '\tcli\tedit\t"dev"\tyolo: false -> true', lines[0])
+    config.set_yolo(path, "dev", True, source="cli")
+    assert _audit_lines(path) == lines
+
+
+@posix_only
+def test_set_yolo_closes_the_audit_descriptor(tmp_path):
+    """The MCP server is long-lived: one leaked descriptor per recorded toggle adds up."""
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    open_before = len(os.listdir("/dev/fd"))
+    config.set_yolo(path, "dev", True, source="cli")
+    assert len(os.listdir("/dev/fd")) == open_before
+    assert len(_audit_lines(path)) == 1
+
+
+def test_failed_config_write_records_nothing(tmp_path, monkeypatch):
+    """A line is a claim that the change happened, so it is written only after the config."""
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    sidecar = tmp_path / "connections.json.audit.log"
+    sidecar.touch()
+
+    def failing_write(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config, "write_text_atomically", failing_write)
+    loaded = config.load(str(path))
+    previous = loaded.model_copy(deep=True)
+    config.get(loaded, "dev").yolo = True
+    with pytest.raises(OSError):
+        config.save(loaded, path, previous=previous, source="cli")
+    assert sidecar.read_bytes() == b""
+
+
+@posix_only
+def test_unopenable_sidecar_refuses_the_change(tmp_path):
+    """A change that cannot be recorded is not made: the config keeps its bytes."""
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    before = path.read_bytes()
+    sidecar = tmp_path / "connections.json.audit.log"
+    sidecar.touch()
+    sidecar.chmod(0o444)
+    loaded = config.load(str(path))
+    previous = loaded.model_copy(deep=True)
+    config.get(loaded, "dev").yolo = True
+    try:
+        with pytest.raises(PermissionError):
+            config.save(loaded, path, previous=previous, source="cli")
+    finally:
+        sidecar.chmod(0o644)
+    assert path.read_bytes() == before
+    assert list(tmp_path.glob(".connections.json.*.tmp")) == []
+
+
+def _yolo_flip(path: Path) -> tuple[Config, Config]:
+    """The loaded config with dev's yolo turned on, and the config it replaces."""
+    loaded = config.load(str(path))
+    previous = loaded.model_copy(deep=True)
+    config.get(loaded, "dev").yolo = True
+    return loaded, previous
+
+
+def _assert_linked_sidecar_refuses_the_change(tmp_path: Path, path: Path, target: Path) -> None:
+    before, target_before = path.read_bytes(), target.read_bytes()
+    loaded, previous = _yolo_flip(path)
+    with pytest.raises(OSError):
+        config.save(loaded, path, previous=previous, source="cli")
+    assert target.read_bytes() == target_before
+    assert path.read_bytes() == before
+    assert list(tmp_path.glob(".connections.json.*.tmp")) == []
+
+
+@posix_only
+def test_symlinked_sidecar_refuses_the_change(tmp_path):
+    """A cloned repo can commit the sidecar as a link to a shell profile."""
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    target = tmp_path / "bashrc"
+    target.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+    (tmp_path / "connections.json.audit.log").symlink_to(target)
+    _assert_linked_sidecar_refuses_the_change(tmp_path, path, target)
+
+
+def test_symlinked_sidecar_is_refused_where_open_cannot_refuse_links(tmp_path, monkeypatch):
+    """Windows has no O_NOFOLLOW; the link check by path stands in for it there."""
+    from db_conn_mcp import audit
+
+    monkeypatch.setattr(audit, "_NO_FOLLOW", 0)
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    target = tmp_path / "bashrc"
+    target.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+    try:
+        (tmp_path / "connections.json.audit.log").symlink_to(target)
+    except OSError:
+        pytest.skip("creating a symlink needs Developer Mode or admin rights on Windows")
+    _assert_linked_sidecar_refuses_the_change(tmp_path, path, target)
+
+
+@posix_only
+def test_hard_linked_sidecar_refuses_the_change(tmp_path):
+    """A hard link shares the other file's inode: the same attack, with no link to see."""
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    target = tmp_path / "bashrc"
+    target.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+    os.link(target, tmp_path / "connections.json.audit.log")
+    _assert_linked_sidecar_refuses_the_change(tmp_path, path, target)
+
+
+@posix_only
+def test_a_sidecar_that_is_not_a_regular_file_refuses_the_change(tmp_path):
+    """A FIFO with no reader must be refused at once: the save holds the config lock."""
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    sidecar = tmp_path / "connections.json.audit.log"
+    os.mkfifo(sidecar)
+    before = path.read_bytes()
+    loaded, previous = _yolo_flip(path)
+    errors: list[OSError] = []
+
+    def save() -> None:
+        try:
+            config.save(loaded, path, previous=previous, source="cli")
+        except OSError as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=save, daemon=True)
+    thread.start()
+    thread.join(timeout=2)
+    blocked = thread.is_alive()
+    if blocked:
+        # Lets the blocked open return, so no thread keeps the config lock after the test.
+        reader = os.open(sidecar, os.O_RDONLY | os.O_NONBLOCK)
+        thread.join()
+        os.close(reader)
+    assert not blocked
+    [error] = errors
+    assert error.errno == errno.ENXIO or "not a regular file" in str(error)
+    assert path.read_bytes() == before
+
+
+@posix_only
+def test_a_sidecar_that_is_not_a_regular_file_refuses_the_change_with_a_reader(tmp_path):
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    sidecar = tmp_path / "connections.json.audit.log"
+    os.mkfifo(sidecar)
+    # With a reader, the open succeeds and the file-type check is what refuses.
+    reader = os.open(sidecar, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        before = path.read_bytes()
+        loaded, previous = _yolo_flip(path)
+        with pytest.raises(OSError, match="not a regular file"):
+            config.save(loaded, path, previous=previous, source="cli")
+        assert os.read(reader, 100) == b""  # the refused writer appended nothing
+    finally:
+        os.close(reader)
+    assert path.read_bytes() == before
+
+
+@posix_only
+def test_a_refused_sidecar_closes_its_descriptor(tmp_path):
+    """The refusal comes after the open, so it must close what it opened."""
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    target = tmp_path / "bashrc"
+    target.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+    os.link(target, tmp_path / "connections.json.audit.log")
+    loaded, previous = _yolo_flip(path)
+    open_before = len(os.listdir("/dev/fd"))
+    with pytest.raises(OSError):
+        config.save(loaded, path, previous=previous, source="cli")
+    assert len(os.listdir("/dev/fd")) == open_before

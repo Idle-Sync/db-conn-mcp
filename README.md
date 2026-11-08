@@ -137,13 +137,52 @@ Every write replaces the file in one step, so a failed write leaves it as it was
   when `connections.json` is a symlink), so two processes changing the file at once cannot lose
   each other's update. It holds no data and stays there after the write.
 
-> `connections.json` is git-ignored by this project's `.gitignore` — never commit real DSNs.
+### Audit log
+
+Every change to `connections.json` is recorded in **`connections.json.audit.log`**, beside the real
+file (beside the target when `connections.json` is a symlink), created `0600` the first time a change
+is made. It is append-only text, one line per changed connection, four or five tab-separated
+columns (remove and reset have no changes column):
+
+```
+2026-11-08T14:03:21+05:30	cli	add	"dev"	mode: "write", yolo: false, fallback_ports: null
+2026-11-08T14:05:02+05:30	mcp	edit	"dev"	yolo: false -> true
+2026-11-08T14:09:47+05:30	gui	edit	"dev"	mode: "write" -> "read", dsn: (replaced)
+2026-11-08T14:11:10+05:30	cli	remove	"dev"
+2026-11-08T14:12:00+05:30	cli	reset	-
+```
+
+| Column | Value |
+|--------|-------|
+| time | ISO 8601 with the UTC offset, to the second. |
+| source | `cli`, `gui` (the dashboard) or `mcp` (the `set_yolo_mode` tool). |
+| action | `add`, `edit`, `remove` or `reset`. |
+| name | The connection name as a JSON string, or `-` for `reset`, which has no one name. |
+| changes | Changed field names: `old -> new` for an edit, the values for an add, nothing for a remove or reset. A new DSN is only ever written as `dsn: (replaced)`. |
+
+The file holds names, modes and flags, never a DSN, host, user or password. A name that looks like a
+DSN (it contains `://`, `@` or `=`) is written as `(withheld)`. Nothing is written to the terminal.
+
+Order and failure:
+
+- A sidecar that cannot be opened, is a link or is not a regular file refuses the change, and
+  `connections.json` is left as it was.
+- If the line cannot be appended after the change was written (a full disk), the change stays in
+  effect and says so: `remove`, `yolo` and `reset` exit 1 saying so; `setup` and `add` say so and
+  continue to the client injection; the dashboard answers 500; and `set_yolo_mode` returns
+  `persisted: true` with `audit_recorded: false` and a `warning`.
+- On Windows the link check runs by path before the open, so a link planted between the two calls
+  is followed, and a hard link is not detected.
+
+The audit log is git-ignored beside `connections.json`; if you keep your own ignore rules, add it.
+
+> `connections.json` and `connections.json.audit.log` are git-ignored by this project's `.gitignore` — never commit real DSNs.
 
 ---
 
 ## The security model
 
-Writes pass through four gates, **in order**:
+Writes pass through four gates, **in order**. Changes to the configuration itself, such as flipping `mode` or `yolo`, are recorded without any DSN in `connections.json.audit.log` (see Configuration).
 
 1. **`mode` (hard, native).** If the database isn't `"mode": "write"`, the write is rejected — and the connection is opened read-only at the PostgreSQL session level regardless, so it's blocked twice over. Nothing — not `yolo`, not `user_consent`, not `skip_dry_run` — can **ever** make a `read` database writable.
 2. **Dry-run first (server-enforced).** `execute_write_query` defaults to `dry_run=true`. A commit is **rejected** unless the identical statement was dry-run first. The one escape hatch is `skip_dry_run=true`, which the agent passes to *attest* that you explicitly asked to skip the preview — the server can't verify that claim, so it's the same trust model as `user_consent` (and, like it, useless on a `read` database). `yolo` does **not** waive this stage.

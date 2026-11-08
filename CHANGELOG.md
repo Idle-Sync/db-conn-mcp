@@ -11,6 +11,26 @@ the time of that release.
 
 ## [Unreleased]
 
+### Added
+
+- Every change to `connections.json` is recorded in `connections.json.audit.log` beside it: one line
+  per changed connection with the time, the source (`cli`, `gui` or `mcp`), the action (`add`,
+  `edit`, `remove` or `reset`), the connection name and the changed fields as `old -> new`. A
+  replaced DSN is written as `dsn: (replaced)` (#37).
+
+### Breaking / Behaviour changes
+
+- A new file `connections.json.audit.log` appears beside your `connections.json` the first time a
+  change is made; it holds names, modes and flags, never a DSN, and a name that looks like a DSN is
+  written as `(withheld)`.
+- If the audit file cannot be opened, is a link or is not a regular file, the change is refused
+  and `connections.json` is left as it was.
+- If the audit line cannot be written after `connections.json` was already updated (disk full), the
+  change stays in effect: `remove`, `yolo` and `reset` exit 1 saying so, `setup` and `add` say so
+  and continue to the client injection, the dashboard answers 500 with `the configuration was
+  changed, but its audit line could not be written`, and `set_yolo_mode` returns `persisted: true`
+  with `audit_recorded: false` and a `warning`.
+
 ### Fixed
 
 - On Windows, a config save that is being retried no longer freezes the MCP server or the

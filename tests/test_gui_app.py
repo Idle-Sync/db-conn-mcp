@@ -1,7 +1,10 @@
 """The GUI web app: guard middleware, summary, and (later tasks) the full API."""
 
 import asyncio
+import contextlib
+import errno
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -10,7 +13,7 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
-from db_conn_mcp import __version__
+from db_conn_mcp import __version__, audit
 from db_conn_mcp.gui.app import GUI_PORT, SESSION_COOKIE, TOKEN_HEADER, create_app
 
 TOKEN = "test-token-abcdef"
@@ -34,6 +37,11 @@ def cfg_client(tmp_path):
 
 def _hdr():
     return {TOKEN_HEADER: TOKEN}
+
+
+def _audit_lines(cfg: Path) -> list[str]:
+    """The audit sidecar's lines for the config at ``cfg``."""
+    return audit.audit_path(cfg).read_text(encoding="utf-8").splitlines()
 
 
 def _get(client, path, **kw):
@@ -279,10 +287,11 @@ def test_validation_error_names_fields_only(cfg_client):
 
 
 def test_duplicate_name_409(cfg_client):
-    client, _ = cfg_client
+    client, cfg = cfg_client
     payload = {"name": "s", "dsn": SECRET_DSN, "mode": "read"}
     client.post("/api/databases", json=payload, headers=_hdr())
     assert client.post("/api/databases", json=payload, headers=_hdr()).status_code == 409
+    assert len(_audit_lines(cfg)) == 1  # the first add only
 
 
 @pytest.mark.parametrize(
@@ -531,6 +540,8 @@ async def test_concurrent_edits_do_not_lose_a_sibling(tmp_path):
     by_name = {row["name"]: row for row in listing}
     assert by_name["a"]["mode"] == "write"
     assert by_name["b"]["yolo"] is True
+    edits = [line for line in _audit_lines(cfg) if "\tgui\tedit\t" in line]
+    assert sorted(line.split("\t")[3] for line in edits) == ['"a"', '"b"']
 
 
 async def test_concurrent_delete_and_add_keep_both_effects(tmp_path):
@@ -1184,8 +1195,9 @@ def off_loop_probes(monkeypatch):
     from db_conn_mcp import atomic_write
     from db_conn_mcp import config as config_mod
 
-    fired = {"lock": 0, "replace": 0}
+    fired = {"lock": 0, "replace": 0, "audit": 0}
     real_acquire, real_replace = config_mod._acquire_lock, atomic_write.os.replace
+    real_appending = audit.appending
 
     def probed_acquire(fd):
         _assert_no_running_event_loop()
@@ -1197,8 +1209,16 @@ def off_loop_probes(monkeypatch):
         fired["replace"] += 1
         real_replace(*args, **kwargs)
 
+    @contextlib.contextmanager
+    def probed_appending(sidecar, lines):
+        _assert_no_running_event_loop()
+        fired["audit"] += 1
+        with real_appending(sidecar, lines):
+            yield
+
     monkeypatch.setattr(config_mod, "_acquire_lock", probed_acquire)
     monkeypatch.setattr(atomic_write.os, "replace", probed_replace)
+    monkeypatch.setattr(audit, "appending", probed_appending)
     return fired
 
 
@@ -1213,6 +1233,7 @@ def test_database_writes_run_off_the_event_loop(verb, name, cfg_client, off_loop
     assert _send(client, verb, name).status_code in (200, 201)
     assert off_loop_probes["lock"] >= 1
     assert off_loop_probes["replace"] >= 1
+    assert off_loop_probes["audit"] >= 1
 
 
 def test_client_writes_run_off_the_event_loop(cfg_client, tmp_path, monkeypatch, off_loop_probes):
@@ -1230,3 +1251,103 @@ def test_client_writes_run_off_the_event_loop(cfg_client, tmp_path, monkeypatch,
     assert off_loop_probes["replace"] == 1
     assert client.post("/api/clients/fake/uninject", headers=_hdr()).status_code == 200
     assert off_loop_probes["replace"] == 2
+
+
+# ---- audit lines (issue #37) ---------------------------------------------------
+
+
+def test_edit_writes_one_audit_line(cfg_client):
+    """The pre-check pass reads and merges too; only the pass that saves may record."""
+    client, cfg = cfg_client
+    name = "Digital_ocean-prod-db"
+    cfg.write_text(
+        json.dumps({"connections": [{"name": name, "dsn": SECRET_DSN, "mode": "write"}]}),
+        encoding="utf-8",
+    )
+    r = client.patch(f"/api/databases/{name}", json={"mode": "read", "yolo": False}, headers=_hdr())
+    assert r.status_code == 200
+    [line] = _audit_lines(cfg)
+    assert re.search(r'\tgui\tedit\t"Digital_ocean-prod-db"\tmode: "write" -> "read"$', line)
+
+
+def test_add_writes_an_audit_line(cfg_client):
+    client, cfg = cfg_client
+    r = client.post(
+        "/api/databases", json={"name": "s", "dsn": SECRET_DSN, "mode": "read"}, headers=_hdr()
+    )
+    assert r.status_code == 201
+    [line] = _audit_lines(cfg)
+    assert '\tgui\tadd\t"s"\t' in line
+    assert "hunter2-secret" not in line
+
+
+def test_delete_writes_an_audit_line(cfg_client):
+    client, cfg = cfg_client
+    _seed_one_connection(cfg)
+    assert client.delete("/api/databases/a", headers=_hdr()).status_code == 200
+    [line] = _audit_lines(cfg)
+    assert line.endswith('\tgui\tremove\t"a"')
+    assert len(line.split("\t")) == 4
+
+
+def test_edit_of_a_config_lost_in_a_race_is_a_409_not_a_500(cfg_client, monkeypatch):
+    """The file can turn unloadable between the pre-check and the load under the lock."""
+    from db_conn_mcp.gui import app as app_mod
+
+    client, cfg = cfg_client
+    _seed_one_connection(cfg)
+    real_load = app_mod._load_or_empty
+    loads: list[Path] = []
+
+    def load_then_lose(path):
+        loads.append(path)
+        if len(loads) == 1:
+            return real_load(path)
+        return None
+
+    monkeypatch.setattr(app_mod, "_load_or_empty", load_then_lose)
+    r = client.patch("/api/databases/a", json={"mode": "write"}, headers=_hdr())
+    assert r.status_code == 409
+    assert r.json() == {"error": "no configuration found"}
+    assert len(loads) == 2
+    assert not audit.audit_path(cfg).exists()
+
+
+_UNRECORDED = {"error": "the configuration was changed, but its audit line could not be written"}
+
+
+def _no_space_left(fd, data):
+    raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def test_edit_whose_audit_line_fails_is_an_unrecorded_500(cfg_client, monkeypatch):
+    """The mode is already stored, so the 409 "could not be read or written" would be a lie."""
+    client, cfg = cfg_client
+    _seed_one_connection(cfg)
+    monkeypatch.setattr(audit.os, "write", _no_space_left)
+    r = client.patch("/api/databases/a", json={"mode": "write"}, headers=_hdr())
+    assert r.status_code == 500
+    assert r.json() == _UNRECORDED
+    [stored] = json.loads(cfg.read_text(encoding="utf-8"))["connections"]
+    assert stored["mode"] == "write"
+
+
+def test_add_whose_audit_line_fails_is_an_unrecorded_500(cfg_client, monkeypatch):
+    client, cfg = cfg_client
+    monkeypatch.setattr(audit.os, "write", _no_space_left)
+    r = client.post(
+        "/api/databases", json={"name": "s", "dsn": SECRET_DSN, "mode": "read"}, headers=_hdr()
+    )
+    assert r.status_code == 500
+    assert r.json() == _UNRECORDED
+    assert _stored_names(cfg) == ["s"]
+
+
+def test_delete_whose_audit_line_fails_is_an_unrecorded_500(cfg_client, monkeypatch):
+    client, cfg = cfg_client
+    _seed_one_connection(cfg)
+    monkeypatch.setattr(audit.os, "write", _no_space_left)
+    r = client.delete("/api/databases/a", headers=_hdr())
+    assert r.status_code == 500
+    assert r.json() == _UNRECORDED
+    assert _stored_names(cfg) == []
