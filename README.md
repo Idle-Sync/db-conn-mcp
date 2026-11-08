@@ -229,9 +229,9 @@ The server exposes **23 tools** and **2 prompts**:
 | `db-conn-mcp --transport http` | Run over **HTTP (SSE)** instead. |
 | `db-conn-mcp --no-gui` | Run the server **without** hosting the [browser dashboard](#browser-dashboard-db-conn-mcp-gui) on `127.0.0.1:31415`. Works with either transport. |
 | `db-conn-mcp gui` | Open the [browser dashboard](#browser-dashboard-db-conn-mcp-gui) — reuses the one a running server already hosts, otherwise starts one and opens your browser at it. |
-| `db-conn-mcp setup` | Guided setup; shows status + an action menu if already configured. |
+| `db-conn-mcp setup` | Guided setup; shows status + an action menu if already configured. With `--config PATH` and no file there, creates it at `PATH` without asking global or repo. |
 | `db-conn-mcp status` | List configured databases (including `fallback_ports` where configured) and which clients have the server injected. |
-| `db-conn-mcp add` | Add another database connection. |
+| `db-conn-mcp add` | Add another database connection. With `--config PATH` and no file there, creates it at `PATH` without asking global or repo. |
 | `db-conn-mcp clients` | Inject the server into detected MCP clients. |
 | `db-conn-mcp clients --remove` | Uninject the server from chosen clients. |
 | `db-conn-mcp check [name]` | Probe connectivity (exit `0` all-OK, `2` if any unreachable). |

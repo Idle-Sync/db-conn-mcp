@@ -403,6 +403,26 @@ def test_wizard_completes_and_saves(tmp_path, monkeypatch):
     assert cfg.connections[0].name == "mydb"
 
 
+@pytest.mark.parametrize(
+    "run",
+    [lambda p: cli.run_setup_wizard(p), lambda p: cli.cmd_add(p)],
+    ids=["setup", "add"],
+)
+def test_first_run_with_explicit_config_writes_there_without_scope_question(
+    run, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    # No scope answer: the first answer is the connection name.
+    monkeypatch.setattr(builtins, "input", _scripted_input(["mydb", "postgresql://h/db", "r", ""]))
+    path = tmp_path / "sub" / "connections.json"
+    assert run(str(path)) == 0
+    cfg = config.load(str(path))
+    assert [(c.name, c.mode) for c in cfg.connections] == [("mydb", "read")]
+    assert not config.repo_config_path().exists()
+    assert str(path) in capsys.readouterr().out
+
+
 def test_wizard_ctrl_c_at_start_saves_nothing(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(builtins, "input", _scripted_input([KeyboardInterrupt]))
@@ -500,6 +520,17 @@ def test_cmd_add_appends(tmp_path, monkeypatch):
     monkeypatch.setattr(builtins, "input", _scripted_input(["b", "postgresql://h/b", "r", ""]))
     rc = cli.cmd_add(str(config.repo_config_path()))
     assert rc == 0
+    cfg = config.load(str(config.repo_config_path()))
+    assert [c.name for c in cfg.connections] == ["a", "b"]
+
+
+def test_cmd_add_without_config_arg_uses_the_existing_repo_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    # No scope answer: the first answer is the connection name.
+    monkeypatch.setattr(builtins, "input", _scripted_input(["b", "postgresql://h/b", "r", ""]))
+    assert cli.cmd_add() == 0
     cfg = config.load(str(config.repo_config_path()))
     assert [c.name for c in cfg.connections] == ["a", "b"]
 

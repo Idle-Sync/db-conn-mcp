@@ -13,6 +13,8 @@ the time of that release.
 
 ### Fixed
 
+- `setup --config PATH` and `add --config PATH` on a first run write to `PATH` instead of asking
+  global or repo and writing elsewhere, and the client entry they inject points at `PATH` (#56).
 - `get_table_schema` and `get_database_schema` list each column of a composite primary key
   once, in declared order, and pair each column of a composite foreign key with its own
   referenced column, where they used to repeat every column once per key column (#49). A foreign
@@ -72,6 +74,8 @@ the time of that release.
 
 ### Breaking / Behaviour changes
 
+- **`setup --config PATH` and `add --config PATH` on a first run now write to `PATH` and no
+  longer ask the global/repo question.** They used to ask, then write to the global or repo file.
 - **A composite primary key now lists each column once, in declared order, and a composite
   foreign key gives one `{column, references}` entry per column with its own referenced
   column.** It used to give every column paired with every referenced column, so your
