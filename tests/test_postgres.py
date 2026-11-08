@@ -2,9 +2,9 @@
 
 These cover the behavior we can verify without a live server: native read-only
 enforcement is issued, identifiers are safely quoted, introspection rows are mapped
-to the documented shapes, and execute() picks the right result shape. A real
-read-only-blocks-writes check belongs in a Docker integration test (see module note
-in postgres.py).
+to the documented shapes, and execute() picks the right result shape. The key queries
+also run against a live server in test_postgres_live.py, skipped unless
+DB_CONN_MCP_TEST_DSN is set (see module note in postgres.py).
 """
 
 import asyncio
@@ -313,6 +313,34 @@ async def test_get_schema_shape():
     assert result["foreign_keys"] == [{"column": "org_id", "references": "orgs.id"}]
 
 
+# Composite keys as _KEYS_SQL orders them: by constraint type, then constraint name, then
+# declared position. Declared order is not alphabetical, so a sort in assembly would show.
+COMPOSITE_KEY_ROWS = [
+    {"column": "org_id", "constraint_type": "FOREIGN KEY", "references": "orgs.id"},
+    {"column": "tenant", "constraint_type": "FOREIGN KEY", "references": "orgs.tenant"},
+    {"column": "user_tenant", "constraint_type": "FOREIGN KEY", "references": "users.tenant"},
+    {"column": "user_id", "constraint_type": "FOREIGN KEY", "references": "users.org_id"},
+    {"column": "user_id", "constraint_type": "PRIMARY KEY", "references": None},
+    {"column": "org_id", "constraint_type": "PRIMARY KEY", "references": None},
+]
+COMPOSITE_PRIMARY_KEY = ["user_id", "org_id"]
+COMPOSITE_FOREIGN_KEYS = [
+    {"column": "org_id", "references": "orgs.id"},
+    {"column": "tenant", "references": "orgs.tenant"},
+    {"column": "user_tenant", "references": "users.tenant"},
+    {"column": "user_id", "references": "users.org_id"},
+]
+
+
+async def test_get_schema_keeps_composite_key_rows_in_order():
+    """Each key row becomes exactly one entry, in row order, on its own side only."""
+    conn = FakeConn([[], COMPOSITE_KEY_ROWS])
+    result = await PostgresDialect().get_schema(conn, "app.memberships")
+    assert result["primary_key"] == COMPOSITE_PRIMARY_KEY
+    assert result["foreign_keys"] == COMPOSITE_FOREIGN_KEYS
+    assert conn.fetch_args[1] == ("memberships", "app")
+
+
 async def test_table_indexes_shape():
     rows = [
         {"name": "users_pkey", "columns": ["id"], "unique": True, "method": "btree"},
@@ -442,6 +470,38 @@ async def test_get_database_schema_orders_deterministically():
     result = await PostgresDialect().get_database_schema(conn)
     assert [t["name"] for t in result["tables"]] == ["a"]
     assert result["tables"][0]["primary_key"] == []
+
+
+async def test_get_database_schema_keeps_composite_key_rows_in_order():
+    """Composite key rows land on their own table and side, one entry each, in row order."""
+    columns = [
+        {
+            "schema": "app",
+            "table": table,
+            "name": "id",
+            "type": "integer",
+            "nullable": False,
+            "default": None,
+        }
+        for table in ("memberships", "orgs")
+    ]
+    keys = [{"schema": "app", "table": "memberships", **row} for row in COMPOSITE_KEY_ROWS]
+    keys.append(
+        {
+            "schema": "app",
+            "table": "orgs",
+            "column": "id",
+            "constraint_type": "PRIMARY KEY",
+            "references": None,
+        }
+    )
+    conn = FakeConn([columns, keys])
+    result = await PostgresDialect().get_database_schema(conn)
+    memberships, orgs = result["tables"]
+    assert memberships["primary_key"] == COMPOSITE_PRIMARY_KEY
+    assert memberships["foreign_keys"] == COMPOSITE_FOREIGN_KEYS
+    assert orgs["primary_key"] == ["id"]
+    assert orgs["foreign_keys"] == []
 
 
 async def test_sample_rows_quotes_identifier_and_limits():

@@ -25,7 +25,7 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 ## Phase 3: Database Interaction Layer (Dialect Seam)
 - [x] **Dialect ABC:** `dialects/base.py` — the contract: `connect(dsn, *, read_only)`, `list_tables`, `get_schema`, `sample_rows`, `execute`.
 - [x] **Registry:** `dialects/registry.py` — map DSN scheme → `Dialect`; clear error for an unknown scheme.
-- [x] **Postgres Dialect:** `dialects/postgres.py` — `asyncpg` connection/pool, introspection via `information_schema`.
+- [x] **Postgres Dialect:** `dialects/postgres.py` — `asyncpg` connection/pool, introspection via `information_schema` + `pg_catalog`.
 - [x] **Read-Only Guard:** Inside `PostgresDialect.connect(read_only=True)`, force `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;`. Read-only enforcement is the dialect's own responsibility — it must never leak upward.
 
 ## Phase 4: Safety & Diagnostics

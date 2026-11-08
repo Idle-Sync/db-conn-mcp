@@ -2,12 +2,14 @@
 
 The only module in the project that knows it is talking to PostgreSQL. Read-only is
 enforced natively here via session characteristics; introspection uses
-``information_schema``; identifiers are safely quoted before interpolation (Rule 9).
+``information_schema`` and ``pg_catalog``; identifiers are safely quoted before
+interpolation (Rule 9).
 
 .. note::
    The unit tests exercise query shaping and identifier quoting against a fake
-   connection. A full "read-only really blocks a write" assertion requires a live
-   server and belongs in a Docker-backed integration test (design spec §12).
+   connection. The key queries also run against a live server in
+   ``tests/test_postgres_live.py``, skipped unless ``DB_CONN_MCP_TEST_DSN`` is set. A
+   "read-only really blocks a write" assertion belongs there too (design spec §12).
 """
 
 import asyncio
@@ -64,21 +66,24 @@ _COLUMNS_SQL = """
 """
 
 # Primary- and foreign-key columns for one table, with the FK target as "table.column".
+# confkey is NULL for a PK, so unnest pads its side with NULL.
 _KEYS_SQL = """
-    SELECT kcu.column_name AS column,
-           tc.constraint_type AS constraint_type,
-           CASE WHEN tc.constraint_type = 'FOREIGN KEY'
-                THEN ccu.table_name || '.' || ccu.column_name
+    SELECT a.attname AS column,
+           CASE con.contype WHEN 'p' THEN 'PRIMARY KEY' ELSE 'FOREIGN KEY' END AS constraint_type,
+           CASE WHEN con.contype = 'f'
+                THEN ft.relname || '.' || fa.attname
                 ELSE NULL END AS references
-    FROM information_schema.table_constraints tc
-    JOIN information_schema.key_column_usage kcu
-      ON kcu.constraint_name = tc.constraint_name
-     AND kcu.constraint_schema = tc.constraint_schema
-    LEFT JOIN information_schema.constraint_column_usage ccu
-      ON ccu.constraint_name = tc.constraint_name
-     AND ccu.constraint_schema = tc.constraint_schema
-    WHERE tc.table_name = $1 AND ($2::text IS NULL OR tc.table_schema = $2)
-      AND tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY')
+    FROM pg_constraint con
+    JOIN pg_class t ON t.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    CROSS JOIN LATERAL unnest(con.conkey, con.confkey)
+        WITH ORDINALITY AS k(attnum, referenced_attnum, ordinal)
+    JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+    LEFT JOIN pg_class ft ON ft.oid = con.confrelid
+    LEFT JOIN pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = k.referenced_attnum
+    WHERE t.relname = $1 AND ($2::text IS NULL OR n.nspname = $2)
+      AND con.contype IN ('p', 'f')
+    ORDER BY constraint_type, con.conname, k.ordinal
 """
 
 
@@ -125,23 +130,24 @@ _DB_COLUMNS_SQL = """
 
 #: Every PK/FK column of every base table (FK target as "table.column"), stably ordered.
 _DB_KEYS_SQL = """
-    SELECT tc.table_schema AS schema,
-           tc.table_name   AS table,
-           kcu.column_name AS column,
-           tc.constraint_type AS constraint_type,
-           CASE WHEN tc.constraint_type = 'FOREIGN KEY'
-                THEN ccu.table_name || '.' || ccu.column_name
+    SELECT n.nspname AS schema,
+           t.relname AS table,
+           a.attname AS column,
+           CASE con.contype WHEN 'p' THEN 'PRIMARY KEY' ELSE 'FOREIGN KEY' END AS constraint_type,
+           CASE WHEN con.contype = 'f'
+                THEN ft.relname || '.' || fa.attname
                 ELSE NULL END AS references
-    FROM information_schema.table_constraints tc
-    JOIN information_schema.key_column_usage kcu
-      ON kcu.constraint_name = tc.constraint_name
-     AND kcu.constraint_schema = tc.constraint_schema
-    LEFT JOIN information_schema.constraint_column_usage ccu
-      ON ccu.constraint_name = tc.constraint_name
-     AND ccu.constraint_schema = tc.constraint_schema
-    WHERE tc.table_schema NOT IN ('pg_catalog', 'information_schema')
-      AND tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY')
-    ORDER BY tc.table_schema, tc.table_name, tc.constraint_type, kcu.ordinal_position
+    FROM pg_constraint con
+    JOIN pg_class t ON t.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    CROSS JOIN LATERAL unnest(con.conkey, con.confkey)
+        WITH ORDINALITY AS k(attnum, referenced_attnum, ordinal)
+    JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+    LEFT JOIN pg_class ft ON ft.oid = con.confrelid
+    LEFT JOIN pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = k.referenced_attnum
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND con.contype IN ('p', 'f')
+    ORDER BY n.nspname, t.relname, constraint_type, con.conname, k.ordinal
 """
 
 
