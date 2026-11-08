@@ -422,7 +422,17 @@ GET/POST/PATCH/DELETE /api/databases[/{name}] ─► config.py  (public_view onl
 POST /api/clients/{key}/(un)inject            ─► clients.py (inject_entry / remove_entry)
 ```
 
-A verdict is a fixed vocabulary, never prose to parse: `answers`, `launch_failed`, `handshake_failed`, `tool_call_failed` (the handshake worked but `list_databases` returned an error, carried in `list_databases_error`), `wrong_tool_count` (the run compares against `EXPECTED_TOOL_COUNT = 23`, the same number the smoke test pins), `timeout`, and — HTTP only — `port_in_use`, because the SSE port is not configurable today and a busy port is not a failure. That last verdict is the *guaranteed* one when the dashboard is riding along inside a server started with `--transport http`: the host process itself holds 8000, so the HTTP check cannot get past it until the port becomes configurable. A standalone `db-conn-mcp gui` (or a dashboard hosted by a stdio server) is where that check means something. An error from `list_databases` outranks the tool count unless the tool is absent from `tools/list` and the count is wrong: that is another MCP server answering `Unknown tool`, so the verdict is `wrong_tool_count` and `list_databases_error` still carries its text. Each result also carries the version the spawned server reported in `serverInfo`, and sets `stale` when it differs from the running dashboard's: the "upgraded, but this client still starts the old copy" symptom, now observed per client rather than inferred. (That field only became meaningful once the server stopped advertising the *SDK's* version as its own — see the initialize-handshake fix.)
+A verdict is a fixed vocabulary, never prose to parse: `answers`, `launch_failed`, `handshake_failed`, `tool_call_failed` (the handshake worked but `list_databases` returned an error, carried in `list_databases_error`), `wrong_tool_count` (the run compares against `EXPECTED_TOOL_COUNT = 23`, the same number the smoke test pins), `timeout`, and — HTTP only — `port_in_use`, because the SSE port is not configurable today and a busy port is not a failure. That last verdict is the *guaranteed* one when the dashboard is riding along inside a server started with `--transport http`: the host process itself holds 8000, so the HTTP check cannot get past it until the port becomes configurable. A standalone `db-conn-mcp gui` (or a dashboard hosted by a stdio server) is where that check means something. A failed `list_databases` call (an `isError` result, or a JSON-RPC error the server sends) outranks the tool count unless the tool is absent from `tools/list` and the count is wrong: that is another MCP server answering `Unknown tool`, and `list_databases_error` still carries its text.
+
+| `list_databases` in `tools/list` | tool count | call failed | verdict |
+|---|---|---|---|
+| listed | any | yes | `tool_call_failed` |
+| absent | not 23 | yes | `wrong_tool_count` |
+| absent | 23 | yes | `tool_call_failed` |
+| either | not 23 | no | `wrong_tool_count` |
+| either | 23 | no | `answers` |
+
+The SDK's own `McpError`s, `CONNECTION_CLOSED` (-32000) and the request timeout (408), are not a failed call and keep `handshake_failed`. Each result also carries the version the spawned server reported in `serverInfo`, and sets `stale` when it differs from the running dashboard's: the "upgraded, but this client still starts the old copy" symptom, now observed per client rather than inferred. (That field only became meaningful once the server stopped advertising the *SDK's* version as its own — see the initialize-handshake fix.)
 
 ### The guard stack
 

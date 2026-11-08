@@ -22,6 +22,9 @@ the time of that release.
   shows that server's error (`Unknown tool: list_databases`) as an error, where it used to appear
   under "what list_databases answered". Verify also reads the first block of the `list_databases`
   result that holds text, so a non-text first block no longer hides the text.
+- A launch line that starts another MCP server which rejects `list_databases` with a JSON-RPC
+  error now gets `wrong_tool_count` and shows that server's message, where it used to get
+  `handshake_failed` (#67).
 - `check_sequences` lists every sequence it could not probe under `skipped`, with a `reason` of
   `no_privilege` or `probe_failed`, where it used to drop them: a role that could read no
   sequence got `behind_count: 0` as if the database had been checked (#51).
@@ -70,6 +73,10 @@ the time of that release.
 - **A launch line that starts another MCP server now carries that server's error (`Unknown tool:
   list_databases`) in `list_databases_error`, and `list_databases_text` is empty.** In 0.7.1 the
   text appeared in `list_databases_text`.
+- **A launch line that starts another MCP server which rejects `list_databases` with a JSON-RPC
+  error now reports `wrong_tool_count` instead of `handshake_failed`, and the card shows that
+  server's message; a server that drops the connection mid-call still reads
+  `handshake_failed`.**
 - **Your `check_sequences` result now always carries `skipped` and `skipped_count`; read
   `behind_count: 0` as all clear only when `skipped_count` is 0.** A sequence your role could
   not probe used to vanish from the answer. `total_sequences` still counts only the sequences

@@ -305,7 +305,7 @@ That is the question the dashboard exists to answer, and it answers it with evid
 | `launch_failed` | The command in that client's config could not be started at all (wrong path, moved venv, uninstalled). |
 | `handshake_failed` | The process started but did not speak MCP — a broken or unrelated binary. |
 | `tool_call_failed` | The server started and answered the handshake, but `list_databases` came back as an error, usually a malformed `connections.json`. The card shows the error text. |
-| `wrong_tool_count` | It answered, with a different number of tools than this build ships — usually an older copy, or a launch line that starts another MCP server, whose error for `list_databases` the card shows. |
+| `wrong_tool_count` | It answered, with a different number of tools than this build ships — usually an older copy, or a launch line that starts another MCP server, whose error for `list_databases` the card shows, whether it arrives as a tool error or as a JSON-RPC error (any code the server sends, such as `-32601` or `-32602`). |
 | `timeout` | No complete conversation in time. |
 | `port_in_use` | HTTP check only: something already listens on port 8000. |
 

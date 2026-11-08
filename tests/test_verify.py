@@ -4,9 +4,12 @@ import json
 import socket
 import sys
 from contextlib import asynccontextmanager
+from http import HTTPStatus
 from types import SimpleNamespace
 
 import pytest
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED, METHOD_NOT_FOUND, ErrorData
 
 from db_conn_mcp import __version__, verify
 from db_conn_mcp.verify import EXPECTED_TOOL_COUNT, verify_http, verify_stdio
@@ -62,11 +65,13 @@ async def test_verify_stdio_reports_tool_call_failed_for_a_malformed_config(tmp_
 class _FakeSession:
     """A client session; by default ``list_databases`` fails with no text, on a wrong tool count.
 
-    ``_use_fake_session`` replaces ``tools`` and ``call_result`` for the other shapes.
+    ``_use_fake_session`` replaces ``tools`` and ``call_result`` for the other shapes;
+    ``call_error``, when set, is raised by ``call_tool`` instead.
     """
 
     tools = [SimpleNamespace(name="list_databases")]
     call_result = SimpleNamespace(isError=True, content=[])
+    call_error: McpError | None = None
 
     def __init__(self, *_streams):
         pass
@@ -85,6 +90,8 @@ class _FakeSession:
         return SimpleNamespace(tools=self.tools)
 
     async def call_tool(self, _name, _arguments):
+        if self.call_error is not None:
+            raise self.call_error
         return self.call_result
 
 
@@ -101,9 +108,10 @@ def _tools(count, *, listed):
     return tools
 
 
-def _use_fake_session(monkeypatch, tools, *, is_error, content):
+def _use_fake_session(monkeypatch, tools, *, is_error, content, call_error=None):
     """Point ``verify_stdio`` at a fake session with these tools and this call result."""
     monkeypatch.setattr(_FakeSession, "tools", tools)
+    monkeypatch.setattr(_FakeSession, "call_error", call_error)
     call_result = SimpleNamespace(isError=is_error, content=content)
     monkeypatch.setattr(_FakeSession, "call_result", call_result)
     monkeypatch.setattr(verify, "ClientSession", _FakeSession)
@@ -223,6 +231,110 @@ async def test_verify_stdio_all_empty_text_blocks_give_none(monkeypatch):
     _use_fake_session(monkeypatch, _tools(3, listed=True), is_error=True, content=content)
     result = await verify_stdio("ignored", [])
     assert result["list_databases_error"] is None
+
+
+def _protocol_error(code, message):
+    return McpError(ErrorData(code=code, message=message))
+
+
+UNKNOWN_TOOL = "Unknown tool: list_databases"
+
+
+@pytest.mark.parametrize(
+    ("count", "listed", "verdict"),
+    [
+        (3, False, "wrong_tool_count"),
+        (EXPECTED_TOOL_COUNT + 1, False, "wrong_tool_count"),
+        (EXPECTED_TOOL_COUNT, False, "tool_call_failed"),
+        (3, True, "tool_call_failed"),
+        (EXPECTED_TOOL_COUNT, True, "tool_call_failed"),
+    ],
+)
+async def test_verify_stdio_protocol_error_follows_the_is_error_table(
+    monkeypatch, count, listed, verdict
+):
+    """A JSON-RPC error from list_databases is a failed call, like an isError result (#67)."""
+    error = _protocol_error(-32602, UNKNOWN_TOOL)
+    _use_fake_session(
+        monkeypatch, _tools(count, listed=listed), is_error=False, content=[], call_error=error
+    )
+    result = await verify_stdio("ignored", [])
+    assert result["verdict"] == verdict
+    assert result["list_databases_error"] == UNKNOWN_TOOL
+    assert result["list_databases_text"] is None
+    if verdict == "wrong_tool_count":
+        assert result["detail"] == f"expected {EXPECTED_TOOL_COUNT} tools, got {count}"
+        assert result["suggested_action"].startswith("upgrade")
+
+
+async def test_verify_stdio_method_not_found_protocol_error_is_wrong_tool_count(monkeypatch):
+    """Any code the server sends counts, not only -32602."""
+    message = "Method not found: list_databases"
+    error = _protocol_error(METHOD_NOT_FOUND, message)
+    _use_fake_session(
+        monkeypatch, _tools(3, listed=False), is_error=False, content=[], call_error=error
+    )
+    result = await verify_stdio("ignored", [])
+    assert result["verdict"] == "wrong_tool_count"
+    assert result["list_databases_error"] == message
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _protocol_error(CONNECTION_CLOSED, "Connection closed"),
+        _protocol_error(
+            HTTPStatus.REQUEST_TIMEOUT,
+            "Timed out while waiting for response to CallToolRequest. Waited 5 seconds.",
+        ),
+    ],
+    ids=["connection_closed", "request_timeout"],
+)
+async def test_verify_stdio_sdk_error_stays_handshake_failed(monkeypatch, error):
+    """Errors the SDK client makes itself say nothing about the server's tools."""
+    _use_fake_session(
+        monkeypatch, _tools(3, listed=False), is_error=False, content=[], call_error=error
+    )
+    result = await verify_stdio("ignored", [])
+    assert result["verdict"] == "handshake_failed"
+    assert result["detail"].startswith("process started but MCP failed (")
+    assert result["suggested_action"].startswith("the binary may be broken")
+    assert result["list_databases_error"] is None
+    assert result["list_databases_text"] is None
+
+
+RAW_SERVER = """
+import sys, json
+for line in sys.stdin:
+    message = json.loads(line)
+    if "id" not in message:
+        continue
+    method = message["method"]
+    if method == "initialize":
+        reply = {"result": {
+            "protocolVersion": message["params"]["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "other", "version": "1"},
+        }}
+    elif method == "tools/list":
+        reply = {"result": {"tools": [{"name": "x", "inputSchema": {"type": "object"}}]}}
+    else:
+        reply = {"error": {"code": -32602, "message": "Unknown tool: list_databases"}}
+    print(json.dumps({"jsonrpc": "2.0", "id": message["id"], **reply}), flush=True)
+"""
+
+
+async def test_verify_stdio_raw_stdio_server_rejecting_list_databases(tmp_path):
+    """The real SDK wraps the error in two ExceptionGroups; the fakes cannot show that."""
+    script = tmp_path / "raw.py"
+    script.write_text(RAW_SERVER, encoding="utf-8")
+    result = await verify_stdio(sys.executable, [str(script)], timeout=15.0)
+    assert result["verdict"] == "wrong_tool_count", result["detail"]
+    assert result["tool_count"] == 1
+    assert result["detail"] == f"expected {EXPECTED_TOOL_COUNT} tools, got 1"
+    assert result["server_name"] == "other"
+    assert result["list_databases_error"] == UNKNOWN_TOOL
+    assert result["list_databases_text"] is None
 
 
 async def test_verify_stdio_launch_failed_for_missing_binary(tmp_path):
