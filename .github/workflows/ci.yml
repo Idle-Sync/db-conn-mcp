@@ -69,3 +69,35 @@ jobs:
         run: python -m pip install -e ".[dev,doctor]"
       - name: Run the test suite
         run: python -m pytest -q
+
+  live:
+    name: Live Postgres
+    # The only place the catalog SQL runs against a real server: the fake connection in
+    # test_postgres.py never executes it. -rs prints a skip's reason, so a missing
+    # DB_CONN_MCP_TEST_DSN shows up in the log instead of passing silently.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install the package and its dev extra
+        run: python -m pip install -e ".[dev]"
+      - name: Run the live Postgres tests
+        env:
+          # A throwaway service container; 127.0.0.1, not localhost, so the client
+          # does not try IPv6 first.
+          DB_CONN_MCP_TEST_DSN: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: python -m pytest -q -rs tests/test_postgres_live.py

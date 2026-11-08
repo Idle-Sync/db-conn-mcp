@@ -511,7 +511,7 @@ class Dialect(ABC):
 
 | DB | Read-only mechanism (inside `connect`) | Introspection source |
 |---|---|---|
-| PostgreSQL (v1) | `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` | `information_schema` |
+| PostgreSQL (v1) | `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` | `information_schema` + `pg_catalog` |
 | MySQL (future) | `START TRANSACTION READ ONLY` | `information_schema` |
 | SQLite (future) | open file with `?mode=ro` | `sqlite_master` / `PRAGMA` |
 
