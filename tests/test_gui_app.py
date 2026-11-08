@@ -1052,9 +1052,7 @@ def test_client_route_is_409_when_sidecar_refuses(verb, cfg_client, tmp_path, mo
 
 
 @pytest.mark.parametrize("verb", ["inject", "uninject"])
-def test_client_route_is_500_when_line_cannot_be_written(
-    verb, cfg_client, tmp_path, monkeypatch
-):
+def test_client_route_is_500_when_line_cannot_be_written(verb, cfg_client, tmp_path, monkeypatch):
     client, cfg = cfg_client
     cfg.write_text(json.dumps({"connections": []}), encoding="utf-8")
     args = ["--config", str(cfg)] if verb == "uninject" else None

@@ -132,6 +132,13 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 - [x] **Every front-end:** the CLI (`setup`/`add`/`remove`/`yolo`/`reset`), the dashboard write routes and `set_yolo_mode` pass their source; a line that cannot be written after the change landed leaves the change in effect and is reported (`remove`, `yolo` and `reset` exit 1 saying so; `setup` and `add` say so and continue to the client injection; dashboard 500; `audit_recorded: false`).
 - [x] **Docs (Rule 7):** README (Audit log section), PRD, ARCHITECTURE, `.gitignore`, and CHANGELOG with three **Breaking / Behaviour changes**.
 
+## Phase 6.12: Issue #76 — client injections in the audit log
+> Injecting the server into a client, or removing it, left no record, though it changes what an AI client can reach.
+- [x] **`audit.recording_client_change`:** the shared helper both front ends call; it opens the sidecar of the entry's `connections.json` before the client file is touched and appends one `inject`/`uninject` line (client display name, no changes column) after the write succeeds.
+- [x] **`clients.injected_config_path`:** the `connections.json` an installed entry's `--config` names, read before the entry is removed; `None` for an entry that names none, in which case the uninject goes ahead unrecorded.
+- [x] **Front ends:** the CLI (`setup`/`add`/`clients`) skips a client whose sidecar is refused and prints a line after an unrecorded change, exit code unchanged; the dashboard routes answer 409 and 500 like the database routes.
+- [x] **Docs (Rule 7):** README (Audit log section, `clients` rows), PRD, ARCHITECTURE, and CHANGELOG with one Added and one **Breaking / Behaviour changes** bullet.
+
 ## Phase 7: Future Dialects (Post-v1, Extensibility Payoff)
 > Not part of v1. Listed to prove the seam works — each is a single new file + one registry line, no changes above the dialect layer.
 - [ ] **MySQL:** `dialects/mysql.py` (`aiomysql`/`asyncmy`), `START TRANSACTION READ ONLY`, `information_schema`.

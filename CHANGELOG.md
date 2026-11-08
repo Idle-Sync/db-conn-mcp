@@ -17,6 +17,10 @@ the time of that release.
   per changed connection with the time, the source (`cli`, `gui` or `mcp`), the action (`add`,
   `edit`, `remove` or `reset`), the connection name and the changed fields as `old -> new`. A
   replaced DSN is written as `dsn: (replaced)` (#37).
+- Injecting the server into a client, or removing it, from `setup`, `add`, `clients` or the dashboard
+  appends an `inject` or `uninject` line to `connections.json.audit.log`, beside the
+  `connections.json` the client entry's `--config` names. The line holds the time, the source and
+  the client's display name, never the command or its arguments (#76).
 
 ### Breaking / Behaviour changes
 
@@ -36,6 +40,10 @@ the time of that release.
   (`Could not update <path> (<error type>: <text>); the file is unchanged.`) where `remove` printed
   only the error type before; `reset` and `yolo` no longer traceback; `set_yolo_mode` answers a
   failed write with an error result carrying that line.
+- Injecting or uninjecting a client now appends a line to the audit log beside the
+  `connections.json` the entry points at; if that log cannot be opened, is a link or is not a
+  regular file, the client is skipped and its config left as it was; an uninject whose entry names
+  no `connections.json` goes ahead unrecorded (#76).
 
 ### Fixed
 
