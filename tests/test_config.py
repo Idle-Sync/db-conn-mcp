@@ -434,7 +434,10 @@ def test_symlinked_lock_sidecar_refuses_the_change(tmp_path):
     (tmp_path / "connections.json.lock").symlink_to(absent)
     with pytest.raises(OSError, match="link or not a regular file") as raised, config.locked(path):
         pass
-    assert str(path.resolve().with_name("connections.json.lock")) in str(raised.value)
+    sidecar = path.resolve().with_name("connections.json.lock")
+    assert str(raised.value) == (
+        f"The lock file {sidecar} is a link or not a regular file; replace it with a regular file"
+    )
     assert "u:p@h" not in str(raised.value)
     assert not absent.exists()
 
@@ -561,8 +564,12 @@ def _yolo_flip(path: Path) -> tuple[Config, Config]:
 def _assert_linked_sidecar_refuses_the_change(tmp_path: Path, path: Path, target: Path) -> None:
     before, target_before = path.read_bytes(), target.read_bytes()
     loaded, previous = _yolo_flip(path)
-    with pytest.raises(OSError, match="link or not a regular file"):
+    with pytest.raises(OSError, match="link or not a regular file") as raised:
         config.save(loaded, path, previous=previous, source="cli")
+    sidecar = path.resolve().with_name("connections.json.audit.log")
+    assert str(raised.value) == (
+        f"The audit log {sidecar} is a link or not a regular file; replace it with a regular file"
+    )
     assert target.read_bytes() == target_before
     assert path.read_bytes() == before
     assert list(tmp_path.glob(".connections.json.*.tmp")) == []
