@@ -172,6 +172,10 @@ Order and failure:
   effect and says so: `remove`, `yolo` and `reset` exit 1 saying so; `setup` and `add` say so and
   continue to the client injection; the dashboard answers 500; and `set_yolo_mode` returns
   `persisted: true` with `audit_recorded: false` and a `warning`.
+- A lock file or save that fails (a refused sidecar, a folder that cannot be written): `add`, a
+  first-run `setup`, `remove`, `reset` and `yolo` print one `Could not update <path> (...); the
+  file is unchanged.` line and exit 1; from the `setup` menu the line prints and the menu
+  continues; the dashboard answers 409; `set_yolo_mode` returns an error result with that line.
 - On Windows the link check for the lock file and the audit log runs by path before the open,
   so a link planted between the two calls is followed, and a hard link is not detected.
 

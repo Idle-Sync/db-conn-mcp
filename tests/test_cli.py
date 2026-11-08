@@ -1721,3 +1721,120 @@ def test_add_interactive_whose_audit_line_fails_still_registers_and_says_unrecor
     _assert_reported_as_unrecorded(out)
     assert "Registered 'mydb'" in out
     assert [c.name for c in config.load(str(path)).connections] == ["mydb"]
+
+
+# ---- a config that cannot be read or written is one line, never a traceback ----
+
+_ADD_ANSWERS = ["db", "postgresql://u:SEKRET@h/db", "r", ""]
+
+
+def _could_not_update_lines(out):
+    return [line for line in out.splitlines() if "Could not update" in line]
+
+
+def _assert_one_unchanged_line(out, path):
+    [line] = _could_not_update_lines(out)
+    assert str(path) in line
+    assert line.endswith("the file is unchanged.")
+    assert "Traceback" not in out
+    assert "SEKRET" not in out
+    return line
+
+
+@pytest.mark.parametrize("command", [cli.cmd_add, cli.run_setup_wizard])
+def test_a_directory_config_path_is_one_line_and_exit_1(command, tmp_path, monkeypatch, capsys):
+    directory = tmp_path / "a_directory"
+    directory.mkdir()
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    monkeypatch.setattr(builtins, "input", _scripted_input(_ADD_ANSWERS))
+    assert command(str(directory)) == 1
+    _assert_one_unchanged_line(capsys.readouterr().out, directory)
+
+
+@posix_only
+@pytest.mark.parametrize("command", [cli.cmd_add, cli.run_setup_wizard])
+def test_an_unreadable_config_is_one_line_and_exit_1(command, tmp_path, monkeypatch, capsys):
+    path = _seed_config(tmp_path / "connections.json")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    monkeypatch.setattr(builtins, "input", _scripted_input(_ADD_ANSWERS))
+    path.chmod(0o000)
+    try:
+        assert command(str(path)) == 1
+    finally:
+        path.chmod(0o644)
+    line = _assert_one_unchanged_line(capsys.readouterr().out, path)
+    assert "PermissionError" in line
+
+
+@posix_only
+def test_setup_menu_continues_after_a_refused_add(tmp_path, monkeypatch, capsys):
+    directory = tmp_path / "a_directory"
+    directory.mkdir()
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    answers = ["a", *_ADD_ANSWERS, "q"]
+    remaining = iter(answers)
+
+    def recording_input(prompt=""):
+        return next(remaining)
+
+    monkeypatch.setattr(builtins, "input", recording_input)
+    assert cli._setup_menu(directory) == 0
+    assert list(remaining) == []
+    out = capsys.readouterr().out
+    line = _assert_one_unchanged_line(out, directory)
+    assert "IsADirectoryError" in line
+    assert len(_could_not_update_lines(out)) == 1
+
+
+def _config_with_symlinked_lock(tmp_path):
+    path = _seed_config(tmp_path / "connections.json")
+    target = tmp_path / "elsewhere"
+    target.touch()
+    lock = tmp_path / "connections.json.lock"
+    lock.symlink_to(target)
+    return path, lock
+
+
+def _assert_refused_for_the_lock(out, lock):
+    line = _assert_one_unchanged_line(out, lock)
+    assert "link or not a regular file" in line
+    assert "postgresql://" not in out
+
+
+@posix_only
+def test_add_with_a_symlinked_lock_sidecar_is_refused(tmp_path, monkeypatch, capsys):
+    path, lock = _config_with_symlinked_lock(tmp_path)
+    before = path.read_bytes()
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    monkeypatch.setattr(builtins, "input", _scripted_input(_ADD_ANSWERS))
+    assert cli.cmd_add(str(path)) == 1
+    _assert_refused_for_the_lock(capsys.readouterr().out, lock)
+    assert path.read_bytes() == before
+
+
+@posix_only
+def test_remove_with_a_symlinked_lock_sidecar_names_the_link(tmp_path, capsys):
+    path, lock = _config_with_symlinked_lock(tmp_path)
+    before = path.read_bytes()
+    assert cli.cmd_remove(str(path), "a") == 1
+    _assert_refused_for_the_lock(capsys.readouterr().out, lock)
+    assert path.read_bytes() == before
+
+
+@posix_only
+def test_reset_with_a_symlinked_lock_sidecar_is_refused(tmp_path, monkeypatch, capsys):
+    path, lock = _config_with_symlinked_lock(tmp_path)
+    before = path.read_bytes()
+    monkeypatch.setattr(builtins, "input", _scripted_input(["y"]))
+    assert cli.cmd_reset(str(path)) == 1
+    _assert_refused_for_the_lock(capsys.readouterr().out, lock)
+    assert path.read_bytes() == before
+
+
+@posix_only
+def test_yolo_with_a_symlinked_lock_sidecar_is_refused(tmp_path, capsys):
+    path, lock = _config_with_symlinked_lock(tmp_path)
+    before = path.read_bytes()
+    assert cli.cmd_yolo(str(path), "a", "on") == 1
+    _assert_refused_for_the_lock(capsys.readouterr().out, lock)
+    assert path.read_bytes() == before

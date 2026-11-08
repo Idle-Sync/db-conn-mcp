@@ -785,11 +785,18 @@ class Handlers:
 
         A flag saved without its audit line is still in effect, so it is reported as
         persisted, with ``audit_recorded: False`` and a ``warning``, rather than raised.
+        An ``OSError`` from the lock or the save is raised as one line saying the file
+        is unchanged.
         """
         try:
             await asyncio.to_thread(
                 config.set_yolo, self.config_path, database, enabled, source="mcp"
             )
+        except OSError as exc:
+            raise OSError(
+                f"Could not update {self.config_path} "
+                f"({type(exc).__name__}: {exc}); the file is unchanged."
+            ) from exc
         except audit.UnrecordedChangeError as exc:
             return {
                 "database": database,
