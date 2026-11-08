@@ -22,12 +22,22 @@ from .clients import ClientSpec, injected_launch
 EXPECTED_TOOL_COUNT = 23
 
 Verdict = Literal[
-    "answers", "launch_failed", "handshake_failed", "wrong_tool_count", "timeout", "port_in_use"
+    "answers",
+    "launch_failed",
+    "handshake_failed",
+    "tool_call_failed",
+    "wrong_tool_count",
+    "timeout",
+    "port_in_use",
 ]
 
 
 class VerifyResult(TypedDict):
-    """One verification outcome, in the fixed vocabulary the GUI may render (Rule 6)."""
+    """One verification outcome, in the fixed vocabulary the GUI may render (Rule 6).
+
+    ``list_databases_text`` holds the database list and nothing else; when the call
+    returned an error, its text goes in ``list_databases_error``, whatever the verdict.
+    """
 
     verdict: Verdict
     detail: str
@@ -41,6 +51,7 @@ class VerifyResult(TypedDict):
     tool_count: int | None
     instructions: str | None
     list_databases_text: str | None
+    list_databases_error: str | None
 
 
 def _base(command: str, args: list[str]) -> VerifyResult:
@@ -58,6 +69,7 @@ def _base(command: str, args: list[str]) -> VerifyResult:
         "tool_count": None,
         "instructions": None,
         "list_databases_text": None,
+        "list_databases_error": None,
     }
 
 
@@ -67,6 +79,8 @@ async def verify_stdio(command: str, args: list[str], timeout: float = 20.0) -> 
     Every step shares one hard timeout so a hung binary cannot wedge the caller.
     """
     result = _base(command, args)
+    dbs_failed = False
+    list_databases_listed = False
     try:
         async with asyncio.timeout(timeout):
             params = StdioServerParameters(command=command, args=list(args))
@@ -81,9 +95,16 @@ async def verify_stdio(command: str, args: list[str], timeout: float = 20.0) -> 
                 result["stale"] = init.serverInfo.version != __version__
                 tools = await session.list_tools()
                 result["tool_count"] = len(tools.tools)
+                list_databases_listed = any(tool.name == "list_databases" for tool in tools.tools)
                 dbs = await session.call_tool("list_databases", {})
-                if dbs.content and hasattr(dbs.content[0], "text"):
-                    result["list_databases_text"] = dbs.content[0].text
+                first_text = next(
+                    (block.text for block in dbs.content if getattr(block, "text", None)), None
+                )
+                dbs_failed = dbs.isError
+                if dbs_failed:
+                    result["list_databases_error"] = first_text
+                else:
+                    result["list_databases_text"] = first_text
     except TimeoutError:
         result["verdict"] = "timeout"
         result["detail"] = f"no complete MCP conversation within {timeout:.0f}s"
@@ -98,6 +119,16 @@ async def verify_stdio(command: str, args: list[str], timeout: float = 20.0) -> 
         result["verdict"] = "handshake_failed"
         result["detail"] = f"process started but MCP failed ({type(exc).__name__})"
         result["suggested_action"] = "the binary may be broken or not db-conn-mcp; reinstall"
+        return result
+    # No list_databases and the wrong count is another MCP server: its "Unknown tool" error
+    # says nothing about connections.json, so the count check below names the cause.
+    other_server = not list_databases_listed and result["tool_count"] != EXPECTED_TOOL_COUNT
+    if dbs_failed and not other_server:
+        result["verdict"] = "tool_call_failed"
+        result["detail"] = "handshake and tools/list answered, but list_databases returned an error"
+        result["suggested_action"] = (
+            "fix the connections.json this launch line reads, then verify again"
+        )
         return result
     if result["tool_count"] != EXPECTED_TOOL_COUNT:
         result["verdict"] = "wrong_tool_count"
