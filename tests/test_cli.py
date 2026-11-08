@@ -600,6 +600,9 @@ def test_cmd_clients_injects_selected(tmp_path, monkeypatch):
     assert rc == 0
     data = json.loads(client_cfg.read_text(encoding="utf-8"))
     assert "db-conn-mcp" in data["mcpServers"]
+    # The bare four columns: the launch command, its --config and the DSN stay out.
+    add_line, inject_line = _audit_lines(config.repo_config_path())
+    assert re.fullmatch(r'\S+\tcli\tinject\t"Claude Desktop"', inject_line)
 
 
 # ---- uninject (clients --remove) ---------------------------------------------
@@ -628,6 +631,46 @@ def test_cmd_clients_remove_uninjects(tmp_path, monkeypatch):
     data = json.loads(client_cfg.read_text(encoding="utf-8"))
     assert "db-conn-mcp" not in data["mcpServers"]
     assert "keep" in data["mcpServers"]
+
+
+def test_cmd_clients_remove_without_config_records_nothing(tmp_path, monkeypatch, capsys):
+    """An entry naming no connections.json has no sidecar to record in, and says so."""
+    client_cfg = tmp_path / "claude.json"
+    client_cfg.write_text(
+        json.dumps({"mcpServers": {"db-conn-mcp": {"command": "x"}, "keep": {}}}), encoding="utf-8"
+    )
+    fake = cli.ClientSpec("claude", "Claude Desktop", client_cfg, "mcpServers")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [fake])
+    monkeypatch.setattr(builtins, "input", _scripted_input(["1"]))
+    assert cli.cmd_clients(remove=True) == 0
+    assert "db-conn-mcp" not in json.loads(client_cfg.read_text(encoding="utf-8"))["mcpServers"]
+    expected = (
+        "  Removed from Claude Desktop config; its entry named no connections.json, "
+        "so nothing was recorded."
+    )
+    assert expected in capsys.readouterr().out.splitlines()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["claude.json"]
+
+
+def _client_injected_with(tmp_path, config_path):
+    """A Claude Desktop config whose db-conn-mcp entry launches with ``--config config_path``."""
+    client_cfg = tmp_path / "claude.json"
+    entry = {"command": "/opt/bin/db-conn-mcp", "args": ["--config", str(config_path)]}
+    client_cfg.write_text(json.dumps({"mcpServers": {"db-conn-mcp": entry}}), encoding="utf-8")
+    return cli.ClientSpec("claude", "Claude Desktop", client_cfg, "mcpServers")
+
+
+def test_cmd_clients_remove_records_uninject_in_the_named_config(tmp_path, monkeypatch, capsys):
+    path = _seed_config(tmp_path / "connections.json")
+    fake = _client_injected_with(tmp_path, path)
+    monkeypatch.setattr(cli, "detected_clients", lambda: [fake])
+    monkeypatch.setattr(builtins, "input", _scripted_input(["1"]))
+    assert cli.cmd_clients(remove=True) == 0
+    assert json.loads(fake.path.read_text(encoding="utf-8"))["mcpServers"] == {}
+    assert "  Removed from Claude Desktop config." in capsys.readouterr().out.splitlines()
+    # The bare four columns: the launch command, its --config and the DSN stay out.
+    [line] = _audit_lines(path)
+    assert re.fullmatch(r'\S+\tcli\tuninject\t"Claude Desktop"', line)
 
 
 def test_cmd_clients_remove_when_none_injected(tmp_path, monkeypatch, capsys):
@@ -986,7 +1029,7 @@ def test_inject_refuses_to_clobber_unparseable_config(tmp_path, capsys):
     original = '{ "mcpServers": { "other": '  # truncated on purpose
     cfg.write_text(original, encoding="utf-8")
     spec = cli.ClientSpec("broken", "Broken Client", cfg, "mcpServers")
-    cli._inject_into_client(spec, "db-conn-mcp", ["--config", "x"])
+    cli._inject_into_client(spec, tmp_path / "connections.json", "db-conn-mcp", ["--config", "x"])
     assert cfg.read_text(encoding="utf-8") == original
     out = capsys.readouterr().out
     assert "Broken Client" in out
@@ -1008,7 +1051,7 @@ def test_inject_refuses_to_clobber_a_non_mapping_top_level(tmp_path, capsys):
     original = '["secret-token-abc123"]'
     cfg.write_text(original, encoding="utf-8")
     spec = cli.ClientSpec("broken", "Broken Client", cfg, "mcpServers")
-    cli._inject_into_client(spec, "db-conn-mcp", ["--config", "x"])
+    cli._inject_into_client(spec, tmp_path / "connections.json", "db-conn-mcp", ["--config", "x"])
     assert cfg.read_text(encoding="utf-8") == original
     out = capsys.readouterr().out
     assert "Broken Client" in out
@@ -1649,6 +1692,33 @@ def test_add_interactive_writes_an_audit_line_with_the_prompted_mode(tmp_path, m
     assert line.endswith('\tcli\tadd\t"mydb"\tmode: "write", yolo: false, fallback_ports: null')
 
 
+def _fake_claude_desktop(tmp_path, monkeypatch):
+    """Detect one empty Claude Desktop config in ``tmp_path``, the only client offered."""
+    client_cfg = tmp_path / "claude.json"
+    client_cfg.write_text("{}", encoding="utf-8")
+    fake = cli.ClientSpec("claude", "Claude Desktop", client_cfg, "mcpServers")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [fake])
+    return fake
+
+
+@pytest.mark.parametrize(
+    "run",
+    [lambda p: cli.run_setup_wizard(p), lambda p: cli.cmd_add(p)],
+    ids=["setup", "add"],
+)
+def test_add_interactive_records_add_then_inject(run, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "connections.json"
+    _fake_claude_desktop(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        builtins, "input", _scripted_input(["mydb", "postgresql://h/db", "r", "", "1"])
+    )
+    assert run(str(path)) == 0
+    add_line, inject_line = _audit_lines(path)
+    assert add_line.split("\t")[1:4] == ["cli", "add", '"mydb"']
+    assert re.fullmatch(r'\S+\tcli\tinject\t"Claude Desktop"', inject_line)
+
+
 def _no_space_left(fd, data):
     raise OSError(errno.ENOSPC, "No space left on device")
 
@@ -1721,6 +1791,36 @@ def test_add_interactive_whose_audit_line_fails_still_registers_and_says_unrecor
     _assert_reported_as_unrecorded(out)
     assert "Registered 'mydb'" in out
     assert [c.name for c in config.load(str(path)).connections] == ["mydb"]
+
+
+def _assert_unrecorded_after(out, success_line):
+    """The success line, then the unrecorded report on the very next line."""
+    lines = out.splitlines()
+    position = lines.index(success_line)
+    assert lines[position + 1].startswith("  The configuration was changed")
+    _assert_reported_as_unrecorded(lines[position + 1])
+
+
+def test_cmd_clients_inject_unrecorded_says_so(tmp_path, monkeypatch, capsys):
+    """The client file is already replaced when the append fails, so it reads as updated."""
+    path = _seed_config(tmp_path / "connections.json")
+    fake = _fake_claude_desktop(tmp_path, monkeypatch)
+    monkeypatch.setattr(builtins, "input", _scripted_input(["1"]))
+    monkeypatch.setattr(audit.os, "write", _no_space_left)
+    assert cli.cmd_clients(str(path)) == 0
+    assert "db-conn-mcp" in json.loads(fake.path.read_text(encoding="utf-8"))["mcpServers"]
+    _assert_unrecorded_after(capsys.readouterr().out, "  Updated Claude Desktop config.")
+
+
+def test_cmd_clients_remove_unrecorded_says_so(tmp_path, monkeypatch, capsys):
+    path = _seed_config(tmp_path / "connections.json")
+    fake = _client_injected_with(tmp_path, path)
+    monkeypatch.setattr(cli, "detected_clients", lambda: [fake])
+    monkeypatch.setattr(builtins, "input", _scripted_input(["1"]))
+    monkeypatch.setattr(audit.os, "write", _no_space_left)
+    assert cli.cmd_clients(remove=True) == 0
+    assert json.loads(fake.path.read_text(encoding="utf-8"))["mcpServers"] == {}
+    _assert_unrecorded_after(capsys.readouterr().out, "  Removed from Claude Desktop config.")
 
 
 # ---- a config that cannot be read or written is one line, never a traceback ----
@@ -1838,3 +1938,48 @@ def test_yolo_with_a_symlinked_lock_sidecar_is_refused(tmp_path, capsys):
     assert cli.cmd_yolo(str(path), "a", "on") == 1
     _assert_refused_for_the_lock(capsys.readouterr().out, lock)
     assert path.read_bytes() == before
+
+
+# ---- an audit sidecar that refuses skips the client, before its file is touched ----
+
+_FIX_BY_HAND = "    Fix the problem above by hand, then re-run `db-conn-mcp clients`."
+
+
+def test_cmd_clients_skips_client_when_sidecar_refuses(tmp_path, monkeypatch, capsys):
+    path = _seed_config(tmp_path / "connections.json")
+    audit.audit_path(path).mkdir()
+    fake = _fake_claude_desktop(tmp_path, monkeypatch)
+    before = fake.path.read_bytes()
+    monkeypatch.setattr(builtins, "input", _scripted_input(["1"]))
+    assert cli.cmd_clients(str(path)) == 0
+    lines = capsys.readouterr().out.splitlines()
+    [skipped] = [line for line in lines if line.startswith("  Skipped Claude Desktop: ")]
+    assert skipped.startswith(f"  Skipped Claude Desktop: Could not update {fake.path} (")
+    assert skipped.endswith("; the file is unchanged.")
+    assert lines[lines.index(skipped) + 1] == _FIX_BY_HAND
+    assert fake.path.read_bytes() == before
+
+
+def test_add_saves_connection_when_inject_sidecar_refuses(tmp_path, monkeypatch, capsys):
+    """The connection is saved first: the refusal must not read as "connections.json unchanged"."""
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "connections.json"
+    fake = _fake_claude_desktop(tmp_path, monkeypatch)
+    real_server_launch = cli.server_launch
+
+    def launch_after_breaking_the_sidecar(config_path):
+        # After the save appended its add line, before the injection loop opens the sidecar.
+        sidecar = audit.audit_path(config_path)
+        sidecar.unlink()
+        sidecar.mkdir()
+        return real_server_launch(config_path)
+
+    monkeypatch.setattr(cli, "server_launch", launch_after_breaking_the_sidecar)
+    monkeypatch.setattr(builtins, "input", _scripted_input([*_ADD_ANSWERS, "1"]))
+    assert cli.cmd_add(str(path)) == 0
+    out = capsys.readouterr().out
+    assert "Registered 'db'" in out
+    assert [c.name for c in config.load(str(path)).connections] == ["db"]
+    _assert_one_unchanged_line(out, fake.path)
+    skipped = [line for line in out.splitlines() if line.lstrip().startswith("Skipped Claude")]
+    assert len(skipped) == 1
