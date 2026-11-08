@@ -134,7 +134,9 @@ def save(config: Config, path: Path, *, previous: Config, source: audit.Source) 
 
     Each connection that differs from ``previous`` gets one line in the audit sidecar,
     tagged with ``source``. The sidecar is opened before the config is written, so a
-    change that cannot be recorded is not made either.
+    sidecar that cannot be opened raises ``OSError`` with the config untouched. An append
+    or close that fails after the write raises :class:`audit.UnrecordedChangeError`, with
+    the change in effect.
     """
     lines = [
         audit.line(source, action, name, changes)

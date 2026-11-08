@@ -10,9 +10,9 @@ the MCP protocol. A sidecar that cannot be opened raises ``OSError`` to the call
 which then makes no change. So does a sidecar that is a link: a cloned repo can commit
 ``connections.json.audit.log`` as a symlink to a shell profile, and every config
 change would then append to that file. The open does not wait on a FIFO with no
-reader: it fails at once, so the config lock is never held behind it. An append that
-fails after the config was written raises :class:`UnrecordedChangeError`, not
-``OSError``, so no caller reports such a change as not made.
+reader: it fails at once, so the config lock is never held behind it. An append or a
+close that fails after the config was written raises :class:`UnrecordedChangeError`,
+not ``OSError``, so no caller reports such a change as not made.
 """
 
 import contextlib
@@ -40,7 +40,7 @@ _NO_FOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
 class UnrecordedChangeError(Exception):
-    """The change to ``connections.json`` was made, but its audit line was not appended.
+    """The configuration change was made, but its audit line was not appended.
 
     Not an ``OSError``: callers answer an ``OSError`` with "the file is unchanged".
     """
@@ -139,9 +139,8 @@ def _open_own_file(sidecar: Path) -> int:
 def _unrecorded(sidecar: Path, reason: str) -> UnrecordedChangeError:
     """The error for a change made without its audit line; names no DSN."""
     return UnrecordedChangeError(
-        f"The change to connections.json is in effect and unrecorded: its line could not "
-        f"be appended to the audit log {sidecar} ({reason}). "
-        "Check that the disk has space and the file is writable."
+        f"The configuration was changed, but its audit line could not be appended to {sidecar} "
+        f"({reason}). The change is in effect and unrecorded."
     )
 
 
@@ -153,7 +152,7 @@ def _append(fd: int, sidecar: Path, lines: list[str]) -> None:
     except OSError as exc:
         raise _unrecorded(sidecar, type(exc).__name__) from None
     if written < len(data):
-        raise _unrecorded(sidecar, "short write")
+        raise _unrecorded(sidecar, f"short write: {written} of {len(data)} bytes")
 
 
 @contextlib.contextmanager
@@ -171,5 +170,12 @@ def appending(sidecar: Path, lines: list[str]) -> Iterator[None]:
     try:
         yield
         _append(fd, sidecar, lines)
-    finally:
+    except BaseException:
+        with contextlib.suppress(OSError):  # the error in flight is the one to report
+            os.close(fd)
+        raise
+    try:
         os.close(fd)
+    except OSError as exc:
+        # NFS reports a deferred write error here, after the config was replaced.
+        raise _unrecorded(sidecar, type(exc).__name__) from None
