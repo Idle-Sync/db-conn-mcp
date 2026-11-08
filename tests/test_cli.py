@@ -7,6 +7,7 @@ driving it with scripted ``input``.
 
 import builtins
 import contextlib
+import errno
 import io
 import json
 import re
@@ -1646,3 +1647,77 @@ def test_add_interactive_writes_an_audit_line_with_the_prompted_mode(tmp_path, m
     assert cli._add_connection_interactive(path) is True
     [line] = _audit_lines(path)
     assert line.endswith('\tcli\tadd\t"mydb"\tmode: "write", yolo: false, fallback_ports: null')
+
+
+def _no_space_left(fd, data):
+    raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def _seed_two_connections(path):
+    """Written as JSON directly, as ``_seed_config`` does, so the sidecar has no lines."""
+    path.write_text(
+        json.dumps(
+            {
+                "connections": [
+                    {"name": "a", "dsn": "postgresql://u:SEKRET@h/a", "mode": "write"},
+                    {"name": "b", "dsn": "postgresql://u:SEKRET@h/b", "mode": "read"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _assert_reported_as_unrecorded(out):
+    assert "unchanged" not in out
+    assert "in effect and unrecorded" in out
+    assert "SEKRET" not in out
+    assert "@h" not in out
+
+
+def test_cmd_remove_whose_audit_line_fails_says_unrecorded_not_unchanged(
+    tmp_path, monkeypatch, capsys
+):
+    """The config is already replaced when the append fails: "unchanged" would be a lie."""
+    path = _seed_two_connections(tmp_path / "connections.json")
+    monkeypatch.setattr(audit.os, "write", _no_space_left)
+    assert cli.cmd_remove(str(path), "a") == 1
+    _assert_reported_as_unrecorded(capsys.readouterr().out)
+    assert [c.name for c in config.load(str(path)).connections] == ["b"]
+    assert audit.audit_path(path).read_bytes() == b""
+
+
+def test_cmd_yolo_whose_audit_line_fails_says_unrecorded(tmp_path, monkeypatch, capsys):
+    """Yolo skips the consent prompt, so a flip that went through must not read as refused."""
+    path = _seed_two_connections(tmp_path / "connections.json")
+    monkeypatch.setattr(audit.os, "write", _no_space_left)
+    assert cli.cmd_yolo(str(path), "a", "on") == 1
+    _assert_reported_as_unrecorded(capsys.readouterr().out)
+    assert config.get(config.load(str(path)), "a").yolo is True
+
+
+def test_cmd_reset_whose_audit_line_fails_says_unrecorded(tmp_path, monkeypatch, capsys):
+    path = _seed_two_connections(tmp_path / "connections.json")
+    monkeypatch.setattr(builtins, "input", _scripted_input(["y"]))
+    monkeypatch.setattr(audit.os, "write", _no_space_left)
+    assert cli.cmd_reset(str(path)) == 1
+    _assert_reported_as_unrecorded(capsys.readouterr().out)
+    assert not path.exists()
+
+
+def test_add_interactive_whose_audit_line_fails_still_registers_and_says_unrecorded(
+    tmp_path, monkeypatch, capsys
+):
+    """The connection is saved, so the add still counts and its client injection still runs."""
+    path = tmp_path / "connections.json"
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    monkeypatch.setattr(
+        builtins, "input", _scripted_input(["mydb", "postgresql://u:SEKRET@h/db", "r", ""])
+    )
+    monkeypatch.setattr(audit.os, "write", _no_space_left)
+    assert cli._add_connection_interactive(path) is True
+    out = capsys.readouterr().out
+    _assert_reported_as_unrecorded(out)
+    assert "Registered 'mydb'" in out
+    assert [c.name for c in config.load(str(path)).connections] == ["mydb"]

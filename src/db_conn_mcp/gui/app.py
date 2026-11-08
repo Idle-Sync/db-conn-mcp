@@ -33,6 +33,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from .. import __version__
+from .. import audit as audit_mod
 from .. import clients as clients_mod
 from .. import config as config_mod
 from ..dialects.registry import dialect_for
@@ -206,6 +207,14 @@ def _unusable_config_file() -> JSONResponse:
     """The fixed 409 for a config file or folder the OS refused — no path echo."""
     return JSONResponse(
         {"error": "the configuration could not be read or written"}, status_code=409
+    )
+
+
+def _unrecorded_change() -> JSONResponse:
+    """The fixed 500 for a change that was saved but not logged — no path echo."""
+    return JSONResponse(
+        {"error": "the configuration was changed, but its audit line could not be written"},
+        status_code=500,
     )
 
 
@@ -562,6 +571,8 @@ def create_app(
                 refusal = await asyncio.to_thread(_write)
             except OSError:
                 return _unusable_config_file()
+            except audit_mod.UnrecordedChangeError:
+                return _unrecorded_change()
         if refusal is not None:
             return refusal
         return JSONResponse(parsed.public_view(), status_code=201)
@@ -600,6 +611,8 @@ def create_app(
                 parsed = await asyncio.to_thread(_write)
             except OSError:
                 return _unusable_config_file()
+            except audit_mod.UnrecordedChangeError:
+                return _unrecorded_change()
         if isinstance(parsed, JSONResponse):
             return parsed
         return JSONResponse(parsed.public_view())
@@ -629,6 +642,8 @@ def create_app(
                 refusal = await asyncio.to_thread(_write)
             except OSError:
                 return _unusable_config_file()
+            except audit_mod.UnrecordedChangeError:
+                return _unrecorded_change()
         if refusal is not None:
             return refusal
         return JSONResponse({"removed": name})

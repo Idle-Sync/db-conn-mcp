@@ -9,7 +9,10 @@ Nothing here writes to the terminal: under the stdio transport, standard output 
 the MCP protocol. A sidecar that cannot be opened raises ``OSError`` to the caller,
 which then makes no change. So does a sidecar that is a link: a cloned repo can commit
 ``connections.json.audit.log`` as a symlink to a shell profile, and every config
-change would then append to that file.
+change would then append to that file. The open does not wait on a FIFO with no
+reader: it fails at once, so the config lock is never held behind it. An append that
+fails after the config was written raises :class:`UnrecordedChangeError`, not
+``OSError``, so no caller reports such a change as not made.
 """
 
 import contextlib
@@ -34,6 +37,13 @@ _DSN_MARKERS = ("://", "@", "=")
 
 #: ``0`` on Windows, which has no ``O_NOFOLLOW``; the link is checked by path there instead.
 _NO_FOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+class UnrecordedChangeError(Exception):
+    """The change to ``connections.json`` was made, but its audit line was not appended.
+
+    Not an ``OSError``: callers answer an ``OSError`` with "the file is unchanged".
+    """
 
 
 def audit_path(config_path: Path) -> Path:
@@ -114,6 +124,8 @@ def _open_own_file(sidecar: Path) -> int:
     if not _NO_FOLLOW and os.path.islink(sidecar):
         raise _not_a_plain_file(sidecar)
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0) | _NO_FOLLOW
+    # A FIFO with no reader then fails with ENXIO instead of blocking under the config lock.
+    flags |= getattr(os, "O_NONBLOCK", 0)
     fd = os.open(sidecar, flags, 0o600)
     status = os.fstat(fd)
     # A hard link shares the target's inode, so it is the symlink attack without a link.
@@ -122,6 +134,26 @@ def _open_own_file(sidecar: Path) -> int:
         os.close(fd)
         raise _not_a_plain_file(sidecar)
     return fd
+
+
+def _unrecorded(sidecar: Path, reason: str) -> UnrecordedChangeError:
+    """The error for a change made without its audit line; names no DSN."""
+    return UnrecordedChangeError(
+        f"The change to connections.json is in effect and unrecorded: its line could not "
+        f"be appended to the audit log {sidecar} ({reason}). "
+        "Check that the disk has space and the file is writable."
+    )
+
+
+def _append(fd: int, sidecar: Path, lines: list[str]) -> None:
+    """Write ``lines`` to the open sidecar in one call, or raise :class:`UnrecordedChangeError`."""
+    data = "".join(lines).encode("utf-8")
+    try:
+        written = os.write(fd, data)
+    except OSError as exc:
+        raise _unrecorded(sidecar, type(exc).__name__) from None
+    if written < len(data):
+        raise _unrecorded(sidecar, "short write")
 
 
 @contextlib.contextmanager
@@ -138,6 +170,6 @@ def appending(sidecar: Path, lines: list[str]) -> Iterator[None]:
     fd = _open_own_file(sidecar)
     try:
         yield
-        os.write(fd, "".join(lines).encode("utf-8"))
+        _append(fd, sidecar, lines)
     finally:
         os.close(fd)

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from . import config, diagnostics, safety
+from . import audit, config, diagnostics, safety
 from .dialects.registry import dialect_for
 
 #: Most cursors an agent may hold open at once (each pins a DB connection).
@@ -781,8 +781,23 @@ class Handlers:
     # ---- Configuration tool --------------------------------------------------
 
     async def set_yolo_mode(self, database: str, enabled: bool) -> dict:
-        """Persist the ``yolo`` flag for one database to ``connections.json``."""
-        await asyncio.to_thread(config.set_yolo, self.config_path, database, enabled, source="mcp")
+        """Persist the ``yolo`` flag for one database to ``connections.json``.
+
+        A flag saved without its audit line is still in effect, so it is reported as
+        persisted, with ``audit_recorded: False`` and a ``warning``, rather than raised.
+        """
+        try:
+            await asyncio.to_thread(
+                config.set_yolo, self.config_path, database, enabled, source="mcp"
+            )
+        except audit.UnrecordedChangeError as exc:
+            return {
+                "database": database,
+                "yolo": enabled,
+                "persisted": True,
+                "audit_recorded": False,
+                "warning": str(exc),
+            }
         return {"database": database, "yolo": enabled, "persisted": True}
 
     # ---- Diagnostics tool ----------------------------------------------------

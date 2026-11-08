@@ -336,6 +336,8 @@ def _add_connection_interactive(path: Path) -> bool:
     except ValueError as exc:
         print(f"Could not add: {exc}")
         return False
+    except audit.UnrecordedChangeError as exc:
+        print(exc)  # the connection is saved, so registration carries on
     # Echo only the name — never the DSN (Rule 6).
     print(f"Registered {name!r} ({mode_name}) -> {path}")
     command, args = server_launch(path)
@@ -619,6 +621,9 @@ def cmd_remove(config_arg: str | None, name: str) -> int:
     except OSError as exc:
         print(f"Could not update {path} ({type(exc).__name__}); the file is unchanged.")
         return 1
+    except audit.UnrecordedChangeError as exc:
+        print(exc)
+        return 1
     print(f"Removed {name!r} from {path}.")
     return 0
 
@@ -641,8 +646,12 @@ def cmd_reset(config_arg: str | None = None) -> int:
     # longer resolves to the target the sidecar sits beside.
     sidecar = audit.audit_path(path)
     reset_line = audit.line("cli", "reset", None)
-    with config.locked(path), audit.appending(sidecar, [reset_line]):
-        path.unlink()
+    try:
+        with config.locked(path), audit.appending(sidecar, [reset_line]):
+            path.unlink()
+    except audit.UnrecordedChangeError as exc:
+        print(exc)
+        return 1
     print(f"Removed all connections (deleted {path}). Run `db-conn-mcp setup` to start fresh.")
     return 0
 
@@ -657,6 +666,9 @@ def cmd_yolo(config_arg: str | None, name: str, state: str) -> int:
     try:
         updated = config.set_yolo(path, name, enabled, source="cli")
     except config.ConfigError as exc:
+        print(exc)
+        return 1
+    except audit.UnrecordedChangeError as exc:
         print(exc)
         return 1
     print(f"Set yolo={'on' if enabled else 'off'} for {name!r} (persisted to {path}).")

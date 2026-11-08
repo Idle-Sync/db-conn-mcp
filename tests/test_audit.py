@@ -1,5 +1,6 @@
 """Tests for the audit sidecar: what a change is recorded as, and how the line is written."""
 
+import errno
 import json
 import os
 import re
@@ -168,6 +169,43 @@ def test_appending_writes_nothing_when_the_body_fails(tmp_path):
     with pytest.raises(OSError), audit.appending(sidecar, ["one\n"]):
         raise OSError("the config write failed")
     assert sidecar.read_bytes() == b""
+
+
+@posix_only
+def test_appending_whose_write_fails_raises_unrecorded_not_oserror(tmp_path, monkeypatch):
+    """The body already made the change, so an ``OSError`` here would read as "unchanged"."""
+    sidecar = tmp_path / "connections.json.audit.log"
+
+    def no_space_left(fd, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(audit.os, "write", no_space_left)
+    open_before = len(os.listdir("/dev/fd"))
+    with pytest.raises(audit.UnrecordedChangeError) as caught, audit.appending(sidecar, ["one\n"]):
+        pass
+    assert not isinstance(caught.value, OSError)
+    message = str(caught.value)
+    assert "in effect and unrecorded" in message
+    assert "OSError" in message
+    assert str(sidecar) in message
+    assert len(os.listdir("/dev/fd")) == open_before
+
+
+@posix_only
+def test_appending_whose_short_write_drops_bytes_raises_unrecorded(tmp_path, monkeypatch):
+    """A partial line is no record either, and ``os.write`` reports it without raising."""
+    sidecar = tmp_path / "connections.json.audit.log"
+    real_write = os.write
+
+    def one_byte_short(fd, data):
+        return real_write(fd, data[:-1])
+
+    monkeypatch.setattr(audit.os, "write", one_byte_short)
+    open_before = len(os.listdir("/dev/fd"))
+    short_write = pytest.raises(audit.UnrecordedChangeError, match="short write")
+    with short_write, audit.appending(sidecar, ["one\n"]):
+        pass
+    assert len(os.listdir("/dev/fd")) == open_before
 
 
 @posix_only
