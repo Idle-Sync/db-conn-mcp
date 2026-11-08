@@ -7,6 +7,7 @@ as sanitized diagnostics.
 """
 
 import asyncio
+import errno
 import json
 import sys
 import time
@@ -18,8 +19,8 @@ from asyncpg.types import Attribute, Type
 from mcp import types
 from mcp.types import TextContent
 
+from db_conn_mcp import audit, guard, server
 from db_conn_mcp import clients as clients_mod
-from db_conn_mcp import guard, server
 from db_conn_mcp import handlers as handlers_mod
 from db_conn_mcp.dialects.postgres import PostgresDialect
 from db_conn_mcp.handlers import Handlers
@@ -512,7 +513,8 @@ async def test_write_yolo_runs_without_consent(cfg_path, monkeypatch):
 
 async def test_set_yolo_mode_persists(cfg_path):
     h = Handlers(cfg_path)
-    await h.set_yolo_mode("dev", True)
+    result = await h.set_yolo_mode("dev", True)
+    assert result == {"database": "dev", "yolo": True, "persisted": True}
     reloaded = json.loads(cfg_path.read_text(encoding="utf-8"))
     dev = next(c for c in reloaded["connections"] if c["name"] == "dev")
     assert dev["yolo"] is True
@@ -540,6 +542,27 @@ async def test_set_yolo_mode_saves_off_the_event_loop(cfg_path, monkeypatch):
     monkeypatch.setattr(atomic_write.os, "replace", probed_replace)
     await Handlers(cfg_path).set_yolo_mode("dev", True)
     assert fired
+    reloaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+    dev = next(c for c in reloaded["connections"] if c["name"] == "dev")
+    assert dev["yolo"] is True
+
+
+async def test_set_yolo_mode_whose_audit_line_fails_reports_persisted_and_unrecorded(
+    cfg_path, monkeypatch
+):
+    """Yolo is on once the file is written: raising would let the agent think it is off."""
+
+    def no_space_left(fd, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(audit.os, "write", no_space_left)
+    result = await Handlers(cfg_path).set_yolo_mode("dev", True)
+    assert result["persisted"] is True
+    assert result["audit_recorded"] is False
+    assert result["yolo"] is True
+    assert "in effect and unrecorded" in result["warning"]
+    assert "SECRET" not in result["warning"]
+    assert "@" not in result["warning"]
     reloaded = json.loads(cfg_path.read_text(encoding="utf-8"))
     dev = next(c for c in reloaded["connections"] if c["name"] == "dev")
     assert dev["yolo"] is True

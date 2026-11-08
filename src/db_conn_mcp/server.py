@@ -542,7 +542,8 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         """Enable/disable yolo (skip the write-consent prompt) for one database, persisted.
 
         A call cancelled while the write was in progress may still have been applied;
-        list_databases shows the stored value.
+        list_databases shows the stored value. A result with audit_recorded: false means
+        the flip persisted but no audit line was written.
         """
         return await handlers.set_yolo_mode(database, enabled)
 

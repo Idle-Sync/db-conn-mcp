@@ -1,5 +1,6 @@
 """Tests for the audit sidecar: what a change is recorded as, and how the line is written."""
 
+import errno
 import json
 import os
 import re
@@ -29,6 +30,14 @@ def _conn(name: str, **fields) -> Connection:
     fields.setdefault("dsn", "postgresql://h/d")
     fields.setdefault("mode", "read")
     return Connection(name=name, **fields)
+
+
+def _unrecorded_message(sidecar: Path, reason: str) -> str:
+    """The pinned text of :class:`audit.UnrecordedChangeError`; the docs quote it."""
+    return (
+        f"The configuration was changed, but its audit line could not be appended to {sidecar} "
+        f"({reason}). The change is in effect and unrecorded."
+    )
 
 
 # ---- changes_between ------------------------------------------------------------
@@ -168,6 +177,87 @@ def test_appending_writes_nothing_when_the_body_fails(tmp_path):
     with pytest.raises(OSError), audit.appending(sidecar, ["one\n"]):
         raise OSError("the config write failed")
     assert sidecar.read_bytes() == b""
+
+
+@posix_only
+def test_appending_whose_write_fails_raises_unrecorded_not_oserror(tmp_path, monkeypatch):
+    """The body already made the change, so an ``OSError`` here would read as "unchanged"."""
+    sidecar = tmp_path / "connections.json.audit.log"
+
+    def no_space_left(fd, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(audit.os, "write", no_space_left)
+    open_before = len(os.listdir("/dev/fd"))
+    with pytest.raises(audit.UnrecordedChangeError) as caught, audit.appending(sidecar, ["one\n"]):
+        pass
+    assert not isinstance(caught.value, OSError)
+    assert caught.value.__suppress_context__  # Rule 6: no chained error in a traceback
+    assert str(caught.value) == _unrecorded_message(sidecar, "OSError")
+    assert len(os.listdir("/dev/fd")) == open_before
+
+
+@posix_only
+def test_appending_whose_short_write_drops_bytes_raises_unrecorded(tmp_path, monkeypatch):
+    """A partial line is no record either, and ``os.write`` reports it without raising."""
+    sidecar = tmp_path / "connections.json.audit.log"
+    real_write = os.write
+
+    def one_byte_short(fd, data):
+        return real_write(fd, data[:-1])
+
+    monkeypatch.setattr(audit.os, "write", one_byte_short)
+    open_before = len(os.listdir("/dev/fd"))
+    with pytest.raises(audit.UnrecordedChangeError) as caught, audit.appending(sidecar, ["one\n"]):
+        pass
+    assert str(caught.value) == _unrecorded_message(sidecar, "short write: 3 of 4 bytes")
+    assert len(os.listdir("/dev/fd")) == open_before
+
+
+@posix_only
+def test_appending_whose_close_fails_after_the_line_raises_unrecorded(tmp_path, monkeypatch):
+    """NFS reports a deferred write error at ``close``, after the config was replaced."""
+    sidecar = tmp_path / "connections.json.audit.log"
+    real_close = os.close
+
+    def close_then_fail(fd):
+        real_close(fd)
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(audit.os, "close", close_then_fail)
+    open_before = len(os.listdir("/dev/fd"))
+    with pytest.raises(audit.UnrecordedChangeError) as caught, audit.appending(sidecar, ["one\n"]):
+        pass
+    assert not isinstance(caught.value, OSError)
+    assert caught.value.__suppress_context__  # Rule 6: no chained error in a traceback
+    assert str(caught.value) == _unrecorded_message(sidecar, "OSError")
+    assert len(os.listdir("/dev/fd")) == open_before
+
+
+@posix_only
+def test_appending_whose_close_fails_after_a_short_write_keeps_the_short_write(
+    tmp_path, monkeypatch
+):
+    """The short write is the error the user can act on; the close error must not replace it."""
+    sidecar = tmp_path / "connections.json.audit.log"
+    real_write = os.write
+    real_close = os.close
+
+    def one_byte_short(fd, data):
+        return real_write(fd, data[:-1])
+
+    def close_then_fail(fd):
+        real_close(fd)
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(audit.os, "write", one_byte_short)
+    monkeypatch.setattr(audit.os, "close", close_then_fail)
+    open_before = len(os.listdir("/dev/fd"))
+    with pytest.raises(audit.UnrecordedChangeError) as caught, audit.appending(sidecar, ["one\n"]):
+        pass
+    assert str(caught.value) == _unrecorded_message(sidecar, "short write: 3 of 4 bytes")
+    assert caught.value.__context__ is None
+    assert len(os.listdir("/dev/fd")) == open_before
 
 
 @posix_only

@@ -1,10 +1,12 @@
 """Tests for config resolution, validation, lookup, and atomic persistence."""
 
+import errno
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -561,10 +563,41 @@ def test_hard_linked_sidecar_refuses_the_change(tmp_path):
 
 @posix_only
 def test_a_sidecar_that_is_not_a_regular_file_refuses_the_change(tmp_path):
+    """A FIFO with no reader must be refused at once: the save holds the config lock."""
     path = _write(tmp_path / "connections.json", YOLO_OFF)
     sidecar = tmp_path / "connections.json.audit.log"
     os.mkfifo(sidecar)
-    # A reader keeps the sidecar's write-only open from waiting for one.
+    before = path.read_bytes()
+    loaded, previous = _yolo_flip(path)
+    errors: list[OSError] = []
+
+    def save() -> None:
+        try:
+            config.save(loaded, path, previous=previous, source="cli")
+        except OSError as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=save, daemon=True)
+    thread.start()
+    thread.join(timeout=2)
+    blocked = thread.is_alive()
+    if blocked:
+        # Lets the blocked open return, so no thread keeps the config lock after the test.
+        reader = os.open(sidecar, os.O_RDONLY | os.O_NONBLOCK)
+        thread.join()
+        os.close(reader)
+    assert not blocked
+    [error] = errors
+    assert error.errno == errno.ENXIO or "not a regular file" in str(error)
+    assert path.read_bytes() == before
+
+
+@posix_only
+def test_a_sidecar_that_is_not_a_regular_file_refuses_the_change_with_a_reader(tmp_path):
+    path = _write(tmp_path / "connections.json", YOLO_OFF)
+    sidecar = tmp_path / "connections.json.audit.log"
+    os.mkfifo(sidecar)
+    # With a reader, the open succeeds and the file-type check is what refuses.
     reader = os.open(sidecar, os.O_RDONLY | os.O_NONBLOCK)
     try:
         before = path.read_bytes()

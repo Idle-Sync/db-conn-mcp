@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import errno
 import json
 import re
 import shutil
@@ -1310,3 +1311,43 @@ def test_edit_of_a_config_lost_in_a_race_is_a_409_not_a_500(cfg_client, monkeypa
     assert r.json() == {"error": "no configuration found"}
     assert len(loads) == 2
     assert not audit.audit_path(cfg).exists()
+
+
+_UNRECORDED = {"error": "the configuration was changed, but its audit line could not be written"}
+
+
+def _no_space_left(fd, data):
+    raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def test_edit_whose_audit_line_fails_is_an_unrecorded_500(cfg_client, monkeypatch):
+    """The mode is already stored, so the 409 "could not be read or written" would be a lie."""
+    client, cfg = cfg_client
+    _seed_one_connection(cfg)
+    monkeypatch.setattr(audit.os, "write", _no_space_left)
+    r = client.patch("/api/databases/a", json={"mode": "write"}, headers=_hdr())
+    assert r.status_code == 500
+    assert r.json() == _UNRECORDED
+    [stored] = json.loads(cfg.read_text(encoding="utf-8"))["connections"]
+    assert stored["mode"] == "write"
+
+
+def test_add_whose_audit_line_fails_is_an_unrecorded_500(cfg_client, monkeypatch):
+    client, cfg = cfg_client
+    monkeypatch.setattr(audit.os, "write", _no_space_left)
+    r = client.post(
+        "/api/databases", json={"name": "s", "dsn": SECRET_DSN, "mode": "read"}, headers=_hdr()
+    )
+    assert r.status_code == 500
+    assert r.json() == _UNRECORDED
+    assert _stored_names(cfg) == ["s"]
+
+
+def test_delete_whose_audit_line_fails_is_an_unrecorded_500(cfg_client, monkeypatch):
+    client, cfg = cfg_client
+    _seed_one_connection(cfg)
+    monkeypatch.setattr(audit.os, "write", _no_space_left)
+    r = client.delete("/api/databases/a", headers=_hdr())
+    assert r.status_code == 500
+    assert r.json() == _UNRECORDED
+    assert _stored_names(cfg) == []
