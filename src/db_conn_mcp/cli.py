@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-from . import __commit__, __version__, config, doctor, server, update_check
+from . import __commit__, __version__, audit, config, doctor, server, update_check
 from .clients import (
     ClientConfigError,
     ClientSpec,
@@ -184,8 +184,9 @@ def register_database(scope: Scope, name: str, dsn: str, mode: str, yolo: bool =
     with config.locked(path):
         _, cfg = _load_scope(scope)
         _ensure_new_connection(cfg, name, dsn)
+        previous = cfg.model_copy(deep=True)
         cfg.connections.append(Connection(name=name, dsn=dsn, mode=mode, yolo=yolo))
-        config.save(cfg, path)
+        config.save(cfg, path, previous=previous, source="cli")
     return path
 
 
@@ -327,10 +328,11 @@ def _add_connection_interactive(path: Path) -> bool:
         with config.locked(path):
             cfg = config.load(str(path)) if path.is_file() else Config()
             _ensure_new_connection(cfg, name, dsn)
+            previous = cfg.model_copy(deep=True)
             cfg.connections.append(
                 Connection(name=name, dsn=dsn, mode=mode_name, fallback_ports=fallback_ports)
             )
-            config.save(cfg, path)
+            config.save(cfg, path, previous=previous, source="cli")
     except ValueError as exc:
         print(f"Could not add: {exc}")
         return False
@@ -608,8 +610,9 @@ def cmd_remove(config_arg: str | None, name: str) -> int:
             cfg = config.load(str(path))
             if _report_if_unknown(cfg, name):
                 return 1
+            previous = cfg.model_copy(deep=True)
             cfg.connections = [c for c in cfg.connections if c.name != name]
-            config.save(cfg, path)
+            config.save(cfg, path, previous=previous, source="cli")
     except config.ConfigError as exc:
         print(exc)
         return 1
@@ -634,7 +637,12 @@ def cmd_reset(config_arg: str | None = None) -> int:
     if not confirm.startswith("y"):
         print("Cancelled. Nothing deleted.")
         return 0
-    path.unlink()
+    # Taken before the unlink: once a symlinked config's link is gone, the path no
+    # longer resolves to the target the sidecar sits beside.
+    sidecar = audit.audit_path(path)
+    reset_line = audit.line("cli", "reset", None)
+    with config.locked(path), audit.appending(sidecar, [reset_line]):
+        path.unlink()
     print(f"Removed all connections (deleted {path}). Run `db-conn-mcp setup` to start fresh.")
     return 0
 
@@ -647,7 +655,7 @@ def cmd_yolo(config_arg: str | None, name: str, state: str) -> int:
         return 1
     enabled = state == "on"
     try:
-        updated = config.set_yolo(path, name, enabled)
+        updated = config.set_yolo(path, name, enabled, source="cli")
     except config.ConfigError as exc:
         print(exc)
         return 1

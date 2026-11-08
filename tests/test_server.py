@@ -516,6 +516,9 @@ async def test_set_yolo_mode_persists(cfg_path):
     reloaded = json.loads(cfg_path.read_text(encoding="utf-8"))
     dev = next(c for c in reloaded["connections"] if c["name"] == "dev")
     assert dev["yolo"] is True
+    sidecar = cfg_path.with_name("connections.json.audit.log")
+    [line] = sidecar.read_text(encoding="utf-8").splitlines()
+    assert '\tmcp\tedit\t"dev"\t' in line
 
 
 async def test_set_yolo_mode_saves_off_the_event_loop(cfg_path, monkeypatch):

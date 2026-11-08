@@ -9,11 +9,12 @@ import builtins
 import contextlib
 import io
 import json
+import re
 import sys
 
 import pytest
 
-from db_conn_mcp import cli, clients, config
+from db_conn_mcp import audit, cli, clients, config
 from db_conn_mcp import cli as cli_module
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX folder permissions")
@@ -43,6 +44,11 @@ def _isolate_global_config(tmp_path_factory, monkeypatch):
     """Point the global config at an empty temp dir so tests never touch the real one."""
     gdir = tmp_path_factory.mktemp("global-home")
     monkeypatch.setattr(config, "global_config_path", lambda: gdir / "connections.json")
+
+
+def _audit_lines(config_path):
+    """The audit sidecar's lines for the config at ``config_path``."""
+    return audit.audit_path(config_path).read_text(encoding="utf-8").splitlines()
 
 
 # ---- argument parsing & dispatch ---------------------------------------------
@@ -562,6 +568,7 @@ def test_cmd_remove_unknown_returns_1(tmp_path, monkeypatch):
     rc = cli.cmd_remove(str(config.repo_config_path()), "ghost")
     assert rc == 1
     assert [c.name for c in config.load(str(config.repo_config_path())).connections] == ["a"]
+    assert len(_audit_lines(config.repo_config_path())) == 1  # the add only
 
 
 def test_cmd_yolo_on_off(tmp_path, monkeypatch):
@@ -709,6 +716,9 @@ def test_cmd_reset_deletes_on_confirm(tmp_path, monkeypatch):
     rc = cli.cmd_reset(str(p))
     assert rc == 0
     assert not p.is_file()  # whole config removed
+    add_line, reset_line = _audit_lines(p)  # the sidecar outlives the config it describes
+    assert '\tcli\tadd\t"a"\t' in add_line
+    assert re.search(r"\tcli\treset\t-$", reset_line)
 
 
 def test_cmd_reset_cancel_keeps_file(tmp_path, monkeypatch):
@@ -719,10 +729,46 @@ def test_cmd_reset_cancel_keeps_file(tmp_path, monkeypatch):
     rc = cli.cmd_reset(str(p))
     assert rc == 0
     assert p.is_file()  # untouched on decline
+    assert len(_audit_lines(p)) == 1  # the add only
 
 
 def test_cmd_reset_no_config_is_already_fresh(tmp_path):
     assert cli.cmd_reset(str(tmp_path / "nope.json")) == 0
+
+
+@posix_only
+def test_cmd_reset_through_a_symlink_records_beside_the_target(tmp_path, monkeypatch):
+    """The link goes, the target's history stays where the target's other lines are."""
+    (tmp_path / "real").mkdir()
+    real = _seed_config(tmp_path / "real" / "connections.json")
+    link_dir = tmp_path / "link_dir"
+    link_dir.mkdir()
+    link = link_dir / "connections.json"
+    link.symlink_to(real)
+    monkeypatch.setattr(builtins, "input", _scripted_input(["y"]))
+    assert cli.cmd_reset(str(link)) == 0
+    [line] = _audit_lines(real)
+    assert line.endswith("\tcli\treset\t-")
+    assert [p.name for p in link_dir.iterdir()] == []
+
+
+def test_cmd_reset_takes_the_config_lock(tmp_path, monkeypatch):
+    """Another writer must not save between the reset's line and the unlink."""
+    path = _seed_config(tmp_path / "connections.json")
+    real_locked = config.locked
+    locked_paths = []
+
+    @contextlib.contextmanager
+    def probed_locked(locked_path):
+        locked_paths.append(locked_path)
+        with real_locked(locked_path):
+            yield
+
+    monkeypatch.setattr(config, "locked", probed_locked)
+    monkeypatch.setattr(builtins, "input", _scripted_input(["y"]))
+    assert cli.cmd_reset(str(path)) == 0
+    assert locked_paths == [path]
+    assert not path.exists()
 
 
 # ---- fallback-ports prompt parsing (issue #10) ---------------------------------
@@ -1560,3 +1606,43 @@ def test_remove_rechecks_the_name_under_the_lock(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(config, "locked", locked_after_another_writer)
     assert cli.cmd_remove(str(path), "a") == 1
     assert "No connection named 'a'. Available: (none)." in capsys.readouterr().out
+
+
+# ---- audit lines (issue #37) ---------------------------------------------------
+
+
+def test_register_database_writes_an_audit_line_without_the_dsn(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    path = cli.register_database("repo", "dev", "postgresql://u:SECRET@h/dev", "write")
+    [line] = _audit_lines(path)
+    assert re.search(r'\tcli\tadd\t"dev"\tmode: "write", yolo: false, fallback_ports: null$', line)
+    sidecar = audit.audit_path(path).read_text(encoding="utf-8")
+    assert "SECRET" not in sidecar
+    assert "@h" not in sidecar
+
+
+def test_cmd_remove_writes_an_audit_line(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    path = config.repo_config_path()
+    assert cli.cmd_remove(str(path), "a") == 0
+    removed = _audit_lines(path)[-1]
+    assert removed.endswith('\tcli\tremove\t"a"')
+    assert len(removed.split("\t")) == 4
+
+
+def test_cmd_yolo_writes_an_audit_line(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "write")
+    path = config.repo_config_path()
+    assert cli.cmd_yolo(str(path), "a", "on") == 0
+    assert _audit_lines(path)[-1].endswith('\tcli\tedit\t"a"\tyolo: false -> true')
+
+
+def test_add_interactive_writes_an_audit_line_with_the_prompted_mode(tmp_path, monkeypatch):
+    path = tmp_path / "connections.json"
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    monkeypatch.setattr(builtins, "input", _scripted_input(["mydb", "postgresql://h/db", "w", ""]))
+    assert cli._add_connection_interactive(path) is True
+    [line] = _audit_lines(path)
+    assert line.endswith('\tcli\tadd\t"mydb"\tmode: "write", yolo: false, fallback_ports: null')
