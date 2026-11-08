@@ -2157,3 +2157,24 @@ def test_http_transport_builds_the_auth_app_and_serves_over_loopback(cfg_path, m
     assert built["token"] == "fixed-http-token"
     assert served["host"] == "127.0.0.1"
     assert served["app"] is not None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+async def test_set_yolo_mode_with_a_refused_lock_is_an_error_result_without_a_dsn(cfg_path):
+    target = cfg_path.with_name("elsewhere")
+    target.touch()
+    cfg_path.with_name("connections.json.lock").symlink_to(target)
+    before = cfg_path.read_bytes()
+    app = build_server(cfg_path)
+
+    result = await _call_over_the_wire(app, "set_yolo_mode", {"database": "dev", "enabled": True})
+
+    assert result.isError is True
+    text = result.content[0].text
+    assert "Could not update" in text
+    assert "link or not a regular file" in text
+    assert "connections.json.lock" in text
+    assert "the file is unchanged" in text
+    assert "SECRET" not in text
+    assert "@" not in text
+    assert cfg_path.read_bytes() == before
