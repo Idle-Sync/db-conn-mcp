@@ -8,6 +8,7 @@ docs/superpowers/
 # ---- Secrets / local config (NEVER commit real DSNs or credentials) ----
 connections.json
 connections.json.lock
+connections.json.audit.log
 .connections.json.*.tmp
 .env
 .env.*
