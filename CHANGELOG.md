@@ -71,6 +71,8 @@ the time of that release.
 - Saving `connections.json` or a client config file on Windows no longer fails when `os.replace`
   in the atomic save is refused with error 5 for a moment: the swap now retries, up to 20 attempts
   over about 1 s (#63).
+- On Windows, saving over a read-only `connections.json` or client config no longer leaves a `.tmp`
+  file in the folder and reports the refusal of the config file itself (#65).
 
 ### Breaking / Behaviour changes
 
