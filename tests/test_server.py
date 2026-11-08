@@ -518,6 +518,30 @@ async def test_set_yolo_mode_persists(cfg_path):
     assert dev["yolo"] is True
 
 
+async def test_set_yolo_mode_saves_off_the_event_loop(cfg_path, monkeypatch):
+    """A retried save can stall for about a second; it must not stall the server's loop."""
+    from db_conn_mcp import atomic_write
+
+    fired: list[bool] = []
+    real_replace = atomic_write.os.replace
+
+    def probed_replace(*args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            fired.append(True)
+            real_replace(*args, **kwargs)
+            return
+        raise AssertionError("set_yolo_mode saved the config on the event loop's thread")
+
+    monkeypatch.setattr(atomic_write.os, "replace", probed_replace)
+    await Handlers(cfg_path).set_yolo_mode("dev", True)
+    assert fired
+    reloaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+    dev = next(c for c in reloaded["connections"] if c["name"] == "dev")
+    assert dev["yolo"] is True
+
+
 # ---- check_database: sanitized, never raises for unreachable -----------------
 
 
