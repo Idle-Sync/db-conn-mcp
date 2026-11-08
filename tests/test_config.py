@@ -426,6 +426,48 @@ def test_locked_creates_the_sidecar_directory_for_a_config_not_yet_written(tmp_p
     assert path.with_name("connections.json.lock").exists()
 
 
+@posix_only
+def test_symlinked_lock_sidecar_refuses_the_change(tmp_path):
+    """A cloned repo can commit the lock as a link; opening it would create the target."""
+    path = _write(tmp_path / "connections.json", VALID)
+    absent = tmp_path / "absent"
+    (tmp_path / "connections.json.lock").symlink_to(absent)
+    with pytest.raises(OSError, match="link or not a regular file") as raised, config.locked(path):
+        pass
+    assert str(path.resolve().with_name("connections.json.lock")) in str(raised.value)
+    assert "u:p@h" not in str(raised.value)
+    assert not absent.exists()
+
+
+@posix_only
+def test_a_lock_sidecar_that_is_not_a_regular_file_refuses_the_change(tmp_path):
+    """A FIFO lock must be refused at once: a GUI or MCP worker thread waits on it."""
+    path = _write(tmp_path / "connections.json", VALID)
+    sidecar = tmp_path / "connections.json.lock"
+    os.mkfifo(sidecar)
+    errors: list[OSError] = []
+
+    def take_the_lock() -> None:
+        try:
+            with config.locked(path):
+                pass
+        except OSError as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=take_the_lock, daemon=True)
+    thread.start()
+    thread.join(timeout=2)
+    blocked = thread.is_alive()
+    if blocked:
+        # Lets the blocked open return, so no thread is left waiting after the test.
+        reader = os.open(sidecar, os.O_RDONLY | os.O_NONBLOCK)
+        thread.join()
+        os.close(reader)
+    assert not blocked
+    [error] = errors
+    assert "link or not a regular file" in str(error)
+
+
 # ---- audit sidecar (issue #37) -------------------------------------------------
 
 YOLO_OFF = {"connections": [{"name": "dev", "dsn": "postgresql://u:SECRET@h/dev", "mode": "write"}]}
@@ -519,7 +561,7 @@ def _yolo_flip(path: Path) -> tuple[Config, Config]:
 def _assert_linked_sidecar_refuses_the_change(tmp_path: Path, path: Path, target: Path) -> None:
     before, target_before = path.read_bytes(), target.read_bytes()
     loaded, previous = _yolo_flip(path)
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="link or not a regular file"):
         config.save(loaded, path, previous=previous, source="cli")
     assert target.read_bytes() == target_before
     assert path.read_bytes() == before
