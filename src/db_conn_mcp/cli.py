@@ -112,9 +112,12 @@ def build_parser() -> argparse.ArgumentParser:
         return sub.add_parser(name, parents=[common], help=help_text)
 
     _add("gui", "Open the local dashboard (starts it if not already running).")
-    _add("setup", "Guided setup; shows status if already configured.")
+    _add(
+        "setup",
+        "Guided setup; shows status if already configured. Creates --config PATH when absent.",
+    )
     _add("status", "Show configured databases and MCP client injection state.")
-    _add("add", "Add another database connection.")
+    _add("add", "Add another database connection. Creates --config PATH when absent.")
     p_clients = _add("clients", "Inject (or with --remove, uninject) db-conn-mcp into MCP clients.")
     p_clients.add_argument(
         "--remove", action="store_true", help="Remove db-conn-mcp from clients instead of adding."
@@ -220,6 +223,13 @@ def _ask_scope() -> Scope:
     """Prompt for where a brand-new config should live."""
     scope = input("Config scope - [g]lobal or [r]epo? (g/r): ").strip().lower() or "g"
     return "repo" if scope.startswith("r") else "global"
+
+
+def _new_config_path(config_arg: str | None) -> Path:
+    """Where a brand-new config goes: ``--config`` if given, else the scope the user picks."""
+    if config_arg:
+        return Path(config_arg)
+    return scope_to_path(_ask_scope())
 
 
 def _choose_injection_targets() -> list[ClientSpec]:
@@ -371,7 +381,7 @@ def run_setup_wizard(config_arg: str | None = None) -> int:
             _print_star_cta()
             return rc
         print("db-conn-mcp setup")
-        path = scope_to_path(_ask_scope())
+        path = _new_config_path(config_arg)
         if _add_connection_interactive(path):
             _print_star_cta()
             return 0
@@ -443,7 +453,7 @@ def cmd_status(config_arg: str | None = None) -> int:
 def cmd_add(config_arg: str | None = None) -> int:
     """Add another database connection (creating the config if none exists yet)."""
     try:
-        path = _existing_config(config_arg) or scope_to_path(_ask_scope())
+        path = _existing_config(config_arg) or _new_config_path(config_arg)
         return 0 if _add_connection_interactive(path) else 1
     except config.ConfigError as exc:
         print(exc)
