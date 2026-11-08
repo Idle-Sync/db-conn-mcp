@@ -33,6 +33,7 @@ from .clients import (
     config_readable,
     detected_clients,
     inject_entry,
+    injected_config_path,
     is_injected,
     read_config,
     remove_entry,
@@ -264,20 +265,30 @@ def _choose_injection_targets() -> list[ClientSpec]:
     return chosen
 
 
-def _inject_into_client(spec: ClientSpec, command: str, args: list[str]) -> None:
+def _inject_into_client(spec: ClientSpec, config_path: Path, command: str, args: list[str]) -> None:
     """Read-merge-write a server entry into one client's config, in its own format.
 
     A config that exists but does not parse is left untouched: overwriting it would
     destroy the user's other servers, comments and settings. One that cannot be
-    written is skipped too, so the remaining clients still get their entry.
+    written is skipped too, so the remaining clients still get their entry. The
+    change is recorded in the audit log beside ``config_path``.
     """
     try:
-        existing = read_config(spec)
-        updated = inject_entry(existing, spec.fmt, "db-conn-mcp", command, args)
-        write_config(spec, updated)
+        with audit.recording_client_change(config_path, "cli", "inject", spec.label):
+            existing = read_config(spec)
+            updated = inject_entry(existing, spec.fmt, "db-conn-mcp", command, args)
+            write_config(spec, updated)
     except ClientConfigError as exc:
         print(f"  Skipped {spec.label}: {exc}")
         print("    Fix the problem above by hand, then re-run `db-conn-mcp clients`.")
+        return
+    except OSError as exc:  # the audit log could not be opened, so the client was not touched
+        print(f"  Skipped {spec.label}: {_could_not_update_line(spec.path, exc)}")
+        print("    Fix the problem above by hand, then re-run `db-conn-mcp clients`.")
+        return
+    except audit.UnrecordedChangeError as exc:
+        print(f"  Updated {spec.label} config.")
+        print(f"  {exc}")
         return
     print(f"  Updated {spec.label} config.")
 
@@ -287,7 +298,7 @@ def _inject_clients_interactive(path: Path) -> None:
     chosen = _choose_injection_targets()
     command, args = server_launch(path)
     for spec in chosen:
-        _inject_into_client(spec, command, args)
+        _inject_into_client(spec, path, command, args)
 
 
 def _parse_fallback_ports(raw: str) -> list[int] | None:
@@ -351,7 +362,7 @@ def _add_connection_interactive(path: Path) -> bool:
     print(f"Registered {name!r} ({mode_name}) -> {path}")
     command, args = server_launch(path)
     for spec in chosen:
-        _inject_into_client(spec, command, args)
+        _inject_into_client(spec, path, command, args)
     return True
 
 
@@ -532,15 +543,34 @@ def _uninject_interactive() -> int:
 
 
 def _uninject_from_client(spec: ClientSpec) -> None:
-    """Remove the db-conn-mcp entry from one client's config, preserving the rest."""
+    """Remove the db-conn-mcp entry from one client's config, preserving the rest.
+
+    The removal is recorded in the audit log of the ``connections.json`` the entry names.
+    """
+    # Read before the removal: afterwards the entry, and its --config, are gone.
+    config_path = injected_config_path(spec)
     try:
-        existing = read_config(spec)
-        remove_entry(existing, spec.fmt, "db-conn-mcp")
-        write_config(spec, existing)
+        with audit.recording_client_change(config_path, "cli", "uninject", spec.label):
+            existing = read_config(spec)
+            remove_entry(existing, spec.fmt, "db-conn-mcp")
+            write_config(spec, existing)
     # A read failure is unreachable from `clients --remove`, which only offers configs
     # that parsed (is_injected is False for the rest); a write failure is not.
     except ClientConfigError as exc:
         print(f"  Skipped {spec.label}: {exc}")
+        return
+    except OSError as exc:  # the audit log could not be opened, so the client was not touched
+        print(f"  Skipped {spec.label}: {_could_not_update_line(spec.path, exc)}")
+        return
+    except audit.UnrecordedChangeError as exc:
+        print(f"  Removed from {spec.label} config.")
+        print(f"  {exc}")
+        return
+    if config_path is None:
+        print(
+            f"  Removed from {spec.label} config; its entry named no connections.json, "
+            "so nothing was recorded."
+        )
         return
     print(f"  Removed from {spec.label} config.")
 
