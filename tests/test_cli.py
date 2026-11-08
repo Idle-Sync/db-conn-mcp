@@ -648,7 +648,9 @@ def test_cmd_clients_remove_without_config_records_nothing(tmp_path, monkeypatch
         "  Removed from Claude Desktop config; its entry named no connections.json, "
         "so nothing was recorded."
     )
-    assert expected in capsys.readouterr().out.splitlines()
+    lines = capsys.readouterr().out.splitlines()
+    assert expected in lines
+    assert "  Removed from Claude Desktop config." not in lines
     assert sorted(p.name for p in tmp_path.iterdir()) == ["claude.json"]
 
 
@@ -1796,6 +1798,7 @@ def test_add_interactive_whose_audit_line_fails_still_registers_and_says_unrecor
 def _assert_unrecorded_after(out, success_line):
     """The success line, then the unrecorded report on the very next line."""
     lines = out.splitlines()
+    assert lines.count(success_line) == 1
     position = lines.index(success_line)
     assert lines[position + 1].startswith("  The configuration was changed")
     _assert_reported_as_unrecorded(lines[position + 1])
@@ -1957,6 +1960,23 @@ def test_cmd_clients_skips_client_when_sidecar_refuses(tmp_path, monkeypatch, ca
     assert skipped.startswith(f"  Skipped Claude Desktop: Could not update {fake.path} (")
     assert skipped.endswith("; the file is unchanged.")
     assert lines[lines.index(skipped) + 1] == _FIX_BY_HAND
+    assert "  Updated Claude Desktop config." not in lines
+    assert fake.path.read_bytes() == before
+
+
+def test_cmd_clients_remove_skips_client_when_sidecar_refuses(tmp_path, monkeypatch, capsys):
+    path = _seed_config(tmp_path / "connections.json")
+    audit.audit_path(path).mkdir()
+    fake = _client_injected_with(tmp_path, path)
+    before = fake.path.read_bytes()
+    monkeypatch.setattr(cli, "detected_clients", lambda: [fake])
+    monkeypatch.setattr(builtins, "input", _scripted_input(["1"]))
+    assert cli.cmd_clients(remove=True) == 0
+    lines = capsys.readouterr().out.splitlines()
+    [skipped] = [line for line in lines if line.startswith("  Skipped Claude Desktop: ")]
+    assert skipped.startswith(f"  Skipped Claude Desktop: Could not update {fake.path} (")
+    assert skipped.endswith("; the file is unchanged.")
+    assert not [line for line in lines if line.startswith("  Removed from")]
     assert fake.path.read_bytes() == before
 
 
@@ -1981,5 +2001,7 @@ def test_add_saves_connection_when_inject_sidecar_refuses(tmp_path, monkeypatch,
     assert "Registered 'db'" in out
     assert [c.name for c in config.load(str(path)).connections] == ["db"]
     _assert_one_unchanged_line(out, fake.path)
-    skipped = [line for line in out.splitlines() if line.lstrip().startswith("Skipped Claude")]
+    skipped = [
+        line for line in out.splitlines() if line.lstrip().startswith("Skipped Claude Desktop:")
+    ]
     assert len(skipped) == 1
