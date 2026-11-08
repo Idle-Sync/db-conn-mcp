@@ -3,6 +3,7 @@
 Standard library only: ``clients.py`` imports this and stays free of ``asyncpg``.
 """
 
+import contextlib
 import errno
 import os
 import shutil
@@ -49,7 +50,9 @@ def write_text_atomically(path: Path, text: str) -> None:
     The mode is advisory on Windows, where NTFS ignores POSIX bits.
 
     A swap Windows refuses with error 5 is retried for up to about a second before the
-    error reaches the caller, unless the target is read-only.
+    error reaches the caller, unless the target is read-only. A temp file that inherited a
+    read-only target's mode is made writable before removal, so the swap's error is the one
+    raised and no temp is left.
     """
     target = path.resolve()
     fd, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
@@ -61,5 +64,8 @@ def write_text_atomically(path: Path, text: str) -> None:
         _replace_with_retry(temp_name, target)
     except BaseException:  # Ctrl-C must not leave the temp file behind either
         # missing_ok: a Ctrl-C landing just after the replace must stay a Ctrl-C.
+        # Windows refuses to delete a read-only file, and the temp file copied that bit.
+        with contextlib.suppress(FileNotFoundError):
+            os.chmod(temp_name, 0o600)
         Path(temp_name).unlink(missing_ok=True)
         raise

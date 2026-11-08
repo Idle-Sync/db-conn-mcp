@@ -539,21 +539,30 @@ def create_app(
         path = _config_path_for_writes()
         async with config_lock:
             try:
-                # A refusal is answered before the lock, which would create files for nothing
-                # and cannot be taken at all in a read-only folder. Re-checked under it.
-                refusal = _refuse_add(_load_or_empty(path), parsed.name)
-                if refusal is not None:
-                    return refusal
-                # Blocking the event loop on the file lock is accepted: holders keep it for ms.
-                with config_mod.locked(path):
-                    cfg = _load_or_empty(path)
-                    refusal = _refuse_add(cfg, parsed.name)
+                # In a thread, not on the loop: another process can hold the file lock, and a
+                # save retried on Windows can hold it, for about a second. The lock's fd is
+                # opened, locked and closed in that one thread, as fcntl and msvcrt need.
+                def _write() -> JSONResponse | None:
+                    # A refusal is answered before the lock, which would create files for
+                    # nothing and cannot be taken at all in a read-only folder. Re-checked
+                    # under it.
+                    refusal = _refuse_add(_load_or_empty(path), parsed.name)
                     if refusal is not None:
                         return refusal
-                    cfg.connections.append(parsed)
-                    config_mod.save(cfg, path)
+                    with config_mod.locked(path):
+                        cfg = _load_or_empty(path)
+                        refusal = _refuse_add(cfg, parsed.name)
+                        if refusal is not None:
+                            return refusal
+                        cfg.connections.append(parsed)
+                        config_mod.save(cfg, path)
+                    return None
+
+                refusal = await asyncio.to_thread(_write)
             except OSError:
                 return _unusable_config_file()
+        if refusal is not None:
+            return refusal
         return JSONResponse(parsed.public_view(), status_code=201)
 
     async def edit_database(request: Request) -> JSONResponse:
@@ -569,18 +578,25 @@ def create_app(
         path = _config_path_for_writes()
         async with config_lock:
             try:
-                # Refused before the lock, then re-checked under it: see add_database.
-                parsed = _apply_edit(_load_or_empty(path), name, body)
-                if isinstance(parsed, JSONResponse):
-                    return parsed
-                with config_mod.locked(path):
-                    cfg = _load_or_empty(path)
-                    parsed = _apply_edit(cfg, name, body)
+                # In a thread, refused before the lock, then re-checked under it: see
+                # add_database.
+                def _write() -> Connection | JSONResponse:
+                    parsed = _apply_edit(_load_or_empty(path), name, body)
                     if isinstance(parsed, JSONResponse):
                         return parsed
-                    config_mod.save(cfg, path)
+                    with config_mod.locked(path):
+                        cfg = _load_or_empty(path)
+                        parsed = _apply_edit(cfg, name, body)
+                        if isinstance(parsed, JSONResponse):
+                            return parsed
+                        config_mod.save(cfg, path)
+                    return parsed
+
+                parsed = await asyncio.to_thread(_write)
             except OSError:
                 return _unusable_config_file()
+        if isinstance(parsed, JSONResponse):
+            return parsed
         return JSONResponse(parsed.public_view())
 
     async def delete_database(request: Request) -> JSONResponse:
@@ -589,19 +605,26 @@ def create_app(
         path = _config_path_for_writes()
         async with config_lock:
             try:
-                # Refused before the lock, then re-checked under it: see add_database.
-                refusal = _refuse_delete(_load_or_empty(path), name)
-                if refusal is not None:
-                    return refusal
-                with config_mod.locked(path):
-                    cfg = _load_or_empty(path)
-                    refusal = _refuse_delete(cfg, name)
+                # In a thread, refused before the lock, then re-checked under it: see
+                # add_database.
+                def _write() -> JSONResponse | None:
+                    refusal = _refuse_delete(_load_or_empty(path), name)
                     if refusal is not None:
                         return refusal
-                    cfg.connections = [c for c in cfg.connections if c.name != name]
-                    config_mod.save(cfg, path)
+                    with config_mod.locked(path):
+                        cfg = _load_or_empty(path)
+                        refusal = _refuse_delete(cfg, name)
+                        if refusal is not None:
+                            return refusal
+                        cfg.connections = [c for c in cfg.connections if c.name != name]
+                        config_mod.save(cfg, path)
+                    return None
+
+                refusal = await asyncio.to_thread(_write)
             except OSError:
                 return _unusable_config_file()
+        if refusal is not None:
+            return refusal
         return JSONResponse({"removed": name})
 
     async def check_database_route(request: Request) -> JSONResponse:
@@ -642,14 +665,20 @@ def create_app(
             return _no_config()
         command, args = server_launch(path)
         # A client config is config too: the read-merge-write span takes the same lock
-        # for the same lost-update reason connections.json does. The span is
-        # synchronous, so the lock is defensive rather than load-bearing.
+        # for the same lost-update reason connections.json does. The span awaits a thread
+        # (a retried save can take about a second), so the lock is load-bearing: without
+        # it a second request could read the file before the first one's write lands.
         async with config_lock:
             try:
-                data = clients_mod.read_config(spec)
-                clients_mod.write_config(
-                    spec, clients_mod.inject_entry(data, spec.fmt, "db-conn-mcp", command, args)
-                )
+
+                def _write() -> None:
+                    data = clients_mod.read_config(spec)
+                    clients_mod.write_config(
+                        spec,
+                        clients_mod.inject_entry(data, spec.fmt, "db-conn-mcp", command, args),
+                    )
+
+                await asyncio.to_thread(_write)
             except clients_mod.ClientConfigError:
                 # Re-checked under the lock: the file may have gone bad since the
                 # probe above, and the raised text quotes the source (Rule 6).
@@ -666,10 +695,14 @@ def create_app(
             return _unreadable_client()
         async with config_lock:  # see inject_client
             try:
-                data = clients_mod.read_config(spec)
-                clients_mod.write_config(
-                    spec, clients_mod.remove_entry(data, spec.fmt, "db-conn-mcp")
-                )
+
+                def _write() -> None:
+                    data = clients_mod.read_config(spec)
+                    clients_mod.write_config(
+                        spec, clients_mod.remove_entry(data, spec.fmt, "db-conn-mcp")
+                    )
+
+                await asyncio.to_thread(_write)
             except clients_mod.ClientConfigError:
                 return _unreadable_client()
         return JSONResponse({"removed": spec.key})

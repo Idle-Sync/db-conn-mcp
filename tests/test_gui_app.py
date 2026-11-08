@@ -1164,3 +1164,69 @@ def test_refusal_is_rechecked_under_the_lock(
     monkeypatch.setattr(config, "locked", locked_after_another_writer)
     assert _send(client, verb, name).status_code == status
     assert json.loads(cfg.read_text(encoding="utf-8"))["connections"] == other_writer_leaves
+
+
+# ---- config and client writes run in a worker thread, off the event loop ----
+
+
+def _assert_no_running_event_loop() -> None:
+    """Fail when called from a thread that is running an event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise AssertionError("a config write ran on the event loop's thread")
+
+
+@pytest.fixture()
+def off_loop_probes(monkeypatch):
+    """Count file-lock acquires and file replaces; each one fails if it runs on the loop."""
+    from db_conn_mcp import atomic_write
+    from db_conn_mcp import config as config_mod
+
+    fired = {"lock": 0, "replace": 0}
+    real_acquire, real_replace = config_mod._acquire_lock, atomic_write.os.replace
+
+    def probed_acquire(fd):
+        _assert_no_running_event_loop()
+        fired["lock"] += 1
+        real_acquire(fd)
+
+    def probed_replace(*args, **kwargs):
+        _assert_no_running_event_loop()
+        fired["replace"] += 1
+        real_replace(*args, **kwargs)
+
+    monkeypatch.setattr(config_mod, "_acquire_lock", probed_acquire)
+    monkeypatch.setattr(atomic_write.os, "replace", probed_replace)
+    return fired
+
+
+@pytest.mark.parametrize(
+    ("verb", "name"),
+    [("POST", "b"), ("PATCH", "a"), ("DELETE", "a")],
+    ids=["add", "edit", "delete"],
+)
+def test_database_writes_run_off_the_event_loop(verb, name, cfg_client, off_loop_probes):
+    client, cfg = cfg_client
+    _seed_one_connection(cfg)
+    assert _send(client, verb, name).status_code in (200, 201)
+    assert off_loop_probes["lock"] >= 1
+    assert off_loop_probes["replace"] >= 1
+
+
+def test_client_writes_run_off_the_event_loop(cfg_client, tmp_path, monkeypatch, off_loop_probes):
+    from db_conn_mcp import clients as clients_mod
+    from db_conn_mcp.clients import ClientSpec
+
+    client, cfg = cfg_client
+    cfg.write_text(json.dumps({"connections": []}), encoding="utf-8")
+    target = ClientSpec("fake", "Fake", tmp_path / "fake.json", "mcpServers")
+    (tmp_path / "fake.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(clients_mod, "client_specs", lambda: [target])
+    monkeypatch.setattr(clients_mod, "detected_clients", lambda: [target])
+
+    assert client.post("/api/clients/fake/inject", headers=_hdr()).status_code == 200
+    assert off_loop_probes["replace"] == 1
+    assert client.post("/api/clients/fake/uninject", headers=_hdr()).status_code == 200
+    assert off_loop_probes["replace"] == 2

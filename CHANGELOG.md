@@ -13,6 +13,9 @@ the time of that release.
 
 ### Fixed
 
+- On Windows, a config save that is being retried no longer freezes the MCP server or the
+  dashboard for up to a second: `set_yolo_mode` and the dashboard's database and client writes
+  now save in a worker thread (#64).
 - `setup --config PATH` and `add --config PATH` on a first run write to `PATH` instead of asking
   global or repo and writing elsewhere, and the client entry they inject points at `PATH` (#56).
 - `get_table_schema` and `get_database_schema` list each column of a composite primary key
@@ -71,6 +74,8 @@ the time of that release.
 - Saving `connections.json` or a client config file on Windows no longer fails when `os.replace`
   in the atomic save is refused with error 5 for a moment: the swap now retries, up to 20 attempts
   over about 1 s (#63).
+- On Windows, saving over a read-only `connections.json` or client config no longer leaves a `.tmp`
+  file in the folder and reports the refusal of the config file itself (#65).
 
 ### Breaking / Behaviour changes
 
