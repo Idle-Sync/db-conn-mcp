@@ -334,6 +334,7 @@ def injected_config_path(spec: ClientSpec, name: str = "db-conn-mcp") -> Path | 
     if position >= len(args) or not isinstance(args[position], str):
         return None
     path = Path(args[position])
-    if not path.is_absolute() or path.is_dir() or not path.parent.is_dir():
+    # Not Path.is_dir: before 3.14 it re-raises EACCES and ENAMETOOLONG; os.path.isdir never raises.
+    if not path.is_absolute() or os.path.isdir(path) or not os.path.isdir(path.parent):
         return None
     return path

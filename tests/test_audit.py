@@ -357,6 +357,13 @@ def test_recording_client_change_refuses_a_link_before_the_body(tmp_path):
     assert target.read_bytes() == b""
 
 
+def test_recording_client_change_records_nothing_when_the_body_fails(tmp_path):
+    cfg = tmp_path / "connections.json"
+    with pytest.raises(RuntimeError), audit.recording_client_change(cfg, "cli", "inject", "Zed"):
+        raise RuntimeError
+    assert audit.audit_path(cfg).read_bytes() == b""
+
+
 def test_recording_client_change_none_path_touches_nothing(tmp_path):
     entered = False
     with audit.recording_client_change(None, "cli", "inject", "Cursor"):

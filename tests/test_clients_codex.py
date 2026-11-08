@@ -332,6 +332,8 @@ def test_injected_launch_missing_args_defaults_empty(tmp_path):
         pytest.param(lambda d: ["--config", 5], None, id="non-string-value"),
         pytest.param(lambda d: [f"--config={d / 'c.json'}"], None, id="equals-form"),
         pytest.param(lambda d: ["--config", "connections.json"], None, id="relative-value"),
+        pytest.param(lambda d: ["--config", ""], None, id="empty-value"),
+        pytest.param(lambda d: ["--config", "/" + "a" * 300 + "/c.json"], None, id="name-too-long"),
         pytest.param(lambda d: ["--config", str(d)], None, id="directory-value"),
         pytest.param(lambda d: ["--config", str(d / "gone" / "c.json")], None, id="parent-missing"),
     ],
@@ -343,8 +345,11 @@ def test_injected_config_path(tmp_path, make_args, expected):
     assert injected_config_path(spec) == (tmp_path / expected if expected else None)
 
 
-def test_injected_config_path_none_without_an_entry(tmp_path):
-    assert injected_config_path(_json_spec(tmp_path)) is None
+def test_injected_config_path_none_without_an_entry_or_when_unreadable(tmp_path):
+    spec = _json_spec(tmp_path)
+    assert injected_config_path(spec) is None
+    spec.path.write_text("{not json", encoding="utf-8")
+    assert injected_config_path(spec) is None
 
 
 # ---- atomic writes (issue #53) -------------------------------------------------
