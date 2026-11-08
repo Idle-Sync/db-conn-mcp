@@ -126,6 +126,12 @@ This document outlines the step-by-step roadmap to build the `db-conn-mcp` serve
 - [x] **Doctor honesty:** `pypi_latest` and `process_staleness` share one uncached `_scan_stale_processes()`, so "you are on the latest release" no longer reads as an all-clear beside a pre-upgrade process still serving; and four findings that state a remedy now name it in `suggested_action` (`fix_connection`, `report_bug`, `install_doctor_extra`, `run_setup`).
 - [x] **Docs (Rule 7):** CHANGELOG (three **Breaking / Behaviour changes** in consumer terms — the structured-channel drop, the `check_sequences` default, the unknown-parameter rejection — plus Added and Changed), ARCHITECTURE (the limits convention, strict argument validation on the call path, the guard's value-tool branch, the release-nudge subsection, the refreshed `Dialect` contract), PRD (the convention, the per-tool arguments, the nudge), README (tool table + an Upgrade-section line), this plan.
 
+## Phase 6.11: Issue #37 — the configuration audit log
+> A `mode` or `yolo` flip, an add or a removal left no record of what changed, when, or through which front-end.
+- [x] **`audit.py`:** the sidecar `connections.json.audit.log` beside the resolved config, one tab-separated line per changed connection, with changes derived by diffing the previous and new `Config`. Never a DSN: a replaced DSN is `dsn: (replaced)`, a DSN-shaped name is `(withheld)`. A sidecar that cannot be opened, is a link or is not a regular file refuses the change before it is made.
+- [x] **Every front-end:** the CLI (`setup`/`add`/`remove`/`yolo`/`reset`), the dashboard write routes and `set_yolo_mode` pass their source; a line that cannot be written after the change landed leaves the change in effect and is reported (CLI exit 1, dashboard 500, `audit_recorded: false`).
+- [x] **Docs (Rule 7):** README (Audit log section), PRD, ARCHITECTURE, `.gitignore`, and CHANGELOG with two **Breaking / Behaviour changes**.
+
 ## Phase 7: Future Dialects (Post-v1, Extensibility Payoff)
 > Not part of v1. Listed to prove the seam works — each is a single new file + one registry line, no changes above the dialect layer.
 - [ ] **MySQL:** `dialects/mysql.py` (`aiomysql`/`asyncmy`), `START TRANSACTION READ ONLY`, `information_schema`.
