@@ -524,6 +524,17 @@ def test_cmd_add_appends(tmp_path, monkeypatch):
     assert [c.name for c in cfg.connections] == ["a", "b"]
 
 
+def test_cmd_add_without_config_arg_uses_the_existing_repo_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.register_database("repo", "a", "postgresql://h/a", "read")
+    monkeypatch.setattr(cli, "detected_clients", lambda: [])
+    # No scope answer: the first answer is the connection name.
+    monkeypatch.setattr(builtins, "input", _scripted_input(["b", "postgresql://h/b", "r", ""]))
+    assert cli.cmd_add() == 0
+    cfg = config.load(str(config.repo_config_path()))
+    assert [c.name for c in cfg.connections] == ["a", "b"]
+
+
 def test_cmd_add_duplicate_name_returns_1(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cli.register_database("repo", "mydb", "postgresql://h/a", "read")
