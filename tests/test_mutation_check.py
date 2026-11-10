@@ -162,6 +162,18 @@ def test_changed_lines_in_repository_counts_committed_and_uncommitted_edits_only
     assert mutation_check.changed_lines(repo, base) == {module: {1, 3}}
 
 
+def test_changed_lines_counts_every_line_of_an_untracked_module_under_src(tmp_path):
+    """A module not yet added to git is all new code, so a local run checks it too."""
+    repo = _repository(tmp_path, {"src/pkg/m.py": "a = 1\n", ".gitignore": "generated.py\n"})
+    _write(repo / "src/pkg/new.py", "a = 1\nb = 2\nc = 3")
+    _write(repo / "src/pkg/empty.py", "")
+    _write(repo / "src/pkg/generated.py", "a = 1\n")
+    _write(repo / "src/pkg/notes.txt", "one\n")
+    _write(repo / "scripts/new.py", "a = 1\n")
+
+    assert mutation_check.changed_lines(repo, "HEAD") == {"src/pkg/new.py": {1, 2, 3}}
+
+
 # ---- find_mutants ----
 
 
@@ -305,6 +317,42 @@ def test_marker_without_a_reason_stops_the_check_naming_file_and_line(
 
     assert exit_code == 2
     assert "src/db_conn_mcp/toy.py:2" in output
+
+
+# ---- could not run ----
+
+
+@pytest.mark.parametrize(
+    "after",
+    [b"x = (\n", b"x = = 1\n", b"x = '\xff'\n"],
+    ids=["tokenize error", "syntax error", "not utf-8"],
+)
+def test_unparseable_changed_module_stops_the_check_naming_the_file(
+    tmp_path, monkeypatch, capsys, after
+):
+    repo = _toy_repository(tmp_path, TEST_CATCHES_ANSWER, ANSWER_BEFORE, ANSWER_BEFORE)
+    (repo / "src/db_conn_mcp/toy.py").write_bytes(after)
+    monkeypatch.setattr(mutation_check, "TESTS_FOR_MODULE", TOY_TESTS_FOR_MODULE)
+
+    exit_code, output = _run_main(monkeypatch, capsys, repo)
+
+    assert exit_code == 2
+    assert "mutation check: could not run: src/db_conn_mcp/toy.py cannot be parsed" in output
+
+
+def test_os_error_while_running_stops_the_check(tmp_path, monkeypatch, capsys):
+    repo = _toy_repository(tmp_path, TEST_CATCHES_ANSWER, ANSWER_BEFORE, ANSWER_AFTER)
+    monkeypatch.setattr(mutation_check, "TESTS_FOR_MODULE", TOY_TESTS_FOR_MODULE)
+
+    def fail_to_copy(*_: object) -> Path:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(mutation_check, "copy_source", fail_to_copy)
+
+    exit_code, output = _run_main(monkeypatch, capsys, repo)
+
+    assert exit_code == 2
+    assert output.strip() == "mutation check: could not run: no space left on device"
 
 
 # ---- end to end ----

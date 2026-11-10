@@ -4,12 +4,14 @@ Usage, from anywhere inside the repository::
 
     python scripts/mutation_check.py [--base <ref>] [--max-mutants <N>]
 
-Every expression on a changed line is mutated one fault at a time (a flipped comparison,
-``and``/``or`` swapped, ``True``/``False`` swapped, a dropped ``not``, ``+``/``-`` swapped,
-a number plus one, a string replaced) and the module's mapped tests run against each
-mutant. A mutant the tests still pass on has survived: the changed line has no test that
-tells the fault from the code. Each mutant runs on a fresh copy of ``src/`` with bytecode
-writing off, so a stale ``.pyc`` can never stand in for the mutated file.
+A changed line is a new-side line of the diff from the merge base to the working tree, or
+any line of a ``.py`` file under ``src/`` that git does not track yet. Every expression on
+a changed line is mutated one fault at a time (a flipped comparison, ``and``/``or``
+swapped, ``True``/``False`` swapped, a dropped ``not``, ``+``/``-`` swapped, a number plus
+one, a string replaced) and the module's mapped tests run against each mutant. A mutant
+the tests still pass on has survived: the changed line has no test that tells the fault
+from the code. Each mutant runs on a fresh copy of ``src/`` with bytecode writing off, so
+a stale ``.pyc`` can never stand in for the mutated file.
 
 A comment ``# mutation-ok: <reason>`` on a line of an expression marks its mutants as
 equivalent; they are reported, not run.
@@ -122,8 +124,16 @@ def git(repo_root: Path, *args: str) -> str:
     # quotepath=off keeps a non-ASCII path readable instead of octal-escaped and quoted.
     command = ["git", "-c", "core.quotepath=off", *args]
     try:
+        # errors="replace": a diff carries the changed lines' bytes, which need not be UTF-8;
+        # the file itself is decoded later, where a failure can name it.
         completed = subprocess.run(
-            command, cwd=repo_root, capture_output=True, text=True, encoding="utf-8", check=False
+            command,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
         )
     except OSError as exc:
         raise CheckError(f"could not run git: {exc}") from exc
@@ -160,7 +170,10 @@ def parse_changed_lines(diff_text: str) -> dict[str, set[int]]:
 
 
 def changed_lines(repo_root: Path, base: str) -> dict[str, set[int]]:
-    """Lines under ``src/`` changed since the merge base, uncommitted edits included."""
+    """Lines under ``src/`` changed since the merge base, uncommitted edits included.
+
+    A ``.py`` file git does not track yet is all new, so every one of its lines counts.
+    """
     diff_text = git(
         repo_root,
         "diff",
@@ -174,7 +187,17 @@ def changed_lines(repo_root: Path, base: str) -> dict[str, set[int]]:
         "--",
         "src/",
     )
-    return parse_changed_lines(diff_text)
+    changed = parse_changed_lines(diff_text)
+    untracked = git(repo_root, "ls-files", "-z", "--others", "--exclude-standard", "--", "src/")
+    for path in untracked.split("\0"):
+        if not path.endswith(".py"):
+            continue
+        # Bytes, so a file that is not UTF-8 still reaches the parse step that names it.
+        line_count = len((repo_root / path).read_bytes().splitlines())
+        if line_count == 0:
+            continue
+        changed[path] = set(range(1, line_count + 1))
+    return changed
 
 
 def read_markers(source: str) -> dict[int, str]:
@@ -444,8 +467,8 @@ def planned_mutants(
 ) -> list[tuple[str, Mutant, str | None]]:
     """Each changed file's mutants with their marker reason, in file and line order.
 
-    Raises ``CheckError`` for a changed file with no ``TESTS_FOR_MODULE`` entry and for a
-    marker without a reason, before any test runs.
+    Raises ``CheckError`` for a changed file with no ``TESTS_FOR_MODULE`` entry, one that
+    cannot be parsed, and a marker without a reason, before any test runs.
     """
     planned: list[tuple[str, Mutant, str | None]] = []
     for path in sorted(changed):
@@ -453,12 +476,16 @@ def planned_mutants(
             raise CheckError(
                 f"{path} has no entry in TESTS_FOR_MODULE in scripts/mutation_check.py"
             )
-        source = (repo_root / path).read_text(encoding="utf-8")
-        markers = read_markers(source)
+        try:
+            source = (repo_root / path).read_text(encoding="utf-8")
+            markers = read_markers(source)
+            mutants = find_mutants(source, changed[path])
+        except (UnicodeDecodeError, tokenize.TokenError, SyntaxError) as exc:
+            raise CheckError(f"{path} cannot be parsed: {exc}") from exc
         for line, reason in markers.items():
             if not reason:
                 raise CheckError(f"{path}:{line}: '# mutation-ok:' needs a reason after it")
-        for mutant in find_mutants(source, changed[path]):
+        for mutant in mutants:
             planned.append((path, mutant, marker_reason(mutant, markers)))
     return planned
 
@@ -513,7 +540,8 @@ def run_check(
         planned = planned_mutants(repo_root, changed)
         counts = run_planned_mutants(repo_root, planned, max_mutants, minimum_time_limit)
         short_sha = git(repo_root, "rev-parse", "--short", base_commit).strip()
-    except CheckError as exc:
+    # OSError: a copy, a write or a child process failed, which says nothing about the tests.
+    except (CheckError, OSError) as exc:
         print(f"mutation check: could not run: {exc}", flush=True)
         return 2
     changed_line_count = sum(len(lines) for lines in changed.values())
