@@ -14,12 +14,13 @@ import hmac
 import os
 import secrets
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.types import ContentBlock, TextContent
+from mcp.types import ContentBlock
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.middleware import Middleware
@@ -50,12 +51,84 @@ VALUE_BEARING_TOOLS = frozenset(
     {"sample_table_rows", "execute_read_query", "execute_write_query", "fetch_rows", "search_value"}
 )
 
-#: What a value-bearing tool says when its result carries no rows at all. FastMCP turns
-#: a list into one text block PER row, so an empty list becomes ZERO content blocks —
-#: and with the structured channel dropped, the response would say nothing whatsoever:
-#: "this table is empty" and "the call did nothing" would look identical to the agent.
-#: An empty JSON array is what the same result minus its rows parses as.
-EMPTY_VALUE_PAYLOAD = "[]"
+#: The most rows ``sample_table_rows`` returns; a larger ``n`` is clamped to this and the
+#: answer says so with ``meta.truncated: true``.
+SAMPLE_ROWS_LIMIT = 1000
+
+
+class Meta(TypedDict):
+    """The first key of every tool's answer: what came back, and how long it took.
+
+    null means the field does not apply to the tool, or the tool cannot know it.
+    """
+
+    tool: str
+    database: str | None
+    row_count: int | None
+    truncated: bool | None
+    elapsed_ms: int
+
+
+class ListDatabasesResult(TypedDict):
+    """list_databases: the configured databases, never a DSN."""
+
+    meta: Meta
+    databases: list[dict[str, Any]]
+
+
+class ListTablesResult(TypedDict):
+    """list_tables: one {schema, name, kind} item per table or view."""
+
+    meta: Meta
+    tables: list[dict[str, Any]]
+
+
+class FindColumnsResult(TypedDict):
+    """find_columns: one {schema, table, column, type, nullable} item per match."""
+
+    meta: Meta
+    columns: list[dict[str, Any]]
+
+
+class CheckDatabaseResult(TypedDict):
+    """check_database: one connectivity result per probed database."""
+
+    meta: Meta
+    results: list[dict[str, Any]]
+
+
+class DoctorResult(TypedDict):
+    """doctor: one finding per diagnostic check."""
+
+    meta: Meta
+    findings: list[dict[str, Any]]
+
+
+def _with_meta(
+    tool: str,
+    database: str | None,
+    started: float,
+    body: dict,
+    *,
+    count_key: str | None = None,
+    truncated: bool | None = None,
+) -> dict:
+    """Return ``body`` with a ``meta`` object put first.
+
+    ``row_count`` is the length of ``body[count_key]`` when that key is present, else
+    ``None``. ``elapsed_ms`` is whole milliseconds since ``started``, a
+    ``time.monotonic()`` reading. All five meta keys are always set: the typed tools'
+    answers are validated against :class:`Meta`.
+    """
+    row_count = len(body[count_key]) if count_key in body else None
+    meta: Meta = {
+        "tool": tool,
+        "database": database,
+        "row_count": row_count,
+        "truncated": truncated,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+    }
+    return {"meta": meta, **body}
 
 
 class GuardedFastMCP(FastMCP):
@@ -96,15 +169,13 @@ class GuardedFastMCP(FastMCP):
         A value-bearing tool answers ``(guarded blocks, None)``: its rows are served on
         the fenced text channel only. Their output schemas are un-declared at build time
         (see :func:`_drop_value_bearing_output_schemas`), which is what lets ``None``
-        through the SDK's output validation. A result with no blocks at all (a row list
-        that came back empty) is given one saying so — see :data:`EMPTY_VALUE_PAYLOAD`.
+        through the SDK's output validation. Every tool answers one object, so there is
+        always exactly one text block to wrap, an empty row list included.
         """
         self._reject_unknown_arguments(name, arguments)
         result = await super().call_tool(name, arguments)
         if name in VALUE_BEARING_TOOLS:
             blocks = result[0] if isinstance(result, tuple) else result
-            if not blocks:
-                blocks = [TextContent(type="text", text=EMPTY_VALUE_PAYLOAD)]
             return guard_content_blocks(blocks), None
         if isinstance(result, tuple):
             unstructured, structured = result
@@ -161,9 +232,10 @@ def _drop_value_bearing_output_schemas(app: GuardedFastMCP) -> None:
     suppressing the structured channel means the schema must go with it — and a client
     then sees the honest surface: these tools promise text only.
 
-    Today only ``sample_table_rows`` actually declares one (FastMCP derives a schema from
-    a ``list[dict]`` return annotation but not from a bare ``dict``); the loop covers all
-    five so a future annotation change cannot silently re-open the gap.
+    Today none of the five declares one: each is annotated with a bare ``dict``, from
+    which FastMCP derives no schema (a typed return such as a ``TypedDict`` would get
+    one). The loop still covers all five so a future annotation change cannot silently
+    re-open the gap.
     """
     for name in VALUE_BEARING_TOOLS:
         tool = app._tool_manager.get_tool(name)
@@ -191,29 +263,63 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
     # ---- Exploration tools ---------------------------------------------------
     @app.tool()
-    async def list_databases() -> list[dict]:
+    async def list_databases() -> ListDatabasesResult:
         """List configured databases with their allowed mode and yolo flag (no DSN).
 
-        Entries with fallback_ports configured also show them, plus active_port when a
-        fallback port is currently in use.
+        Returns `meta` and `databases`, one item per configured database with `name`,
+        `mode` and `yolo`. Entries with fallback_ports configured also show them, plus
+        active_port when a fallback port is currently in use.
         """
-        return await handlers.list_databases()
+        started = time.monotonic()
+        databases = await handlers.list_databases()
+        return _with_meta(
+            "list_databases", None, started, {"databases": databases}, count_key="databases"
+        )
 
     @app.tool()
     async def list_tables(
         database: str, pattern: str | None = None, limit: int | None = None
-    ) -> list[dict]:
+    ) -> ListTablesResult:
         """List all tables and views in the named database.
 
         Narrow instead of listing everything: `pattern` keeps only names containing it
         (fuzzy, case-insensitive — "order" matches ORDERS, order_items). `limit` returns
         at most that many rows, so a huge database can't flood the answer.
+
+        Returns `meta` and `tables`, one item per table or view with `schema`, `name` and
+        `kind` (table or view). With `limit` set, `meta.truncated` is true when more
+        tables matched than were returned.
         """
-        return await handlers.list_tables(database, pattern, limit)
+        started = time.monotonic()
+        if limit is None:
+            tables = await handlers.list_tables(database, pattern, None)
+            return _with_meta(
+                "list_tables",
+                database,
+                started,
+                {"tables": tables},
+                count_key="tables",
+                truncated=False,
+            )
+        # One row past the limit is asked for: its presence is the truncation signal.
+        shown = max(0, limit)
+        tables = await handlers.list_tables(database, pattern, shown + 1)
+        return _with_meta(
+            "list_tables",
+            database,
+            started,
+            {"tables": tables[:shown]},
+            count_key="tables",
+            truncated=len(tables) > shown,
+        )
 
     @app.tool()
     async def get_table_schema(database: str, table: str, include_indexes: bool = False) -> dict:
         """Get columns, types, and primary/foreign keys for a table.
+
+        Returns `meta`, `table`, `columns` (name, type, nullable, default), `primary_key`
+        and `foreign_keys`, plus `indexes` when asked for; a table that does not exist is
+        an error.
 
         Pass include_indexes=true to also get the table's indexes (name, its KEY columns
         in index order — an INCLUDE payload is not listed — whether it is unique, and its
@@ -221,7 +327,9 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         query is slow and you want to know what is actually indexed. Omitted by default,
         so the plain answer stays small.
         """
-        return await handlers.get_table_schema(database, table, include_indexes)
+        started = time.monotonic()
+        schema = await handlers.get_table_schema(database, table, include_indexes)
+        return _with_meta("get_table_schema", database, started, schema)
 
     @app.tool()
     async def get_database_schema(
@@ -235,11 +343,15 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         and triggers — so running it rebuilds the structure. No extra tools needed; covers
         the common cases (for a byte-faithful dump use dump_schema_faithful).
 
-        Output is deterministic. Returned inline by default; pass output_dir to instead WRITE
-        it to `{database}_schema_{UTC}.{json|sql}` and get back the path plus a summary —
-        recommended for large schemas too big to return inline.
+        Returns `meta`, `database` and `generated_utc`, then `table_count` and `tables`
+        (json) or `format` and `ddl` (sql). Schema content is deterministic;
+        `meta.elapsed_ms` varies. Returned inline by default; pass output_dir to instead
+        WRITE it to `{database}_schema_{UTC}.{json|sql}` and get back `saved_to` plus a
+        summary — recommended for large schemas too big to return inline.
         """
-        return await handlers.get_database_schema(database, output_dir, format)
+        started = time.monotonic()
+        schema = await handlers.get_database_schema(database, output_dir, format)
+        return _with_meta("get_database_schema", database, started, schema)
 
     @app.tool()
     async def dump_schema_faithful(database: str, output_dir: str | None = None) -> dict:
@@ -251,12 +363,22 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         pg_dump isn't installed it returns {status: "pg_dump_not_found", message}: offer to
         install pg_dump for the user (see the faithful_schema_export prompt), then retry —
         or use get_database_schema(format="sql") which needs no extra tools.
+
+        Returns `meta`, `status`, `database`, `generated_utc` and `ddl` (or `saved_to`),
+        or `meta`, `status` and `message` when pg_dump is missing or fails.
         """
-        return await handlers.dump_schema_faithful(database, output_dir)
+        started = time.monotonic()
+        dump = await handlers.dump_schema_faithful(database, output_dir)
+        return _with_meta("dump_schema_faithful", database, started, dump)
 
     @app.tool()
-    async def sample_table_rows(database: str, table: str, n: int = 10) -> list[dict]:
-        """Fetch the first N rows of a table to learn its data shape.
+    async def sample_table_rows(database: str, table: str, n: int = 10) -> dict:
+        """Fetch up to N rows of a table to learn its data shape.
+
+        Returns `meta` and `rows`, one object per row keyed by column name, in no
+        guaranteed order. `n` defaults to 10 and the answer holds at most 1000 rows: a
+        larger `n` is clamped to 1000. `meta.truncated` is true only when `n` was over
+        1000 and was clamped; it reports that clamp, not whether the table holds more rows.
 
         Rows arrive on the text channel only, inside the untrusted-data banner: this
         tool emits no structuredContent.
@@ -266,18 +388,54 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         valid UTF-8), and hex for a `"char"` inside an anonymous `ROW(...)` or an array of
         a domain over `"char"`.
         """
-        return await handlers.sample_table_rows(database, table, n)
+        started = time.monotonic()
+        rows = await handlers.sample_table_rows(database, table, min(n, SAMPLE_ROWS_LIMIT))
+        return _with_meta(
+            "sample_table_rows",
+            database,
+            started,
+            {"rows": rows},
+            count_key="rows",
+            truncated=n > SAMPLE_ROWS_LIMIT,
+        )
 
     # ---- Discovery / search tools --------------------------------------------
     @app.tool()
-    async def find_columns(database: str, pattern: str, limit: int | None = None) -> list[dict]:
+    async def find_columns(
+        database: str, pattern: str, limit: int | None = None
+    ) -> FindColumnsResult:
         """Find columns by name across all tables (fuzzy, case-insensitive substring).
 
         e.g. pattern "email" matches user_email, EMAIL_ADDRESS. Use this to locate where
         a concept lives before querying. `limit` returns at most that many rows — set it
         when a broad pattern would otherwise match half the database.
+
+        Returns `meta` and `columns`, one item per matching column with `schema`, `table`,
+        `column`, `type` and `nullable`. With `limit` set, `meta.truncated` is true when
+        more columns matched than were returned.
         """
-        return await handlers.find_columns(database, pattern, limit)
+        started = time.monotonic()
+        if limit is None:
+            columns = await handlers.find_columns(database, pattern, None)
+            return _with_meta(
+                "find_columns",
+                database,
+                started,
+                {"columns": columns},
+                count_key="columns",
+                truncated=False,
+            )
+        # One row past the limit is asked for: its presence is the truncation signal.
+        shown = max(0, limit)
+        columns = await handlers.find_columns(database, pattern, shown + 1)
+        return _with_meta(
+            "find_columns",
+            database,
+            started,
+            {"columns": columns[:shown]},
+            count_key="columns",
+            truncated=len(columns) > shown,
+        )
 
     @app.tool()
     async def search_value(
@@ -288,15 +446,25 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
     ) -> dict:
         """Find WHERE a value appears across tables (fuzzy, case-insensitive substring).
 
-        Returns the tables/columns containing the value, with match counts and samples.
+        Returns `meta`, `results` and `truncated`: one result per column containing the
+        value, with `schema`, `table`, `column`, `matches` (a count) and `samples`.
         For speed on large databases, first narrow with list_tables/find_columns and pass
         a `tables` shortlist; otherwise it scans all non-system tables (bounded, may
-        return partial results flagged `truncated`).
+        return partial results flagged `truncated`, which `meta.truncated` repeats).
 
         Matches arrive on the text channel only, inside the untrusted-data banner: this
         tool emits no structuredContent.
         """
-        return await handlers.search_value(database, value, tables, limit_per_column)
+        started = time.monotonic()
+        found = await handlers.search_value(database, value, tables, limit_per_column)
+        return _with_meta(
+            "search_value",
+            database,
+            started,
+            found,
+            count_key="results",
+            truncated=found["truncated"],
+        )
 
     # ---- Execution tools -----------------------------------------------------
     @app.tool()
@@ -320,6 +488,10 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         Rows arrive on the text channel only, inside the untrusted-data banner: this
         tool emits no structuredContent.
 
+        Returns `meta`, `columns` and `rows`. There is no row cap: every row comes back in
+        one answer, so for a large result use open_query_cursor and fetch_rows instead.
+        A `SELECT` with no columns answers one empty object per row.
+
         Result shape: `columns` lists every column the statement returned, but each row
         is keyed by name, so a repeated name (`SELECT 1 AS a, 2 AS a`) keeps only its last
         value: alias the columns to keep both. Rendering follows the server's column type:
@@ -329,7 +501,11 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         array of a domain over `"char"` also reads as hex, because that array has its own
         type.
         """
-        return await handlers.execute_read_query(database, sql, params, timeout_ms)
+        started = time.monotonic()
+        result = await handlers.execute_read_query(database, sql, params, timeout_ms)
+        return _with_meta(
+            "execute_read_query", database, started, result, count_key="rows", truncated=False
+        )
 
     @app.tool()
     async def execute_write_query(
@@ -369,6 +545,9 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Pass values via `params` ($1/$2/... placeholders), not pasted into the SQL.
 
+        Returns `meta` and `rows_affected`, or `columns` and `rows` for a `RETURNING`
+        statement; a dry-run also carries `dry_run` and `rolled_back`.
+
         Rows arrive on the text channel only, inside the untrusted-data banner: this
         tool emits no structuredContent.
 
@@ -391,7 +570,8 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
             session: object | None = ctx.session
         except ValueError:
             session = None
-        return await handlers.execute_write_query(
+        started = time.monotonic()
+        result = await handlers.execute_write_query(
             database,
             sql,
             params,
@@ -401,6 +581,7 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
             timeout_ms=timeout_ms,
             session=session,
         )
+        return _with_meta("execute_write_query", database, started, result, count_key="rows")
 
     @app.tool()
     async def explain_query(
@@ -416,38 +597,49 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         $1/$2/... placeholders exactly as you would to execute_read_query (real driver
         binds), instead of rewriting the query with literals just to explain it.
         `params` composes with analyze=true.
+
+        Returns `meta` and `plan`, the plan's lines in order.
         """
-        return await handlers.explain_query(database, sql, analyze, params)
+        started = time.monotonic()
+        plan = await handlers.explain_query(database, sql, analyze, params)
+        return _with_meta("explain_query", database, started, plan)
 
     @app.tool()
     async def cancel_query(database: str, pid: int) -> dict:
         """Cancel the statement running in server backend `pid` (find pids via show_activity).
 
-        Cancels the statement only — the session survives. cancelled=false means the pid
-        doesn't exist or you lack permission (same database user required).
+        Returns `meta`, `pid` and `cancelled`. Cancels the statement only — the session
+        survives. cancelled=false means the pid doesn't exist or you lack permission (same
+        database user required).
         """
-        return await handlers.cancel_query(database, pid)
+        started = time.monotonic()
+        cancelled = await handlers.cancel_query(database, pid)
+        return _with_meta("cancel_query", database, started, cancelled)
 
     # ---- Cursor tools (large result sets) -------------------------------------
     @app.tool()
     async def open_query_cursor(database: str, sql: str, params: list[Any] | None = None) -> dict:
         """Open a server-side cursor over a read-only query for batched fetching.
 
-        Use for results too large for one execute_read_query response. Returns a
-        cursor_id for fetch_rows/close_cursor. The cursor pins one read-only
-        connection until closed (auto-reaped after 15 idle minutes; max 5 open).
+        Use for results too large for one execute_read_query response.
+        Returns `meta`, `cursor_id` (for fetch_rows/close_cursor) and `database`. The
+        cursor pins one read-only connection until closed (auto-reaped after 15 idle
+        minutes; max 5 open).
         """
-        return await handlers.open_query_cursor(database, sql, params)
+        started = time.monotonic()
+        cursor = await handlers.open_query_cursor(database, sql, params)
+        return _with_meta("open_query_cursor", database, started, cursor)
 
     @app.tool()
     async def fetch_rows(cursor_id: str, n: int = 100) -> dict:
         """Fetch the next N rows from an open cursor (see open_query_cursor).
 
-        Returns {rows, row_count, exhausted, cursor_closed}; the cursor closes itself
-        once fully drained, and also when the read fails: the error is raised and the
-        cursor_id stops working, so re-open the query to read again. Fetch one batch at
-        a time: a call made while another is running on the same cursor is refused, and
-        the cursor and the running call carry on.
+        Returns `meta`, `rows`, `row_count`, `exhausted` and `cursor_closed`;
+        `meta.database` is null, since a cursor_id names no database. The cursor closes
+        itself once fully drained, and also when the read fails: the error is raised and
+        the cursor_id stops working, so re-open the query to read again. Fetch one batch
+        at a time: a call made while another is running on the same cursor is refused,
+        and the cursor and the running call carry on.
 
         Rows arrive on the text channel only, inside the untrusted-data banner: this
         tool emits no structuredContent.
@@ -457,12 +649,19 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         valid UTF-8), and hex for a `"char"` inside an anonymous `ROW(...)` or an array of
         a domain over `"char"`.
         """
-        return await handlers.fetch_rows(cursor_id, n)
+        started = time.monotonic()
+        batch = await handlers.fetch_rows(cursor_id, n)
+        return _with_meta("fetch_rows", None, started, batch, count_key="rows")
 
     @app.tool()
     async def close_cursor(cursor_id: str) -> dict:
-        """Close an open cursor and release its database connection. Idempotent."""
-        return await handlers.close_cursor(cursor_id)
+        """Close an open cursor and release its database connection. Idempotent.
+
+        Returns `meta`, `cursor_id`, `closed` and `was_open`.
+        """
+        started = time.monotonic()
+        closed = await handlers.close_cursor(cursor_id)
+        return _with_meta("close_cursor", None, started, closed)
 
     # ---- Object-definition tool -----------------------------------------------
     @app.tool()
@@ -477,8 +676,13 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         sequences, and indexes — produced by the database's own pg_get_*def functions.
         `name` may be schema-qualified ("public.my_view"); all matches are returned
         (same name in several schemas, overloaded functions).
+
+        Returns `meta`, `object_type`, `name` and `matches`, each with its schema, name,
+        kind and definition; no match is an error.
         """
-        return await handlers.get_object_definition(database, object_type, name)
+        started = time.monotonic()
+        found = await handlers.get_object_definition(database, object_type, name)
+        return _with_meta("get_object_definition", database, started, found, count_key="matches")
 
     # ---- Operational insight tools ----------------------------------------------
     @app.tool()
@@ -487,8 +691,13 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
 
         Reports tables only in one side, and per-table column/type/default/key
         differences. Use to verify a migrated copy matches its source of truth.
+
+        Returns `meta`, `database_a`, `database_b`, `only_in_a`, `only_in_b`,
+        `changed_tables` and `identical`; `meta.database` is null, since two are compared.
         """
-        return await handlers.diff_schemas(database_a, database_b)
+        started = time.monotonic()
+        diff = await handlers.diff_schemas(database_a, database_b)
+        return _with_meta("diff_schemas", None, started, diff)
 
     @app.tool()
     async def check_sequences(database: str, behind_only: bool = True) -> dict:
@@ -504,8 +713,13 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         sequence could not be read). Pass `behind_only=false` for the full census; on a
         large schema that is one row per sequence (hundreds), so ask for it only when you
         need every sequence's state.
+
+        Returns `meta`, `database`, `sequences`, `behind_count`, `total_sequences`,
+        `skipped` and `skipped_count`.
         """
-        return await handlers.check_sequences(database, behind_only)
+        started = time.monotonic()
+        report = await handlers.check_sequences(database, behind_only)
+        return _with_meta("check_sequences", database, started, report, count_key="sequences")
 
     @app.tool()
     async def table_stats(
@@ -523,8 +737,20 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         `min_size_bytes` to skip anything smaller, `limit` for the top N by total size.
         With `limit` set the result carries `truncated: true` when more tables matched
         than were returned.
+
+        Returns `meta`, `database` and `tables`, plus `truncated` when `limit` is set;
+        `meta.truncated` repeats it, and is false without `limit`.
         """
-        return await handlers.table_stats(database, limit, min_size_bytes, table)
+        started = time.monotonic()
+        stats = await handlers.table_stats(database, limit, min_size_bytes, table)
+        return _with_meta(
+            "table_stats",
+            database,
+            started,
+            stats,
+            count_key="tables",
+            truncated=stats.get("truncated", False),
+        )
 
     @app.tool()
     async def show_activity(database: str, include_query: bool = False) -> dict:
@@ -533,51 +759,69 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         Sanitized by default — no user names, client addresses, or query text (pass
         include_query=true for truncated query text). Answers "what is holding
         connections"; pair with cancel_query(pid) to kill a stuck statement.
+
+        Returns `meta`, `database` and `activity`, one item per server backend.
         """
-        return await handlers.show_activity(database, include_query)
+        started = time.monotonic()
+        activity = await handlers.show_activity(database, include_query)
+        return _with_meta("show_activity", database, started, activity, count_key="activity")
 
     # ---- Configuration tool --------------------------------------------------
     @app.tool()
     async def set_yolo_mode(database: str, enabled: bool) -> dict:
         """Enable/disable yolo (skip the write-consent prompt) for one database, persisted.
 
+        Returns `meta`, `database`, `yolo` and `persisted`, plus `audit_recorded` and
+        `warning` when the audit line could not be written.
+
         A call cancelled while the write was in progress may still have been applied;
         list_databases shows the stored value. A result with audit_recorded: false means
         the flip persisted but no audit line was written.
         """
-        return await handlers.set_yolo_mode(database, enabled)
+        started = time.monotonic()
+        flipped = await handlers.set_yolo_mode(database, enabled)
+        return _with_meta("set_yolo_mode", database, started, flipped)
 
     # ---- Diagnostics tool ----------------------------------------------------
     @app.tool()
-    async def check_database(database: str | None = None) -> list[dict]:
+    async def check_database(database: str | None = None) -> CheckDatabaseResult:
         """Test connectivity for one database (or all) — returns OK or a sanitized cause.
 
-        Reports active_port when the database answered on a fallback port — doubles as a
-        live re-probe for tunneled connections.
+        Returns `meta` and `results`, one item per database with `database` and `status`
+        (OK or UNREACHABLE; an unreachable one adds category and detail). `meta.database`
+        is null when every database was checked. Reports active_port when the database
+        answered on a fallback port — doubles as a live re-probe for tunneled connections.
         """
-        return await handlers.check_database(database)
+        started = time.monotonic()
+        results = await handlers.check_database(database)
+        return _with_meta(
+            "check_database", database, started, {"results": results}, count_key="results"
+        )
 
     @app.tool()
-    async def doctor(offline: bool = False) -> list[dict]:
+    async def doctor(offline: bool = False) -> DoctorResult:
         """Diagnose the whole setup, not just connectivity — use when something is
         misbehaving and check_database alone doesn't explain why.
 
         Runs every diagnostic: stale running server processes, newer PyPI release,
         connections.json key typos/types, secrets exposure (permissions, git),
         MCP client entries pointing at dead paths, and per-database connectivity
-        with a credential-free fallback-port identity probe. Returns findings as
-        {check, status: ok|warn|fail|skipped, detail, suggested_action} where
-        suggested_action is machine-actionable: reconnect_client, upgrade_package,
-        swap_primary_port, fix_permissions, fix_config, repair_client_config,
-        fix_connection, install_doctor_extra, run_setup, report_bug, or none —
-        every finding that states a remedy names one. Fix what you can; report the
-        rest to the user verbatim. Output is sanitized — never contains DSNs, hosts,
+        with a credential-free fallback-port identity probe.
+
+        Returns `meta` and `findings`, each with `check`, `status` (ok|warn|fail|skipped),
+        `detail` and `suggested_action`, where suggested_action is machine-actionable:
+        reconnect_client, upgrade_package, swap_primary_port, fix_permissions, fix_config,
+        repair_client_config, fix_connection, install_doctor_extra, run_setup, report_bug,
+        or none — every finding that states a remedy names one. Fix what you can; report
+        the rest to the user verbatim. Output is sanitized — never contains DSNs, hosts,
         or credentials. offline=true skips the PyPI lookup.
         """
+        started = time.monotonic()
         # Existence is re-evaluated per call (like the CLI): the config file can be
         # deleted after startup, and run_checks() reads None as "no configuration".
         path = handlers.config_path
-        return await doctor_mod.run_checks(path if path.is_file() else None, offline=offline)
+        findings = await doctor_mod.run_checks(path if path.is_file() else None, offline=offline)
+        return _with_meta("doctor", None, started, {"findings": findings}, count_key="findings")
 
     # ---- Prompts -------------------------------------------------------------
     @app.prompt()
