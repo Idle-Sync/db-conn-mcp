@@ -11,6 +11,10 @@ the time of that release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.8.0] — 2026-11-10
+
 ### Added
 
 - A `Mutation (changed lines)` CI job on pull requests mutates the `src/` lines a PR changes and fails when no test catches a mutant; run it locally with `python scripts/mutation_check.py --base origin/main`.
@@ -857,7 +861,9 @@ agents.
 - Setup and management CLI — `setup`, `status`, `add`, `clients`, `check`, `remove`, `yolo` —
   with auto-injection into 8 MCP clients.
 
-[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.7.1...v0.8.0
+[0.7.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.0...v0.6.1
