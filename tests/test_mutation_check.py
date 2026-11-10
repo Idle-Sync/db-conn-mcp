@@ -234,7 +234,7 @@ def test_find_mutants_never_touches_docstrings():
 
 def test_find_mutants_never_touches_annotations():
     """Defaults and assigned values are code; the annotations beside them are not."""
-    source = 'def f(a: Literal["x"] = "y") -> Literal[True]:\n    b: Literal[1] = 2\n'
+    source = 'def f(a: "Thing" = "y") -> "Other":\n    b: "Count" = 2\n'
     mutants = mutation_check.find_mutants(source, {1, 2})
     assert [mutant.description for mutant in mutants] == ["'y' -> 'XXyXX'", "2 -> 3"]
 
@@ -251,7 +251,8 @@ def test_find_mutants_replaces_f_string_text_but_not_its_format_spec():
 
 
 def test_find_mutants_orders_mutants_by_line_then_column():
-    mutants = mutation_check.find_mutants("y = c == d\nx = 1 + 2\n", {1, 2})
+    """The call nests line 1's comparison deeper than line 2's sum, so a walk meets it later."""
+    mutants = mutation_check.find_mutants("y = f(c == d)\nx = 1 + 2\n", {1, 2})
     assert [(mutant.line, mutant.description) for mutant in mutants] == [
         (1, "== -> !="),
         (2, "+ -> -"),
@@ -464,7 +465,22 @@ def test_max_mutants_runs_the_first_in_file_and_line_order(tmp_path, monkeypatch
     assert "survived src/db_conn_mcp/alpha.py:2 2 -> 3" in output
     assert "beta.py" not in output
     summary = _summary(output)
+    assert (summary["files"], summary["lines"]) == ("2", "3")
     assert (summary["mutants"], summary["survived"], summary["not_run"]) == ("3", "2", "1")
+
+
+def test_max_mutants_order_files_by_path_in_whatever_order_they_arrive(tmp_path, monkeypatch):
+    _write(tmp_path / "src/db_conn_mcp/alpha.py", "A = 1\n")
+    _write(tmp_path / "src/db_conn_mcp/beta.py", "B = 1\n")
+    monkeypatch.setattr(mutation_check, "TESTS_FOR_MODULE", {"alpha.py": [], "beta.py": []})
+    changed = {"src/db_conn_mcp/beta.py": {1}, "src/db_conn_mcp/alpha.py": {1}}
+
+    planned = mutation_check.planned_mutants(tmp_path, changed)
+
+    assert [path for path, _, _ in planned] == [
+        "src/db_conn_mcp/alpha.py",
+        "src/db_conn_mcp/beta.py",
+    ]
 
 
 def test_max_mutants_left_unrun_fail_the_check_even_when_every_run_mutant_is_killed(
@@ -525,6 +541,22 @@ def test_summary_with_zero_counts_when_no_src_python_line_changed(tmp_path, monk
     assert summary["sha"] == _git(repo, "rev-parse", "--short", "HEAD")
 
 
+def test_summary_main_checks_against_origin_main_with_at_most_100_mutants(tmp_path, monkeypatch):
+    """Run from a subdirectory, ``main`` still finds the repository root."""
+    repo = _repository(tmp_path, {"docs/README.md": "toy\n"})
+    calls: list[tuple[Path, str, int]] = []
+
+    def record_check(repo_root: Path, base: str, max_mutants: int) -> int:
+        calls.append((repo_root.resolve(), base, max_mutants))
+        return 0
+
+    monkeypatch.setattr(mutation_check, "run_check", record_check)
+    monkeypatch.chdir(repo / "docs")
+
+    assert mutation_check.main([]) == 0
+    assert calls == [(repo.resolve(), "origin/main", 100)]
+
+
 def test_summary_is_not_printed_outside_a_repository(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert mutation_check.main([]) == 2
@@ -543,6 +575,7 @@ def test_summary_is_not_printed_without_the_default_base_origin_main(tmp_path, m
 
 
 def test_timed_out_limit_is_the_larger_of_the_floor_and_three_baselines():
+    assert mutation_check.MINIMUM_TIME_LIMIT_SECONDS == 60.0
     assert mutation_check.time_limit_seconds(10.0, 60.0) == 60.0
     assert mutation_check.time_limit_seconds(30.0, 60.0) == 90.0
 
