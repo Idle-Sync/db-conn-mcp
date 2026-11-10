@@ -424,6 +424,8 @@ ruff check . && ruff format --check .
 pytest -q
 ```
 
+`pyproject.toml` is the single source of dependency truth. The codebase is split into single-purpose layers (`config`, `models`, `dialects/`, `safety`, `diagnostics`, `doctor`, `clients`, `verify`, `handlers`, `server`, `cli`, `gui/`); only the dialect layer knows a specific database exists. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md), [`docs/PRD.md`](./docs/PRD.md), and [`docs/PLAN.md`](./docs/PLAN.md).
+
 ### Mutation check
 
 Pull requests also run a mutation check on the `src/` lines they change. It flips a comparison,
@@ -439,10 +441,11 @@ Exit codes: `0` no survivor, `1` a survivor or mutants left unrun past `--max-mu
 `2` the check could not run (a file that does not parse, a module with no mapped tests).
 
 If a mutant is equivalent (no test could tell it from the original), mark the line with a comment
-that gives the reason; the reason is required:
+that gives the reason; the reason is required. The marker covers every mutant on its line, so the
+reason has to hold for each of them:
 
 ```python
-if count >= 0:  # mutation-ok: count is never negative, so > and >= behave the same
+raise AssertionError("unreachable")  # mutation-ok: every mode returns above, so this line never runs
 ```
 
 From a git worktree, which has no `.venv` of its own, run the main checkout's interpreter from the
@@ -455,8 +458,6 @@ worktree root:
 Survivors in `dialects/postgres.py` are only caught by the live tests, so run the check with
 `DB_CONN_MCP_TEST_DSN` set to a disposable Postgres, or leave those mutants to the CI job, which
 has one.
-
-`pyproject.toml` is the single source of dependency truth. The codebase is split into single-purpose layers (`config`, `models`, `dialects/`, `safety`, `diagnostics`, `doctor`, `clients`, `verify`, `handlers`, `server`, `cli`, `gui/`); only the dialect layer knows a specific database exists. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md), [`docs/PRD.md`](./docs/PRD.md), and [`docs/PLAN.md`](./docs/PLAN.md).
 
 ---
 
