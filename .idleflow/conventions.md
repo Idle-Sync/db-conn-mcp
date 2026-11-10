@@ -173,3 +173,4 @@ introduce a tool or a hand-written replacement that contradicts them. Declined i
 listed too so they are not proposed again.
 
 <!-- stack decisions start -->
+- [L1] mutation testing on changed lines: hand-written (exact changed-line scoping, .pyc controlled via a temp copy of src/, reason-required equivalent marker, Windows works, no new dependency; mutmut is function-level only and cosmic-ray lacks 3.14 and verified diff scoping; research: docs/research/mutation-testing.md)
