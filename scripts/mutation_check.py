@@ -72,8 +72,6 @@ HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 MARKER = re.compile(r"#\s*mutation-ok:(.*)")
 
-LITERAL_NAMES = ("Literal", "typing.Literal")
-
 FLIPPED_COMPARISONS: dict[type[ast.cmpop], type[ast.cmpop]] = {
     ast.Eq: ast.NotEq,
     ast.NotEq: ast.Eq,
@@ -201,7 +199,7 @@ def marker_reason(mutant: Mutant, markers: dict[int, str]) -> str | None:
 
 
 def nodes_never_mutated(tree: ast.AST) -> set[int]:
-    """The ids of docstrings, annotations, ``Literal`` types and format specs in ``tree``."""
+    """The ids of docstrings, annotations and f-string format specs in ``tree``."""
     skipped: set[int] = set()
     for node in ast.walk(tree):
         untouched: ast.AST | None = None
@@ -209,9 +207,6 @@ def nodes_never_mutated(tree: ast.AST) -> set[int]:
             untouched = node.returns
         elif isinstance(node, ast.arg | ast.AnnAssign):
             untouched = node.annotation
-        elif isinstance(node, ast.Subscript) and ast.unparse(node.value) in LITERAL_NAMES:
-            # A Literal alias (`Verdict = Literal[...]`) is a type, though not an annotation.
-            untouched = node.slice
         elif isinstance(node, ast.FormattedValue):
             # A replaced format spec is a ValueError, not a fault a test has to catch.
             untouched = node.format_spec
@@ -332,7 +327,7 @@ def copy_source(repo_root: Path, destination: Path) -> Path:
     return source_copy
 
 
-def test_environment(source_copy: Path) -> dict[str, str]:
+def child_environment(source_copy: Path) -> dict[str, str]:
     """The environment of a child run: the copy first on the path, no bytecode written."""
     environment = dict(os.environ)
     existing = environment.get("PYTHONPATH")
@@ -344,7 +339,7 @@ def test_environment(source_copy: Path) -> dict[str, str]:
     return environment
 
 
-def test_command(test_files: list[str]) -> list[str]:
+def pytest_command(test_files: list[str]) -> list[str]:
     """The pytest command for ``test_files``, stopping at the first failure."""
     paths = [f"tests/{name}" for name in test_files]
     return [sys.executable, "-B", "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", *paths]
@@ -356,7 +351,7 @@ def imported_package_file(source_copy: Path, repo_root: Path) -> Path:
     completed = subprocess.run(
         command,
         cwd=repo_root,
-        env=test_environment(source_copy),
+        env=child_environment(source_copy),
         capture_output=True,
         text=True,
         check=False,
@@ -375,9 +370,9 @@ def run_tests(
     Output goes nowhere: a test's own child process can hold a pipe open past the kill.
     """
     completed = subprocess.run(
-        test_command(test_files),
+        pytest_command(test_files),
         cwd=repo_root,
-        env=test_environment(source_copy),
+        env=child_environment(source_copy),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         timeout=time_limit,
@@ -402,9 +397,9 @@ def run_baseline(repo_root: Path, test_files: list[str], printed_skips: set[str]
             )
         started = time.monotonic()
         completed = subprocess.run(
-            [*test_command(test_files), "-rs"],
+            [*pytest_command(test_files), "-rs"],
             cwd=repo_root,
-            env=test_environment(source_copy),
+            env=child_environment(source_copy),
             capture_output=True,
             text=True,
             check=False,

@@ -239,11 +239,6 @@ def test_find_mutants_never_touches_annotations():
     assert [mutant.description for mutant in mutants] == ["'y' -> 'XXyXX'", "2 -> 3"]
 
 
-def test_find_mutants_never_touches_a_literal_type_alias():
-    source = 'Action = Literal["inject", "uninject"]\nKind = typing.Literal[1]\n'
-    assert mutation_check.find_mutants(source, {1, 2}) == []
-
-
 def test_find_mutants_replaces_f_string_text_but_not_its_format_spec():
     """A replaced format spec only raises ``ValueError``; the text is what a reader sees."""
     mutants = mutation_check.find_mutants('x = f"a{b:>3}"\n', {1})
@@ -366,11 +361,11 @@ def test_end_to_end_child_environment_puts_the_copy_first_and_writes_no_bytecode
     """The variable reaches a test's own child processes, which ``-B`` does not."""
     source_copy = Path("copy") / "src"
     monkeypatch.setenv("PYTHONPATH", "existing")
-    environment = mutation_check.test_environment(source_copy)
+    environment = mutation_check.child_environment(source_copy)
     assert environment["PYTHONPATH"] == str(source_copy) + os.pathsep + "existing"
     assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
     monkeypatch.delenv("PYTHONPATH")
-    assert mutation_check.test_environment(source_copy)["PYTHONPATH"] == str(source_copy)
+    assert mutation_check.child_environment(source_copy)["PYTHONPATH"] == str(source_copy)
 
 
 # ---- baseline ----
@@ -585,8 +580,9 @@ def test_timed_out_mutant_is_counted_apart_from_killed_and_does_not_fail(
 ):
     """A mutant that loops forever has not been caught by an assertion, nor has it survived."""
     test_text = (
+        "import time\n\n"
         "from db_conn_mcp.toy import answer, ready\n\n\n"
-        "def test_ready():\n    while not ready():\n        pass\n\n\n"
+        "def test_ready():\n    time.sleep(0.5)\n    while not ready():\n        pass\n\n\n"
         "def test_answer():\n    assert answer() == 2\n"
     )
     before = "def ready():\n    return None\n"
@@ -600,5 +596,6 @@ def test_timed_out_mutant_is_counted_apart_from_killed_and_does_not_fail(
     assert exit_code == 0, output
     assert "timed out src/db_conn_mcp/toy.py:2 True -> False" in output
     summary = _summary(output)
-    # The killed mutant ran past the 0.1 s floor: its limit came from the baseline time.
+    # The sleep keeps every run past the 0.1 s floor, so the killed mutant finishing in time
+    # shows its limit came from the baseline time; the margin is then about a second.
     assert (summary["timed_out"], summary["killed"], summary["survived"]) == ("1", "1", "0")
