@@ -45,6 +45,36 @@ the time of that release.
   `connections.json` the entry points at; if that log cannot be opened, is a link or is not a
   regular file, the client is skipped and its config left as it was; an uninject whose entry names
   no `connections.json` goes ahead unrecorded (#76).
+- `get_table_schema` on a table that does not exist now answers with an error result, `Table
+  '<name>' was not found. Use list_tables to see the tables in this database.`, where it used to
+  return `columns: []`. A table with no columns and a materialized view still return
+  `columns: []`. `get_object_definition` with no match now answers `No <object_type> named
+  '<name>' was found in database '<database>'.` instead of `matches: []`.
+- `execute_read_query` on a statement that returns no columns (`SELECT FROM t`) now answers
+  `{"columns": [], "rows": [...]}` with one empty object per row, where it used to answer
+  `{"rows_affected": n}`.
+- `fetch_rows` on an unknown `cursor_id` now says the cursor may have been fully read (a fetch
+  that answers `exhausted: true` closes it), as well as expired or closed. The message still
+  starts `Unknown cursor_id`.
+- Every tool now answers one JSON object whose first key is `meta`: `tool`, `database`,
+  `row_count`, `truncated` and `elapsed_ms`. A field that does not apply to the tool is `null`.
+  The tools that already answered an object keep their keys unchanged, beside `meta`.
+- The six tools that answered a bare list now put it under a key: `list_databases` under
+  `databases`, `list_tables` under `tables`, `find_columns` under `columns`,
+  `sample_table_rows` under `rows`, `check_database` under `results` and `doctor` under
+  `findings`. Where you got one text block per item, you now get one block holding the whole
+  object.
+- An empty list now arrives as one block with the key holding `[]` and `meta.row_count: 0`,
+  where it used to arrive as zero blocks (or, for `sample_table_rows`, a block holding `[]`).
+- The `structuredContent` of `list_databases`, `list_tables`, `find_columns`, `check_database`
+  and `doctor` is now that same envelope, `{"meta": {...}, "<key>": [...]}`, where it was
+  `{"result": [...]}`; their published output schemas describe `meta` and the list key.
+- `sample_table_rows` returns at most 1000 rows: a larger `n` is clamped to 1000 and the answer
+  carries `meta.truncated: true`. The default stays 10, and the rows come in no guaranteed order.
+- `list_tables` and `find_columns` with `limit` set now report `meta.truncated: true` when more
+  rows matched than `limit` let through; without `limit`, `meta.truncated` is `false`.
+- The server instructions now describe the untrusted-data banner layout: the opening marker
+  line, one notice line, then the JSON payload on every line up to the closing marker line.
 
 ### Fixed
 

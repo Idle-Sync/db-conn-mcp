@@ -460,14 +460,20 @@ class Handlers:
         session-flipping query (``SET ... READ WRITE``, a piggy-backed ``; DELETE``)
         is rejected without touching the database. ``params`` bind via the driver
         (Postgres ``$1``/``$2``); ``timeout_ms`` cancels an overrunning query.
+        The answer is always ``{columns, rows}``: a result with no columns
+        (``SELECT FROM t``) gives one empty object per row.
         """
         conn = config.get(self._load(), database)
         dialect_for(conn.dsn).validate_read_only(sql)  # raises ValueError if not read-only
         dialect, db = await self._connect(conn, read_only=True)
         try:
-            return await dialect.execute(db, sql, params, timeout_ms)
+            result = await dialect.execute(db, sql, params, timeout_ms)
         finally:
             await db.close()
+        # The dialect answers a result without columns in the write shape.
+        if "rows_affected" in result:
+            return {"columns": [], "rows": [{} for _ in range(result["rows_affected"])]}
+        return result
 
     @staticmethod
     def _grant_key(session_token: str, database: str, sql: str, params: list[Any] | None) -> str:
@@ -643,8 +649,9 @@ class Handlers:
         state = self._cursors.get(cursor_id)
         if state is None:
             raise ValueError(
-                f"Unknown cursor_id {cursor_id!r} — it may have expired "
-                "(15 min idle limit) or already been closed."
+                f"Unknown cursor_id {cursor_id!r} — it may have been fully read (a fetch that "
+                "answers exhausted: true closes the cursor), expired (15 min idle limit) or "
+                "already been closed."
             )
         # Refused here because the driver's "another operation is in progress" error
         # would look like a failed read and close the connection under the running fetch.
@@ -684,13 +691,18 @@ class Handlers:
     # ---- Object-definition tool ------------------------------------------------
 
     async def get_object_definition(self, database: str, object_type: str, name: str) -> dict:
-        """Faithful definition(s) of a view/function/trigger/sequence/index by name."""
+        """Faithful definition(s) of a view/function/trigger/sequence/index by name.
+
+        Raises ``ValueError`` when no object of that type and name exists.
+        """
         conn = config.get(self._load(), database)
         dialect, db = await self._connect(conn, read_only=True)
         try:
             matches = await dialect.get_object_definition(db, object_type, name)
         finally:
             await db.close()
+        if not matches:
+            raise ValueError(f"No {object_type} named {name!r} was found in database {database!r}.")
         return {"object_type": object_type, "name": name, "matches": matches}
 
     # ---- Operational insight tools ----------------------------------------------

@@ -168,3 +168,45 @@ async def test_foreign_key_into_partitioned_table_lists_each_column_once(
         single_partition = await dialect.get_schema(conn, f"{schema}.{partition}")
         assert single_partition["primary_key"] == ["id", "tenant"]
         assert single_partition["foreign_keys"] == []
+
+
+async def test_get_schema_missing_table_raises_not_found(conn_and_schema):
+    """pg_class exists in pg_catalog only, so qualifying it with this schema must miss."""
+    conn, schema = conn_and_schema
+    missing = f"missing_{uuid.uuid4().hex}"
+    for table in (missing, f"{schema}.{missing}", f"{schema}.pg_class"):
+        with pytest.raises(ValueError) as error:
+            await PostgresDialect().get_schema(conn, table)
+        assert str(error.value) == (
+            f"Table {table!r} was not found. Use list_tables to see the tables in this database."
+        )
+
+
+async def test_get_schema_zero_column_table_is_found(conn_and_schema):
+    conn, schema = conn_and_schema
+    await conn.execute(f"CREATE TABLE {schema}.empty ()")
+    result = await PostgresDialect().get_schema(conn, f"{schema}.empty")
+    assert result["columns"] == []
+
+
+async def test_get_schema_view_and_materialized_view_are_found(conn_and_schema):
+    """information_schema.columns leaves out a materialized view's columns; it still exists."""
+    conn, schema = conn_and_schema
+    await conn.execute(f"CREATE VIEW {schema}.orgs_view AS SELECT * FROM {schema}.orgs")
+    await conn.execute(
+        f"CREATE MATERIALIZED VIEW {schema}.orgs_matview AS SELECT * FROM {schema}.orgs"
+    )
+    dialect = PostgresDialect()
+    view = await dialect.get_schema(conn, f"{schema}.orgs_view")
+    assert [column["name"] for column in view["columns"]] == ["id", "tenant"]
+    matview = await dialect.get_schema(conn, f"{schema}.orgs_matview")
+    assert matview["table"] == f"{schema}.orgs_matview"
+
+
+async def test_list_tables_and_find_columns_rows_carry_the_documented_keys(conn_and_schema):
+    conn, schema = conn_and_schema
+    dialect = PostgresDialect()
+    tables = [row for row in await dialect.list_tables(conn) if row["schema"] == schema]
+    assert set(tables[0]) == {"schema", "name", "kind"}
+    columns = [row for row in await dialect.find_columns(conn, "tenant") if row["schema"] == schema]
+    assert set(columns[0]) == {"schema", "table", "column", "type", "nullable"}
