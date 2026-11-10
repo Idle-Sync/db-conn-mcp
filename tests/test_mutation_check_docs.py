@@ -54,3 +54,9 @@ def test_readme_marker_example_marks_only_a_line_that_never_runs() -> None:
     # script mutated in some other way would need a different reason.
     mutants = find_mutants(marker_example_line() + "\n", {1})
     assert [mutant.description for mutant in mutants] == ["'unreachable' -> 'XXunreachableXX'"]
+
+
+def test_ci_mutation_job_raises_the_mutant_limit() -> None:
+    # A change that touches every tool comes close to the default 100, and a mutant left
+    # unrun fails the job.
+    assert f'{COMMAND} "origin/$BASE_REF" --max-mutants 400' in mutation_job_text()

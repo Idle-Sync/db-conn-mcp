@@ -18,9 +18,9 @@ from db_conn_mcp.verify import EXPECTED_TOOL_COUNT, verify_http, verify_stdio
 def _temp_config(tmp_path):
     """A throwaway config for the spawned server.
 
-    It holds one entry because ``list_databases`` returns a list, and FastMCP emits
-    *no* text block for an empty one — the DSN is never dialled (the handler only
-    reads config), so nothing here touches the network.
+    It holds one entry so the ``list_databases`` answer carries a real database row,
+    not only an empty list. The DSN is never dialled (the handler only reads config),
+    so nothing here touches the network.
     """
     entry = {"name": "verify-fixture", "dsn": "postgresql://u@127.0.0.1:1/x", "mode": "read"}
     p = tmp_path / "connections.json"
@@ -39,7 +39,8 @@ async def test_verify_stdio_end_to_end_against_this_repo(tmp_path):
     assert result["server_version"] == __version__
     assert result["stale"] is False
     assert result["instructions"]  # the untrusted-data policy arrived
-    assert result["list_databases_text"] is not None
+    assert '"meta"' in result["list_databases_text"]
+    assert '"databases"' in result["list_databases_text"]
     assert result["list_databases_error"] is None
 
 

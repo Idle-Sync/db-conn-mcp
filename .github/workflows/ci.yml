@@ -142,4 +142,6 @@ jobs:
           # A throwaway service container; 127.0.0.1, not localhost, so the client
           # does not try IPv6 first.
           DB_CONN_MCP_TEST_DSN: postgresql://postgres:postgres@127.0.0.1:5432/postgres
-        run: python scripts/mutation_check.py --base "origin/$BASE_REF"
+        # 400, not the default 100: a change to every tool's body comes close to 100
+        # mutants, and any left unrun fail the job.
+        run: python scripts/mutation_check.py --base "origin/$BASE_REF" --max-mutants 400

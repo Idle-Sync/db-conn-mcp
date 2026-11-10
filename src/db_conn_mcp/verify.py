@@ -42,9 +42,10 @@ Verdict = Literal[
 class VerifyResult(TypedDict):
     """One verification outcome, in the fixed vocabulary the GUI may render (Rule 6).
 
-    ``list_databases_text`` holds the database list and nothing else; when the call
-    returned an error result or the server answered with a JSON-RPC error, its text goes in
-    ``list_databases_error``, whatever the verdict.
+    ``list_databases_text`` is the first text block of the ``list_databases`` answer: the
+    fenced envelope, ``meta`` then ``databases``. When the call returned an error result
+    or the server answered with a JSON-RPC error, its text goes in
+    ``list_databases_error`` instead, whatever the verdict.
     """
 
     verdict: Verdict
