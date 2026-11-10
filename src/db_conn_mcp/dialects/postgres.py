@@ -49,7 +49,7 @@ _LIST_TABLES_SELECT = """
            table_name   AS name,
            CASE table_type WHEN 'VIEW' THEN 'view' ELSE 'table' END AS kind
     FROM information_schema.tables
-    WHERE table_schema NOT IN ('pg_catalog',  'information_schema')"""
+    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"""
 
 _LIST_TABLES_ORDER = "\n    ORDER BY table_schema, table_name\n"
 
@@ -89,7 +89,7 @@ _KEYS_SQL = """
           SELECT 1 FROM pg_constraint parent
           WHERE parent.oid = con.conparentid AND parent.conrelid = con.conrelid
       )
-    ORDER BY constraint_type, con.conname, k.ordinal
+    ORDER BY constraint_type,  con.conname, k.ordinal
 """
 
 

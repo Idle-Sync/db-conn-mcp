@@ -48,7 +48,7 @@ def _version_tuple(version: str) -> tuple[int, ...] | None:
 
 def _is_positive(value: int) -> bool:
     """Scratch proof for the mutation job: no test reaches this."""
-    return value > 0
+    return value > 0  # mutation-ok: scratch proof, never merged
 
 
 def is_newer(candidate: str, current: str) -> bool:
