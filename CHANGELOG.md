@@ -45,6 +45,17 @@ the time of that release.
   `connections.json` the entry points at; if that log cannot be opened, is a link or is not a
   regular file, the client is skipped and its config left as it was; an uninject whose entry names
   no `connections.json` goes ahead unrecorded (#76).
+- `get_table_schema` on a table that does not exist now answers with an error result, `Table
+  '<name>' was not found. Use list_tables to see the tables in this database.`, where it used to
+  return `columns: []`. A table with no columns and a materialized view still return
+  `columns: []`. `get_object_definition` with no match now answers `No <object_type> named
+  '<name>' was found in database '<database>'.` instead of `matches: []`.
+- `execute_read_query` on a statement that returns no columns (`SELECT FROM t`) now answers
+  `{"columns": [], "rows": [...]}` with one empty object per row, where it used to answer
+  `{"rows_affected": n}`.
+- `fetch_rows` on an unknown `cursor_id` now says the cursor may have been fully read (a fetch
+  that answers `exhausted: true` closes it), as well as expired or closed. The message still
+  starts `Unknown cursor_id`.
 
 ### Fixed
 

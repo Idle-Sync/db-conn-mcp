@@ -313,6 +313,37 @@ async def test_get_schema_shape():
     assert result["foreign_keys"] == [{"column": "org_id", "references": "orgs.id"}]
 
 
+@pytest.mark.parametrize(
+    ("table", "bound"), [("ghost", ("ghost", None)), ("app.ghost", ("ghost", "app"))]
+)
+async def test_get_schema_missing_table_raises_not_found(table, bound):
+    """No columns and no relation is a missing table, not an empty one."""
+    conn = FakeConn([[]])
+    with pytest.raises(ValueError) as error:
+        await PostgresDialect().get_schema(conn, table)
+    assert str(error.value) == (
+        f"Table {table!r} was not found. Use list_tables to see the tables in this database."
+    )
+    assert conn.fetchrow_args == [bound]
+    assert "pg_class" in conn.fetchrow_calls[0]
+    assert conn.fetched == [pg._COLUMNS_SQL]  # raised before the key query
+
+
+async def test_get_schema_found_table_skips_the_existence_query():
+    columns = [{"name": "id", "type": "integer", "nullable": False, "default": None}]
+    conn = FakeConn([columns, []])
+    await PostgresDialect().get_schema(conn, "users")
+    assert conn.fetchrow_calls == []
+
+
+async def test_get_schema_existing_relation_without_columns_returns_empty():
+    """A zero-column table or a materialized view exists, so it answers as it always has."""
+    conn = FakeConn([[], []], fetchrow_results=[{"oid": 16384}])
+    result = await PostgresDialect().get_schema(conn, "app.empty")
+    assert result == {"table": "app.empty", "columns": [], "primary_key": [], "foreign_keys": []}
+    assert conn.fetchrow_args == [("empty", "app")]
+
+
 # Composite keys as _KEYS_SQL orders them: by constraint type, then constraint name, then
 # declared position. Declared order is not alphabetical, so a sort in assembly would show.
 COMPOSITE_KEY_ROWS = [
@@ -334,7 +365,7 @@ COMPOSITE_FOREIGN_KEYS = [
 
 async def test_get_schema_keeps_composite_key_rows_in_order():
     """Each key row becomes exactly one entry, in row order, on its own side only."""
-    conn = FakeConn([[], COMPOSITE_KEY_ROWS])
+    conn = FakeConn([[], COMPOSITE_KEY_ROWS], fetchrow_results=[{"oid": 16384}])
     result = await PostgresDialect().get_schema(conn, "app.memberships")
     assert result["primary_key"] == COMPOSITE_PRIMARY_KEY
     assert result["foreign_keys"] == COMPOSITE_FOREIGN_KEYS
