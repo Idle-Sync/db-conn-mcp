@@ -424,6 +424,38 @@ ruff check . && ruff format --check .
 pytest -q
 ```
 
+### Mutation check
+
+Pull requests also run a mutation check on the `src/` lines they change. It flips a comparison,
+swaps `and`/`or` or `True`/`False`, drops a `not`, swaps `+`/`-`, adds one to a number or replaces
+a string, one fault at a time, and runs the module's tests against each mutant. A mutant the tests
+still pass on has survived: no test tells that changed line from a faulty one. Run it before you push:
+
+```bash
+python scripts/mutation_check.py --base origin/main
+```
+
+Exit codes: `0` no survivor, `1` a survivor or mutants left unrun past `--max-mutants` (default 100),
+`2` the check could not run (a file that does not parse, a module with no mapped tests).
+
+If a mutant is equivalent (no test could tell it from the original), mark the line with a comment
+that gives the reason; the reason is required:
+
+```python
+if count >= 0:  # mutation-ok: count is never negative, so > and >= behave the same
+```
+
+From a git worktree, which has no `.venv` of its own, run the main checkout's interpreter from the
+worktree root:
+
+```bash
+<main>/.venv/bin/python scripts/mutation_check.py --base <base sha>
+```
+
+Survivors in `dialects/postgres.py` are only caught by the live tests, so run the check with
+`DB_CONN_MCP_TEST_DSN` set to a disposable Postgres, or leave those mutants to the CI job, which
+has one.
+
 `pyproject.toml` is the single source of dependency truth. The codebase is split into single-purpose layers (`config`, `models`, `dialects/`, `safety`, `diagnostics`, `doctor`, `clients`, `verify`, `handlers`, `server`, `cli`, `gui/`); only the dialect layer knows a specific database exists. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md), [`docs/PRD.md`](./docs/PRD.md), and [`docs/PLAN.md`](./docs/PLAN.md).
 
 ---
