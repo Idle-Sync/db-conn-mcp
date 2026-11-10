@@ -46,6 +46,11 @@ def _version_tuple(version: str) -> tuple[int, ...] | None:
     return None
 
 
+def _is_positive(value: int) -> bool:
+    """Scratch proof for the mutation job: no test reaches this."""
+    return value > 0
+
+
 def is_newer(candidate: str, current: str) -> bool:
     """True only if ``candidate`` is strictly newer than ``current``.
 
