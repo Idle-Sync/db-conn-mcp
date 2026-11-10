@@ -5,6 +5,7 @@ and a toy test file, so every mutant run is a real pytest child on a real copy, 
 fake: the check's whole value is that a mutant the tests miss is reported.
 """
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -194,6 +195,23 @@ def test_find_mutants_makes_one_mutant_per_operator(source, mutated):
     assert [mutant.source.strip() for mutant in mutants] == [mutated]
 
 
+def test_find_mutants_flips_each_operator_of_a_chained_comparison():
+    mutants = mutation_check.find_mutants("x = a < b == c\n", {1})
+    assert [mutant.source.strip() for mutant in mutants] == ["x = a >= b == c", "x = a < b != c"]
+
+
+def test_find_mutants_cuts_a_string_description_past_40_characters():
+    """A long SQL string would otherwise fill the report line."""
+    value_of_40 = "a" * 38  # repr adds the two quotes
+    replaced_of_44 = repr("XX" + value_of_40 + "XX")
+    mutants = mutation_check.find_mutants(f"x = {value_of_40!r}\n", {1})
+    assert mutants[0].description == f"{value_of_40!r} -> {replaced_of_44[:37]}..."
+
+    value_of_41 = "a" * 39
+    mutants = mutation_check.find_mutants(f"x = {value_of_41!r}\n", {1})
+    assert mutants[0].description.startswith(f"{repr(value_of_41)[:37]}... -> ")
+
+
 def test_find_mutants_skips_unchanged_lines():
     mutants = mutation_check.find_mutants("x = a == b\ny = c == d\n", {2})
     assert [(mutant.line, mutant.source.strip()) for mutant in mutants] == [
@@ -310,8 +328,10 @@ def test_end_to_end_killed_mutant_returns_0_with_the_summary_line(tmp_path, monk
     counts = {name: summary[name] for name in ("files", "lines", "mutants", "killed")}
     assert counts == {"files": "1", "lines": "1", "mutants": "1", "killed": "1"}
     assert summary["survived"] == summary["timed_out"] == summary["not_run"] == "0"
+    assert len(output.strip().splitlines()) == 1, "a killed mutant prints no line of its own"
     assert toy_module.read_bytes() == toy_bytes
     assert list(repo.rglob("__pycache__")) == []
+    assert list(repo.rglob(".pytest_cache")) == []
 
 
 def test_end_to_end_surviving_mutant_prints_survived_and_returns_1(tmp_path, monkeypatch, capsys):
@@ -329,7 +349,61 @@ def test_end_to_end_surviving_mutant_prints_survived_and_returns_1(tmp_path, mon
     assert list(repo.rglob("__pycache__")) == []
 
 
+def test_end_to_end_copy_source_leaves_out_pycache(tmp_path):
+    """A stale ``.pyc`` in the copy could be imported instead of the mutated module."""
+    repo = tmp_path / "repo"
+    _write(repo / "src/db_conn_mcp/toy.py", ANSWER_BEFORE)
+    _write(repo / "src/db_conn_mcp/__pycache__/toy.cpython-312.pyc", "stale")
+
+    source_copy = mutation_check.copy_source(repo, tmp_path / "copy")
+
+    assert (source_copy / "db_conn_mcp/toy.py").read_text(encoding="utf-8") == ANSWER_BEFORE
+    assert list(source_copy.rglob("__pycache__")) == []
+
+
+def test_end_to_end_child_environment_puts_the_copy_first_and_writes_no_bytecode(monkeypatch):
+    """The variable reaches a test's own child processes, which ``-B`` does not."""
+    source_copy = Path("copy") / "src"
+    monkeypatch.setenv("PYTHONPATH", "existing")
+    environment = mutation_check.test_environment(source_copy)
+    assert environment["PYTHONPATH"] == str(source_copy) + os.pathsep + "existing"
+    assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
+    monkeypatch.delenv("PYTHONPATH")
+    assert mutation_check.test_environment(source_copy)["PYTHONPATH"] == str(source_copy)
+
+
 # ---- baseline ----
+
+
+def test_baseline_prints_each_skip_line_once(tmp_path, monkeypatch, capsys):
+    """Two modules share a test file with a skip; the skip is news once, not per baseline."""
+    test_text = (
+        "import pytest\n"
+        "from db_conn_mcp.other import other\n"
+        "from db_conn_mcp.toy import answer\n\n\n"
+        "def test_answer():\n    assert answer() == 2\n    assert other() == 2\n\n\n"
+        "def test_live():\n    pytest.skip('no live database')\n"
+    )
+    repo = _repository(
+        tmp_path,
+        {
+            "src/db_conn_mcp/__init__.py": "",
+            "src/db_conn_mcp/other.py": "def other():\n    return 1\n",
+            "src/db_conn_mcp/toy.py": ANSWER_BEFORE,
+            "tests/test_toy.py": test_text,
+        },
+    )
+    _write(repo / "src/db_conn_mcp/other.py", "def other():\n    return 2\n")
+    _write(repo / "src/db_conn_mcp/toy.py", ANSWER_AFTER)
+    tests_for_module = {**TOY_TESTS_FOR_MODULE, "other.py": ["test_toy.py"]}
+    monkeypatch.setattr(mutation_check, "TESTS_FOR_MODULE", tests_for_module)
+
+    exit_code, output = _run_main(monkeypatch, capsys, repo)
+
+    assert exit_code == 0, output
+    assert output.count("SKIPPED") == 1
+    assert "no live database" in output
+    assert _summary(output)["killed"] == "2"
 
 
 def test_baseline_failure_stops_the_check_before_any_mutant(tmp_path, monkeypatch, capsys):
@@ -393,6 +467,20 @@ def test_max_mutants_runs_the_first_in_file_and_line_order(tmp_path, monkeypatch
     assert (summary["mutants"], summary["survived"], summary["not_run"]) == ("3", "2", "1")
 
 
+def test_max_mutants_left_unrun_fail_the_check_even_when_every_run_mutant_is_killed(
+    tmp_path, monkeypatch, capsys
+):
+    after = "def answer():\n    return 2\n\n\ndef unchecked():\n    return 5\n"
+    repo = _toy_repository(tmp_path, TEST_CATCHES_ANSWER, ANSWER_BEFORE, after)
+    monkeypatch.setattr(mutation_check, "TESTS_FOR_MODULE", TOY_TESTS_FOR_MODULE)
+
+    exit_code, output = _run_main(monkeypatch, capsys, repo, "--max-mutants", "1")
+
+    assert exit_code == 1
+    summary = _summary(output)
+    assert (summary["killed"], summary["survived"], summary["not_run"]) == ("1", "0", "1")
+
+
 # ---- TESTS_FOR_MODULE ----
 
 
@@ -437,6 +525,20 @@ def test_summary_with_zero_counts_when_no_src_python_line_changed(tmp_path, monk
     assert summary["sha"] == _git(repo, "rev-parse", "--short", "HEAD")
 
 
+def test_summary_is_not_printed_outside_a_repository(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert mutation_check.main([]) == 2
+    assert "could not run" in capsys.readouterr().out
+
+
+def test_summary_is_not_printed_without_the_default_base_origin_main(tmp_path, monkeypatch, capsys):
+    """``--base`` defaults to ``origin/main``; a clone without that ref cannot be checked."""
+    repo = _toy_repository(tmp_path, TEST_CATCHES_ANSWER, ANSWER_BEFORE, ANSWER_AFTER)
+    monkeypatch.chdir(repo)
+    assert mutation_check.main([]) == 2
+    assert "origin/main" in capsys.readouterr().out
+
+
 # ---- time limit ----
 
 
@@ -449,14 +551,14 @@ def test_timed_out_mutant_is_counted_apart_from_killed_and_does_not_fail(
     tmp_path, monkeypatch, capsys
 ):
     """A mutant that loops forever has not been caught by an assertion, nor has it survived."""
-    test_loops_until_ready = (
-        "from db_conn_mcp.toy import ready\n\n\n"
-        "def test_ready():\n    while not ready():\n        pass\n"
+    test_text = (
+        "from db_conn_mcp.toy import answer, ready\n\n\n"
+        "def test_ready():\n    while not ready():\n        pass\n\n\n"
+        "def test_answer():\n    assert answer() == 2\n"
     )
     before = "def ready():\n    return None\n"
-    after = "def ready():\n    return True\n"
-    repo = _toy_repository(tmp_path, test_loops_until_ready, before, after)
-
+    after = "def ready():\n    return True\n\n\ndef answer():\n    return 2\n"
+    repo = _toy_repository(tmp_path, test_text, before, after)
     monkeypatch.setattr(mutation_check, "TESTS_FOR_MODULE", TOY_TESTS_FOR_MODULE)
 
     exit_code = mutation_check.run_check(repo, "HEAD", 100, minimum_time_limit=0.1)
@@ -465,4 +567,5 @@ def test_timed_out_mutant_is_counted_apart_from_killed_and_does_not_fail(
     assert exit_code == 0, output
     assert "timed out src/db_conn_mcp/toy.py:2 True -> False" in output
     summary = _summary(output)
-    assert (summary["timed_out"], summary["killed"], summary["survived"]) == ("1", "0", "0")
+    # The killed mutant ran past the 0.1 s floor: its limit came from the baseline time.
+    assert (summary["timed_out"], summary["killed"], summary["survived"]) == ("1", "1", "0")
