@@ -210,3 +210,56 @@ async def test_list_tables_and_find_columns_rows_carry_the_documented_keys(conn_
     assert set(tables[0]) == {"schema", "name", "kind"}
     columns = [row for row in await dialect.find_columns(conn, "tenant") if row["schema"] == schema]
     assert set(columns[0]) == {"schema", "table", "column", "type", "nullable"}
+
+
+@pytest.fixture
+async def conn_and_listing():
+    """Yield a connection, a unique tag and the rows list_tables must return for it.
+
+    Two schemas, so the order is checked across schemas as well as within one: the
+    first holds orders<tag> and the view archive<tag> made after it, so creation order
+    is not name order; the second holds accounts<tag>. Every table name carries the
+    tag, so filtering on it isolates these rows from anything else on the server.
+    """
+    conn = await asyncpg.connect(os.environ["DB_CONN_MCP_TEST_DSN"])
+    tag = uuid.uuid4().hex
+    first, second = f"tables_a_{tag}", f"tables_b_{tag}"
+    try:
+        await conn.execute(f"CREATE SCHEMA {first}")
+        await conn.execute(f"CREATE SCHEMA {second}")
+        await conn.execute(f"CREATE TABLE {first}.orders{tag} (id integer)")
+        await conn.execute(
+            f"CREATE VIEW {first}.archive{tag} AS SELECT id FROM {first}.orders{tag}"
+        )
+        await conn.execute(f"CREATE TABLE {second}.accounts{tag} (id integer)")
+        expected = [
+            {"schema": first, "name": f"archive{tag}", "kind": "view"},
+            {"schema": first, "name": f"orders{tag}", "kind": "table"},
+            {"schema": second, "name": f"accounts{tag}", "kind": "table"},
+        ]
+        yield conn, tag, expected
+    finally:
+        await conn.execute(f"DROP SCHEMA IF EXISTS {first} CASCADE")
+        await conn.execute(f"DROP SCHEMA IF EXISTS {second} CASCADE")
+        await conn.close()
+
+
+async def test_list_tables_orders_by_schema_then_name_and_skips_system_schemas(
+    conn_and_listing,
+):
+    conn, tag, expected = conn_and_listing
+    rows = await PostgresDialect().list_tables(conn)
+    assert [row for row in rows if row["name"].endswith(tag)] == expected
+    assert not [row for row in rows if row["schema"] in ("pg_catalog", "information_schema")]
+
+
+async def test_list_tables_pattern_is_a_case_insensitive_containment_match(conn_and_listing):
+    conn, tag, expected = conn_and_listing
+    dialect = PostgresDialect()
+    assert await dialect.list_tables(conn, pattern=tag) == expected
+    assert await dialect.list_tables(conn, pattern=f"RDERS{tag.upper()}") == expected[1:2]
+
+
+async def test_list_tables_limit_keeps_the_first_rows_in_order(conn_and_listing):
+    conn, tag, expected = conn_and_listing
+    assert await PostgresDialect().list_tables(conn, pattern=tag, limit=2) == expected[:2]
