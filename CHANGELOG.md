@@ -13,6 +13,7 @@ the time of that release.
 
 ### Added
 
+- A `Mutation (changed lines)` CI job on pull requests mutates the `src/` lines a PR changes and fails when no test catches a mutant; run it locally with `python scripts/mutation_check.py --base origin/main`.
 - Every change to `connections.json` is recorded in `connections.json.audit.log` beside it: one line
   per changed connection with the time, the source (`cli`, `gui` or `mcp`), the action (`add`,
   `edit`, `remove` or `reset`), the connection name and the changed fields as `old -> new`. A

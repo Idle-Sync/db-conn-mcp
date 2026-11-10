@@ -101,3 +101,45 @@ jobs:
           # does not try IPv6 first.
           DB_CONN_MCP_TEST_DSN: postgresql://postgres:postgres@127.0.0.1:5432/postgres
         run: python -m pytest -q -rs tests/test_postgres_live.py
+
+  mutation:
+    name: Mutation (changed lines)
+    # Advisory: mutates the src/ lines a PR changes and fails when a mutant survives, i.e.
+    # when no test tells the changed line from a faulty one. Pull requests only; a push
+    # to main has no base to compare with.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # A hung mutant run must not hold the runner for the default six hours.
+    timeout-minutes: 20
+    services:
+      # Same service as `live`: mutants in dialects/postgres.py are only caught by the live tests.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # the check diffs from the merge base, which a shallow clone lacks
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install the package and its dev + doctor extras
+        # `doctor` brings psutil so the process_staleness tests run instead of skipping,
+        # which would let their mutants survive.
+        run: python -m pip install -e ".[dev,doctor]"
+      - name: Mutate the changed lines
+        env:
+          # Passed through env: so the base branch name is never interpolated into the shell.
+          BASE_REF: ${{ github.base_ref }}
+          # A throwaway service container; 127.0.0.1, not localhost, so the client
+          # does not try IPv6 first.
+          DB_CONN_MCP_TEST_DSN: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: python scripts/mutation_check.py --base "origin/$BASE_REF"
