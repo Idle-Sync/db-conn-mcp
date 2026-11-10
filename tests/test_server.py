@@ -106,6 +106,7 @@ class FakeDialect:
         cursor_close_raises=None,
         db_schema=None,
         table_stats_rows=None,
+        object_definitions=None,
     ):
         self.raise_on_connect = raise_on_connect
         self.exec_result = exec_result or {"columns": [], "rows": []}
@@ -119,6 +120,7 @@ class FakeDialect:
             cursor_batches, raise_on_fetch=cursor_raises, raise_on_close=cursor_close_raises
         )
         self.db_schema = db_schema
+        self.object_definitions = object_definitions
         self.explained: list[tuple] = []
         self.cancelled_pids: list[int] = []
         self.activity_include_query = None
@@ -186,6 +188,8 @@ class FakeDialect:
         return self.cursor
 
     async def get_object_definition(self, conn, object_type, name):
+        if self.object_definitions is not None:
+            return self.object_definitions
         return [{"schema": "public", "name": name, "kind": object_type, "definition": "..."}]
 
     async def cancel_backend(self, conn, pid):
@@ -461,6 +465,35 @@ async def test_execute_read_query_is_read_only(cfg_path, monkeypatch):
     result = await h.execute_read_query("prod", "SELECT id FROM users")
     assert dialect.connected_read_only is True
     assert result["rows"] == [{"id": 1}]
+
+
+@pytest.mark.parametrize("row_count", [0, 2])
+async def test_read_query_with_no_columns_keeps_the_read_shape(row_count, cfg_path, monkeypatch):
+    """``SELECT FROM t`` has no columns, so the dialect answers in the write shape."""
+    dialect = FakeDialect(exec_result={"rows_affected": row_count})
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    result = await h.execute_read_query("prod", "SELECT FROM users")
+    assert result == {"columns": [], "rows": [{}] * row_count}
+
+
+async def test_read_query_decode_error_passes_through(cfg_path, monkeypatch):
+    message = (
+        "The statement ran, but the rows it returned could not be decoded: a value is "
+        "outside what the client can represent."
+    )
+    dialect = FakeDialect()
+
+    async def undecodable_execute(conn, sql, params=None, timeout_ms=None):
+        raise ValueError(message)
+
+    dialect.execute = undecodable_execute
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    with pytest.raises(ValueError) as error:
+        await h.execute_read_query("prod", "SELECT d FROM far_future")
+    assert str(error.value) == message
+    assert dialect.conn.closed is True
 
 
 # ---- the write gate ----------------------------------------------------------
@@ -921,6 +954,24 @@ async def test_idle_cursors_are_reaped(cfg_path, monkeypatch):
     assert dialect.cursor.closed is True
 
 
+async def test_fetch_after_exhaustion_says_the_cursor_was_fully_read(cfg_path, monkeypatch):
+    """A drained cursor is gone, so the error has to name that as a possible cause."""
+    dialect = FakeDialect(cursor_batches=[[{"id": 1}]])
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    cursor_id = (await h.open_query_cursor("prod", "SELECT 1"))["cursor_id"]
+    assert (await h.fetch_rows(cursor_id, 2))["exhausted"] is True
+
+    for unknown_id in (cursor_id, "never-opened"):
+        with pytest.raises(ValueError) as error:
+            await h.fetch_rows(unknown_id, 2)
+        assert str(error.value) == (
+            f"Unknown cursor_id {unknown_id!r} — it may have been fully read (a fetch that "
+            "answers exhausted: true closes the cursor), expired (15 min idle limit) or "
+            "already been closed."
+        )
+
+
 # ---- object definitions -------------------------------------------------------------
 
 
@@ -932,6 +983,16 @@ async def test_get_object_definition_wraps_matches(cfg_path, monkeypatch):
     assert dialect.connected_read_only is True
     assert result["object_type"] == "view"
     assert result["matches"][0]["name"] == "active_users"
+
+
+async def test_get_object_definition_missing_object_raises_not_found(cfg_path, monkeypatch):
+    dialect = FakeDialect(object_definitions=[])
+    _patch_dialect(monkeypatch, dialect)
+    h = Handlers(cfg_path)
+    with pytest.raises(ValueError) as error:
+        await h.get_object_definition("prod", "view", "ghost_view")
+    assert str(error.value) == "No view named 'ghost_view' was found in database 'prod'."
+    assert dialect.conn.closed is True
 
 
 # ---- diff_schemas ---------------------------------------------------------------------

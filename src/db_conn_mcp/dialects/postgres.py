@@ -65,6 +65,18 @@ _COLUMNS_SQL = """
     ORDER BY ordinal_position
 """
 
+# Run only when _COLUMNS_SQL found nothing, to tell a missing table from one with no
+# visible columns: a zero-column table, or a materialized view, which
+# information_schema.columns leaves out. Same name and schema resolution as _COLUMNS_SQL.
+_RELATION_EXISTS_SQL = """
+    SELECT c.oid
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relname = $1 AND ($2::text IS NULL OR n.nspname = $2)
+      AND c.relkind IN ('r', 'v', 'm', 'f', 'p')
+    LIMIT 1
+"""
+
 # Primary- and foreign-key columns for one table, with the FK target as "table.column".
 # confkey is NULL for a PK, so unnest pads its side with NULL.
 # A foreign key into a partitioned table gets one extra row per referenced partition, on
@@ -888,6 +900,11 @@ class PostgresDialect(Dialect):
     async def get_schema(self, conn: Any, table: str) -> dict:
         name, schema = _split_schema_table(table)
         columns = await conn.fetch(_COLUMNS_SQL, name, schema)
+        if not columns and await conn.fetchrow(_RELATION_EXISTS_SQL, name, schema) is None:
+            raise ValueError(
+                f"Table {table!r} was not found. "
+                "Use list_tables to see the tables in this database."
+            )
         keys = [dict(k) for k in await conn.fetch(_KEYS_SQL, name, schema)]
         primary_key = [k["column"] for k in keys if k["constraint_type"] == "PRIMARY KEY"]
         foreign_keys = [

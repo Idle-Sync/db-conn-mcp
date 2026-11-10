@@ -36,7 +36,11 @@ class Dialect(ABC):
 
     @abstractmethod
     async def get_schema(self, conn: Any, table: str) -> dict:
-        """Return columns, types, nullability, and PK/FK for one table."""
+        """Return columns, types, nullability, and PK/FK for one table.
+
+        Raises ``ValueError`` naming the table when no table or view by that name exists.
+        A relation that exists without visible columns answers with ``columns: []``.
+        """
 
     @abstractmethod
     async def table_indexes(self, conn: Any, table: str) -> list[dict]:
