@@ -324,12 +324,22 @@ def test_server_launch_prefers_the_launcher_command(monkeypatch, tmp_path):
     ]
 
 
+def test_launcher_command_variable_keeps_the_name_the_npm_launcher_sets():
+    # The npm package sets this exact name; renaming it would silently stop its
+    # clients from being configured to launch through npx.
+    assert cli.LAUNCH_COMMAND_ENV == "DB_CONN_MCP_LAUNCH_COMMAND"
+
+
 @pytest.mark.parametrize("raw", ["npx -y pkg", "[]", '[""]', '["npx", 3]', '{"command": "npx"}'])
 def test_server_launch_rejects_a_malformed_launcher_command(raw, monkeypatch, tmp_path):
     monkeypatch.setenv(cli.LAUNCH_COMMAND_ENV, raw)
 
-    with pytest.raises(ValueError, match=cli.LAUNCH_COMMAND_ENV):
+    with pytest.raises(ValueError) as exc:
         cli.server_launch(tmp_path / "connections.json")
+
+    assert str(exc.value) == (
+        "DB_CONN_MCP_LAUNCH_COMMAND must be a JSON list of non-empty strings."
+    )
 
 
 def test_server_launch_ignores_an_empty_launcher_command(monkeypatch, tmp_path):
