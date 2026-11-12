@@ -60,6 +60,7 @@ TESTS_FOR_MODULE: dict[str, list[str]] = {
     "models.py": ["test_config.py", "test_safety.py", "test_smoke.py"],
     "safety.py": ["test_safety.py", "test_handlers_dry_run.py"],
     "server.py": ["test_server.py", "test_gui_lifecycle.py"],
+    "tool_params.py": ["test_server.py"],
     "update_check.py": ["test_update_check.py"],
     "verify.py": ["test_verify.py"],
     "dialects/__init__.py": ["test_postgres.py", "test_smoke.py"],

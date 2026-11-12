@@ -13,6 +13,30 @@ the time of that release.
 
 Nothing yet.
 
+## [0.8.1] — 2026-11-12
+
+### Added
+
+- Every tool argument now has a description in the tool's input schema: what to pass, its
+  format and its default. For example, `database` says to use a name from `list_databases`,
+  and `table` says names are case-sensitive and may be schema-qualified (`public.orders`).
+- Every tool now declares MCP behaviour hints: `readOnlyHint`, `destructiveHint`,
+  `idempotentHint` and `openWorldHint`. Only `execute_write_query` and `cancel_query` are
+  marked destructive; `doctor` is the only open-world tool.
+- Tool descriptions now name the tool to use instead when one is the wrong fit (for example,
+  `sample_table_rows` points to `execute_read_query` for filtered rows and to
+  `open_query_cursor` for more than 1000).
+
+### Breaking / Behaviour changes
+
+- Your MCP client may now treat tools differently, because it can see which ones are read-only.
+  Some clients approve read-only tools with less prompting and ask more firmly before
+  destructive ones. Nothing changes on the server: `mode`, the dry-run preview, `yolo` and
+  `user_consent` still decide what a call may do.
+- `get_database_schema` and `dump_schema_faithful` are marked as not read-only, because with
+  `output_dir` set they write a file. A client that only auto-approves read-only tools will
+  now ask before running them.
+
 ## [0.8.0] — 2026-11-10
 
 ### Added
@@ -861,7 +885,8 @@ agents.
 - Setup and management CLI — `setup`, `status`, `add`, `clients`, `check`, `remove`, `yolo` —
   with auto-injection into 8 MCP clients.
 
-[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.2...v0.7.0
