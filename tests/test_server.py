@@ -1932,6 +1932,74 @@ async def test_read_query_description_names_the_cursor_tools(cfg_path):
     assert "`SELECT` with no columns answers one empty object per row" in description
 
 
+# ---- parameter descriptions and behaviour hints ------------------------------------
+
+
+async def test_every_tool_parameter_has_a_schema_description(cfg_path):
+    """A client sees what each argument means from the input schema alone."""
+    app = server.build_server(cfg_path)
+
+    undocumented = [
+        f"{tool.name}.{param}"
+        for tool in await app.list_tools()
+        for param, spec in tool.inputSchema.get("properties", {}).items()
+        if not spec.get("description", "").strip()
+    ]
+
+    assert undocumented == []
+
+
+#: Each tool's (readOnlyHint, destructiveHint) as a client sees them.
+_EXPECTED_HINTS = {
+    "list_databases": (True, False),
+    "list_tables": (True, False),
+    "get_table_schema": (True, False),
+    "get_database_schema": (False, False),
+    "dump_schema_faithful": (False, False),
+    "sample_table_rows": (True, False),
+    "find_columns": (True, False),
+    "search_value": (True, False),
+    "execute_read_query": (True, False),
+    "execute_write_query": (False, True),
+    "explain_query": (True, False),
+    "cancel_query": (False, True),
+    "open_query_cursor": (True, False),
+    "fetch_rows": (True, False),
+    "close_cursor": (False, False),
+    "get_object_definition": (True, False),
+    "diff_schemas": (True, False),
+    "check_sequences": (True, False),
+    "table_stats": (True, False),
+    "show_activity": (True, False),
+    "set_yolo_mode": (False, False),
+    "check_database": (True, False),
+    "doctor": (True, False),
+}
+
+
+async def test_every_tool_declares_its_behaviour_hints(cfg_path):
+    """Read tools say they are read-only; only the write and cancel tools are destructive."""
+    app = server.build_server(cfg_path)
+    tools = await app.list_tools()
+
+    assert {tool.name for tool in tools} == set(_EXPECTED_HINTS)
+    for tool in tools:
+        hints = tool.annotations
+        assert hints is not None, tool.name
+        assert (hints.readOnlyHint, hints.destructiveHint) == _EXPECTED_HINTS[tool.name], tool.name
+        assert hints.idempotentHint is not None, tool.name
+        assert hints.openWorldHint is (tool.name == "doctor"), tool.name
+
+
+async def test_database_parameter_names_list_databases_as_its_source(cfg_path):
+    app = server.build_server(cfg_path)
+
+    for tool in await app.list_tools():
+        spec = tool.inputSchema.get("properties", {}).get("database")
+        if spec is not None:
+            assert "list_databases" in spec["description"], tool.name
+
+
 async def test_documented_banner_format_recovers_the_payload(cfg_path, monkeypatch):
     """A real multi-line answer, stripped by the rule the server instructions state."""
     _patch_dialect(monkeypatch, FakeDialect())

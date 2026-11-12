@@ -17,10 +17,11 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ContentBlock
+from pydantic import Field
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.middleware import Middleware
@@ -33,6 +34,23 @@ from . import doctor as doctor_mod
 from .config import global_config_path, resolve_path
 from .guard import UNTRUSTED_DATA_POLICY, guard_content_blocks
 from .handlers import Handlers
+from .tool_params import (
+    CANCEL,
+    DIAGNOSTICS,
+    LOCAL_STATE,
+    READ_ONLY,
+    READ_ONLY_STATEFUL,
+    READ_WITH_EXPORT,
+    WRITE,
+    CursorId,
+    DatabaseName,
+    OutputDir,
+    ReadSql,
+    RowLimit,
+    SqlParams,
+    TableName,
+    TimeoutMs,
+)
 
 Transport = Literal["stdio", "http"]
 
@@ -262,9 +280,13 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
     app._mcp_server.version = __version__
 
     # ---- Exploration tools ---------------------------------------------------
-    @app.tool()
+    @app.tool(annotations=READ_ONLY)
     async def list_databases() -> ListDatabasesResult:
         """List configured databases with their allowed mode and yolo flag (no DSN).
+
+        Call this first: every other tool takes one of these `name`s as its `database`
+        argument. It reads only the local connections.json and opens no connection — to
+        test whether a database actually answers, use check_database.
 
         Returns `meta` and `databases`, one item per configured database with `name`,
         `mode` and `yolo`. Entries with fallback_ports configured also show them, plus
@@ -276,11 +298,25 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
             "list_databases", None, started, {"databases": databases}, count_key="databases"
         )
 
-    @app.tool()
+    @app.tool(annotations=READ_ONLY)
     async def list_tables(
-        database: str, pattern: str | None = None, limit: int | None = None
+        database: DatabaseName,
+        pattern: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Keep only tables whose name contains this text, case-insensitively: "
+                    "'order' matches ORDERS and order_items. Omit for every table."
+                )
+            ),
+        ] = None,
+        limit: RowLimit = None,
     ) -> ListTablesResult:
         """List all tables and views in the named database.
+
+        Use this to find a table's exact name. For its columns and keys use
+        get_table_schema; to find which table holds a column, use find_columns; for every
+        table's columns at once, get_database_schema.
 
         Narrow instead of listing everything: `pattern` keeps only names containing it
         (fuzzy, case-insensitive — "order" matches ORDERS, order_items). `limit` returns
@@ -313,9 +349,19 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
             truncated=len(tables) > shown,
         )
 
-    @app.tool()
-    async def get_table_schema(database: str, table: str, include_indexes: bool = False) -> dict:
+    @app.tool(annotations=READ_ONLY)
+    async def get_table_schema(
+        database: DatabaseName,
+        table: TableName,
+        include_indexes: Annotated[
+            bool,
+            Field(description="Also return the table's indexes. Default false keeps it small."),
+        ] = False,
+    ) -> dict:
         """Get columns, types, and primary/foreign keys for a table.
+
+        For one table. For every table at once use get_database_schema; for a view,
+        function, trigger, sequence or index definition use get_object_definition.
 
         Returns `meta`, `table`, `columns` (name, type, nullable, default), `primary_key`
         and `foreign_keys`, plus `indexes` when asked for; a table that does not exist is
@@ -331,9 +377,19 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         schema = await handlers.get_table_schema(database, table, include_indexes)
         return _with_meta("get_table_schema", database, started, schema)
 
-    @app.tool()
+    @app.tool(annotations=READ_WITH_EXPORT)
     async def get_database_schema(
-        database: str, output_dir: str | None = None, format: Literal["json", "sql"] = "json"
+        database: DatabaseName,
+        output_dir: OutputDir = None,
+        format: Annotated[
+            Literal["json", "sql"],
+            Field(
+                description=(
+                    "'json' (default): tables, columns, keys as data. 'sql': a runnable "
+                    "DDL script that recreates the schema."
+                )
+            ),
+        ] = "json",
     ) -> dict:
         """Get the whole database's schema at once, as JSON or as a runnable SQL script.
 
@@ -353,8 +409,8 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         schema = await handlers.get_database_schema(database, output_dir, format)
         return _with_meta("get_database_schema", database, started, schema)
 
-    @app.tool()
-    async def dump_schema_faithful(database: str, output_dir: str | None = None) -> dict:
+    @app.tool(annotations=READ_WITH_EXPORT)
+    async def dump_schema_faithful(database: DatabaseName, output_dir: OutputDir = None) -> dict:
         """Produce a byte-faithful schema dump using the database's own tool (pg_dump -s).
 
         The most complete/runnable schema export (handles sequences, identity, partitioning,
@@ -371,9 +427,20 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         dump = await handlers.dump_schema_faithful(database, output_dir)
         return _with_meta("dump_schema_faithful", database, started, dump)
 
-    @app.tool()
-    async def sample_table_rows(database: str, table: str, n: int = 10) -> dict:
+    @app.tool(annotations=READ_ONLY)
+    async def sample_table_rows(
+        database: DatabaseName,
+        table: TableName,
+        n: Annotated[
+            int, Field(description="How many rows to return: default 10, at most 1000.")
+        ] = 10,
+    ) -> dict:
         """Fetch up to N rows of a table to learn its data shape.
+
+        Use it to see what real values look like before writing a query: no filter, no
+        ordering. To fetch specific rows use execute_read_query with a WHERE clause; for
+        more than 1000 rows use open_query_cursor and fetch_rows; to find which table
+        holds a value use search_value. A table that does not exist is an error.
 
         Returns `meta` and `rows`, one object per row keyed by column name, in no
         guaranteed order. `n` defaults to 10 and the answer holds at most 1000 rows: a
@@ -381,12 +448,8 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         1000 and was clamped; it reports that clamp, not whether the table holds more rows.
 
         Rows arrive on the text channel only, inside the untrusted-data banner: this
-        tool emits no structuredContent.
-
-        Values render as on execute_read_query: bytea as `\\x` hex text, a `"char"` column
-        (`relkind`, `contype`, `prokind`, ...) as its character (hex when the byte is not
-        valid UTF-8), and hex for a `"char"` inside an anonymous `ROW(...)` or an array of
-        a domain over `"char"`.
+        tool emits no structuredContent. Values render as on execute_read_query (bytea as
+        `\\x` hex text).
         """
         started = time.monotonic()
         rows = await handlers.sample_table_rows(database, table, min(n, SAMPLE_ROWS_LIMIT))
@@ -400,19 +463,30 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         )
 
     # ---- Discovery / search tools --------------------------------------------
-    @app.tool()
+    @app.tool(annotations=READ_ONLY)
     async def find_columns(
-        database: str, pattern: str, limit: int | None = None
+        database: DatabaseName,
+        pattern: Annotated[
+            str,
+            Field(
+                description=(
+                    "Text to look for in column names, case-insensitively: 'email' "
+                    "matches user_email and EMAIL_ADDRESS."
+                )
+            ),
+        ],
+        limit: RowLimit = None,
     ) -> FindColumnsResult:
-        """Find columns by name across all tables (fuzzy, case-insensitive substring).
+        """Find columns by name across all tables of one database (fuzzy, case-insensitive).
 
         e.g. pattern "email" matches user_email, EMAIL_ADDRESS. Use this to locate where
-        a concept lives before querying. `limit` returns at most that many rows — set it
-        when a broad pattern would otherwise match half the database.
+        a concept lives before querying. It matches column NAMES only — to find where a
+        data value appears use search_value; to find a table by name use list_tables.
+        `limit` returns at most that many rows — set it when a broad pattern would
+        otherwise match half the database.
 
         Returns `meta` and `columns`, one item per matching column with `schema`, `table`,
-        `column`, `type` and `nullable`. With `limit` set, `meta.truncated` is true when
-        more columns matched than were returned.
+        `column`, `type` and `nullable`; `meta.truncated` is true when `limit` cut the list.
         """
         started = time.monotonic()
         if limit is None:
@@ -437,12 +511,24 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
             truncated=len(columns) > shown,
         )
 
-    @app.tool()
+    @app.tool(annotations=READ_ONLY)
     async def search_value(
-        database: str,
-        value: str,
-        tables: list[str] | None = None,
-        limit_per_column: int = 5,
+        database: DatabaseName,
+        value: Annotated[
+            str, Field(description="Text to look for inside column values, case-insensitively.")
+        ],
+        tables: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Only search these tables: bare names as list_tables shows them, "
+                    "without a schema prefix. Omit to scan every non-system table."
+                )
+            ),
+        ] = None,
+        limit_per_column: Annotated[
+            int, Field(description="Sample values to return per matching column (default 5).")
+        ] = 5,
     ) -> dict:
         """Find WHERE a value appears across tables (fuzzy, case-insensitive substring).
 
@@ -467,12 +553,12 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         )
 
     # ---- Execution tools -----------------------------------------------------
-    @app.tool()
+    @app.tool(annotations=READ_ONLY)
     async def execute_read_query(
-        database: str,
-        sql: str,
-        params: list[Any] | None = None,
-        timeout_ms: int | None = None,
+        database: DatabaseName,
+        sql: ReadSql,
+        params: SqlParams = None,
+        timeout_ms: TimeoutMs = None,
     ) -> dict:
         """Run a read-only SELECT query (enforced as a read-only transaction).
 
@@ -507,16 +593,50 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
             "execute_read_query", database, started, result, count_key="rows", truncated=False
         )
 
-    @app.tool()
+    @app.tool(annotations=WRITE)
     async def execute_write_query(
-        database: str,
-        sql: str,
+        database: DatabaseName,
+        sql: Annotated[
+            str,
+            Field(
+                description=(
+                    "One INSERT, UPDATE, DELETE or DDL statement, with values in $1, $2, ... "
+                    "placeholders. The commit must send exactly the SQL and params the "
+                    "dry-run sent."
+                )
+            ),
+        ],
         ctx: Context,
-        params: list[Any] | None = None,
-        user_consent: bool = False,
-        dry_run: bool = True,
-        skip_dry_run: bool = False,
-        timeout_ms: int | None = None,
+        params: SqlParams = None,
+        user_consent: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Set true on the commit call only after the user approved this exact "
+                    "statement. Not needed when the database has yolo enabled."
+                )
+            ),
+        ] = False,
+        dry_run: Annotated[
+            bool,
+            Field(
+                description=(
+                    "true (default): run in a transaction that is always rolled back and "
+                    "report the effect. false: commit, allowed only after a dry-run of the "
+                    "same statement."
+                )
+            ),
+        ] = True,
+        skip_dry_run: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Commit without a prior dry-run. Only when the user explicitly asked "
+                    "to skip the preview."
+                )
+            ),
+        ] = False,
+        timeout_ms: TimeoutMs = None,
     ) -> dict:
         """Run an INSERT/UPDATE/DELETE/DDL statement on a write-mode database.
 
@@ -583,14 +703,28 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         )
         return _with_meta("execute_write_query", database, started, result, count_key="rows")
 
-    @app.tool()
+    @app.tool(annotations=READ_ONLY)
     async def explain_query(
-        database: str, sql: str, analyze: bool = False, params: list[Any] | None = None
+        database: DatabaseName,
+        sql: ReadSql,
+        analyze: Annotated[
+            bool,
+            Field(
+                description=(
+                    "false (default): planner estimates only, nothing runs. true: run the "
+                    "query too and report real timings and buffer counts."
+                )
+            ),
+        ] = False,
+        params: SqlParams = None,
     ) -> dict:
         """Show the execution plan for a read-only query (EXPLAIN; optionally ANALYZE).
 
-        Use to confirm index usage or diagnose a slow query. analyze=true actually runs
-        the (read-only, validated) query to collect real timings and buffer stats.
+        Use to confirm index usage or diagnose a slow query; to see what is indexed at
+        all, use get_table_schema with include_indexes=true. analyze=true actually runs
+        the (read-only, validated) query to collect real timings and buffer stats, so it
+        takes as long as the query itself: avoid it on a query you already know is very
+        slow, and it never changes data.
 
         EXPLAIN the query you will ACTUALLY run: a plan for bound parameters can differ
         from the plan for the same SQL with the values pasted in. Pass `params` with the
@@ -604,34 +738,55 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         plan = await handlers.explain_query(database, sql, analyze, params)
         return _with_meta("explain_query", database, started, plan)
 
-    @app.tool()
-    async def cancel_query(database: str, pid: int) -> dict:
+    @app.tool(annotations=CANCEL)
+    async def cancel_query(
+        database: DatabaseName,
+        pid: Annotated[
+            int, Field(description="Server backend process id, as show_activity reports it.")
+        ],
+    ) -> dict:
         """Cancel the statement running in server backend `pid` (find pids via show_activity).
 
+        Use for a stuck or runaway statement. To cap your own query's run time instead,
+        pass timeout_ms to execute_read_query or execute_write_query.
+
         Returns `meta`, `pid` and `cancelled`. Cancels the statement only — the session
-        survives. cancelled=false means the pid doesn't exist or you lack permission (same
-        database user required).
+        survives, and the cancelled statement's uncommitted work is rolled back. The
+        request is sent at once; the statement stops at its next interrupt check, usually
+        within moments. cancelled=false means the pid doesn't exist or you lack permission
+        (same database user required).
         """
         started = time.monotonic()
         cancelled = await handlers.cancel_query(database, pid)
         return _with_meta("cancel_query", database, started, cancelled)
 
     # ---- Cursor tools (large result sets) -------------------------------------
-    @app.tool()
-    async def open_query_cursor(database: str, sql: str, params: list[Any] | None = None) -> dict:
+    @app.tool(annotations=READ_ONLY_STATEFUL)
+    async def open_query_cursor(
+        database: DatabaseName, sql: ReadSql, params: SqlParams = None
+    ) -> dict:
         """Open a server-side cursor over a read-only query for batched fetching.
 
-        Use for results too large for one execute_read_query response.
+        Use for results too large for one execute_read_query response (that tool has no
+        row cap). Then call fetch_rows with the cursor_id until `exhausted` is true, and
+        close_cursor if you stop early.
+
         Returns `meta`, `cursor_id` (for fetch_rows/close_cursor) and `database`. The
         cursor pins one read-only connection until closed (auto-reaped after 15 idle
-        minutes; max 5 open).
+        minutes). At most 5 cursors may be open: opening a sixth is an error, so close
+        the ones you no longer need.
         """
         started = time.monotonic()
         cursor = await handlers.open_query_cursor(database, sql, params)
         return _with_meta("open_query_cursor", database, started, cursor)
 
-    @app.tool()
-    async def fetch_rows(cursor_id: str, n: int = 100) -> dict:
+    @app.tool(annotations=READ_ONLY_STATEFUL)
+    async def fetch_rows(
+        cursor_id: CursorId,
+        n: Annotated[
+            int, Field(description="How many rows to fetch in this batch (default 100).")
+        ] = 100,
+    ) -> dict:
         """Fetch the next N rows from an open cursor (see open_query_cursor).
 
         Returns `meta`, `rows`, `row_count`, `exhausted` and `cursor_closed`;
@@ -642,35 +797,66 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         and the cursor and the running call carry on.
 
         Rows arrive on the text channel only, inside the untrusted-data banner: this
-        tool emits no structuredContent.
-
-        Values render as on execute_read_query: bytea as `\\x` hex text, a `"char"` column
-        (`relkind`, `contype`, `prokind`, ...) as its character (hex when the byte is not
-        valid UTF-8), and hex for a `"char"` inside an anonymous `ROW(...)` or an array of
-        a domain over `"char"`.
+        tool emits no structuredContent. Values render as on execute_read_query (bytea as
+        `\\x` hex text).
         """
         started = time.monotonic()
         batch = await handlers.fetch_rows(cursor_id, n)
         return _with_meta("fetch_rows", None, started, batch, count_key="rows")
 
-    @app.tool()
-    async def close_cursor(cursor_id: str) -> dict:
+    @app.tool(annotations=LOCAL_STATE)
+    async def close_cursor(
+        cursor_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "The cursor_id returned by open_query_cursor. An unknown or "
+                    "already-closed id is fine: the call just reports was_open=false."
+                )
+            ),
+        ],
+    ) -> dict:
         """Close an open cursor and release its database connection. Idempotent.
 
-        Returns `meta`, `cursor_id`, `closed` and `was_open`.
+        Call it when you stop reading a cursor before fetch_rows reports `exhausted`: a
+        drained or failed cursor closes itself, and an idle one is reaped after 15
+        minutes, but an open one holds a connection and one of the 5 cursor slots until
+        then. It never stops a running statement — use cancel_query for that.
+
+        Returns `meta`, `cursor_id`, `closed` and `was_open` (false when the cursor was
+        already closed or never existed).
         """
         started = time.monotonic()
         closed = await handlers.close_cursor(cursor_id)
         return _with_meta("close_cursor", None, started, closed)
 
     # ---- Object-definition tool -----------------------------------------------
-    @app.tool()
+    @app.tool(annotations=READ_ONLY)
     async def get_object_definition(
-        database: str,
-        object_type: Literal["view", "function", "trigger", "sequence", "index"],
-        name: str,
+        database: DatabaseName,
+        object_type: Annotated[
+            Literal["view", "function", "trigger", "sequence", "index"],
+            Field(
+                description=(
+                    "Kind of object. 'view' also covers materialized views, 'function' "
+                    "also covers procedures."
+                )
+            ),
+        ],
+        name: Annotated[
+            str,
+            Field(
+                description=(
+                    "Object name as stored (case-sensitive, no quotes), optionally "
+                    "schema-qualified: 'my_view' or 'public.my_view'."
+                )
+            ),
+        ],
     ) -> dict:
         """Get the faithful SQL definition of a non-table object by name.
+
+        For a table's columns and keys use get_table_schema; for the whole schema as a
+        script use get_database_schema(format="sql").
 
         Covers views (and materialized views), functions/procedures, triggers,
         sequences, and indexes — produced by the database's own pg_get_*def functions.
@@ -685,12 +871,33 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         return _with_meta("get_object_definition", database, started, found, count_key="matches")
 
     # ---- Operational insight tools ----------------------------------------------
-    @app.tool()
-    async def diff_schemas(database_a: str, database_b: str) -> dict:
+    @app.tool(annotations=READ_ONLY)
+    async def diff_schemas(
+        database_a: Annotated[
+            str,
+            Field(
+                description=(
+                    "First configured database name, as list_databases returns it: "
+                    "usually the source of truth. Results call it side 'a'."
+                )
+            ),
+        ],
+        database_b: Annotated[
+            str,
+            Field(
+                description=(
+                    "Second configured database name: usually the copy being checked. "
+                    "Results call it side 'b'."
+                )
+            ),
+        ],
+    ) -> dict:
         """Compare the schemas of two configured databases (tables, columns, PK/FK).
 
-        Reports tables only in one side, and per-table column/type/default/key
-        differences. Use to verify a migrated copy matches its source of truth.
+        Read-only. Reports tables only in one side, and per-table column/type/default/key
+        differences. Use to verify a migrated copy matches its source of truth; for one
+        database's schema on its own use get_database_schema. An unknown name is an error
+        listing the configured names.
 
         Returns `meta`, `database_a`, `database_b`, `only_in_a`, `only_in_b`,
         `changed_tables` and `identical`; `meta.database` is null, since two are compared.
@@ -699,8 +906,19 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         diff = await handlers.diff_schemas(database_a, database_b)
         return _with_meta("diff_schemas", None, started, diff)
 
-    @app.tool()
-    async def check_sequences(database: str, behind_only: bool = True) -> dict:
+    @app.tool(annotations=READ_ONLY)
+    async def check_sequences(
+        database: DatabaseName,
+        behind_only: Annotated[
+            bool,
+            Field(
+                description=(
+                    "true (default): list only sequences that are behind. false: every "
+                    "sequence's state."
+                )
+            ),
+        ] = True,
+    ) -> dict:
         """Find sequences lagging behind their column's max value (stale after migrations).
 
         A `behind: true` sequence would hand out an id that already exists — fix with
@@ -721,25 +939,40 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         report = await handlers.check_sequences(database, behind_only)
         return _with_meta("check_sequences", database, started, report, count_key="sequences")
 
-    @app.tool()
+    @app.tool(annotations=READ_ONLY)
     async def table_stats(
-        database: str,
-        limit: int | None = None,
-        min_size_bytes: int | None = None,
-        table: str | None = None,
+        database: DatabaseName,
+        limit: Annotated[
+            int | None,
+            Field(description="Return only the N largest tables by total size. Omit for all."),
+        ] = None,
+        min_size_bytes: Annotated[
+            int | None,
+            Field(description="Skip tables whose total size is below this many bytes."),
+        ] = None,
+        table: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Only this table, exactly as list_tables shows it, optionally "
+                    "schema-qualified ('public.orders'). Omit for every table."
+                )
+            ),
+        ] = None,
     ) -> dict:
         """Approximate row counts and disk/index sizes per table, largest first.
 
-        Uses the database's own statistics — fast, no table scans. Useful for planning
-        migration copy order and spotting anomalies. One row per table, so the full
-        answer may be large on a big database — ask the narrower question instead of
-        filtering afterwards: `table` for one table (optionally schema-qualified),
-        `min_size_bytes` to skip anything smaller, `limit` for the top N by total size.
-        With `limit` set the result carries `truncated: true` when more tables matched
-        than were returned.
+        Read-only. Uses the database's own statistics — fast, no table scans — so counts
+        are as fresh as the last ANALYZE or autovacuum run; for an exact count run
+        SELECT count(*) with execute_read_query. Useful for planning migration copy
+        order and spotting anomalies; for columns and keys use get_table_schema. One row
+        per table, so ask the narrower question instead of filtering afterwards: `table`
+        for one table, `min_size_bytes` to skip anything smaller, `limit` for the top N.
 
-        Returns `meta`, `database` and `tables`, plus `truncated` when `limit` is set;
-        `meta.truncated` repeats it, and is false without `limit`.
+        Returns `meta`, `database` and `tables`, one item per table with `schema`,
+        `table`, `approx_rows`, `table_bytes`, `index_bytes` and `total_bytes`, plus
+        `truncated` when `limit` is set (true when more tables matched); `meta.truncated`
+        repeats it, and is false without `limit`.
         """
         started = time.monotonic()
         stats = await handlers.table_stats(database, limit, min_size_bytes, table)
@@ -752,12 +985,22 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
             truncated=stats.get("truncated", False),
         )
 
-    @app.tool()
-    async def show_activity(database: str, include_query: bool = False) -> dict:
+    @app.tool(annotations=READ_ONLY)
+    async def show_activity(
+        database: DatabaseName,
+        include_query: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Also return each backend's query text, cut to 300 characters. Default false."
+                )
+            ),
+        ] = False,
+    ) -> dict:
         """Show current server activity: pid, state, wait events, query/transaction age.
 
         Sanitized by default — no user names, client addresses, or query text (pass
-        include_query=true for truncated query text). Answers "what is holding
+        include_query=true for query text cut to 300 characters). Answers "what is holding
         connections"; pair with cancel_query(pid) to kill a stuck statement.
 
         Returns `meta`, `database` and `activity`, one item per server backend.
@@ -767,9 +1010,22 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         return _with_meta("show_activity", database, started, activity, count_key="activity")
 
     # ---- Configuration tool --------------------------------------------------
-    @app.tool()
-    async def set_yolo_mode(database: str, enabled: bool) -> dict:
+    @app.tool(annotations=LOCAL_STATE)
+    async def set_yolo_mode(
+        database: DatabaseName,
+        enabled: Annotated[
+            bool,
+            Field(description="true: skip the consent prompt for this database. false: ask again."),
+        ],
+    ) -> dict:
         """Enable/disable yolo (skip the write-consent prompt) for one database, persisted.
+
+        Call it ONLY when the user explicitly asks to turn yolo on or off — never to get
+        past a consent prompt yourself. It is saved in connections.json, so it lasts
+        across sessions and applies to every client using that file, and each flip is
+        recorded in the audit log. On a read-mode database the flag is stored but has no
+        effect: yolo can never make a read database writable, and on a write database
+        the dry-run preview still applies.
 
         Returns `meta`, `database`, `yolo` and `persisted`, plus `audit_recorded` and
         `warning` when the audit line could not be written.
@@ -783,9 +1039,23 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
         return _with_meta("set_yolo_mode", database, started, flipped)
 
     # ---- Diagnostics tool ----------------------------------------------------
-    @app.tool()
-    async def check_database(database: str | None = None) -> CheckDatabaseResult:
+    @app.tool(annotations=READ_ONLY)
+    async def check_database(
+        database: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Name of one configured database, as list_databases returns it. Omit "
+                    "to check every configured database."
+                )
+            ),
+        ] = None,
+    ) -> CheckDatabaseResult:
         """Test connectivity for one database (or all) — returns OK or a sanitized cause.
+
+        Opens a read-only connection and closes it again; it changes nothing. Use it when a
+        call fails with a connection error, or after starting a tunnel. When it says
+        UNREACHABLE and the reason is unclear, run doctor for a full setup diagnosis.
 
         Returns `meta` and `results`, one item per database with `database` and `status`
         (OK or UNREACHABLE; an unreachable one adds category and detail). `meta.database`
@@ -798,8 +1068,13 @@ def build_server(config_path: Path | str | None = None) -> GuardedFastMCP:
             "check_database", database, started, {"results": results}, count_key="results"
         )
 
-    @app.tool()
-    async def doctor(offline: bool = False) -> DoctorResult:
+    @app.tool(annotations=DIAGNOSTICS)
+    async def doctor(
+        offline: Annotated[
+            bool,
+            Field(description="Skip the online check for a newer release on PyPI."),
+        ] = False,
+    ) -> DoctorResult:
         """Diagnose the whole setup, not just connectivity — use when something is
         misbehaving and check_database alone doesn't explain why.
 
