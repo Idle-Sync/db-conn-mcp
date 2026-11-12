@@ -1253,12 +1253,13 @@ async def _call_over_the_wire(app, name, arguments):
 def _fenced_payload(block):
     """Return the JSON payload of one guarded text block, by the rule the server documents.
 
-    The payload is every line after the notice line up to the ``GUARD_CLOSE`` line; it
-    spans many lines, since FastMCP serializes with ``indent=2``.
+    The notice line comes first, then the ``GUARD_OPEN`` line; the payload is every line
+    after it up to the ``GUARD_CLOSE`` line, and spans many lines, since FastMCP
+    serializes with ``indent=2``.
     """
     lines = block.text.split("\n")
-    assert lines[0] == guard.GUARD_OPEN
-    assert lines[1] == guard.GUARD_NOTICE
+    assert lines[0] == guard.GUARD_NOTICE
+    assert lines[1] == guard.GUARD_OPEN
     return json.loads("\n".join(lines[2 : lines.index(guard.GUARD_CLOSE)]))
 
 
@@ -1272,7 +1273,7 @@ async def test_call_tool_guards_text_but_leaves_structured_content_intact(cfg_pa
 
     assert len(content) == 1 and isinstance(content[0], TextContent)
     text = content[0].text
-    assert text.startswith(guard.GUARD_OPEN)
+    assert text.startswith(f"{guard.GUARD_NOTICE}\n{guard.GUARD_OPEN}\n")
     assert text.endswith(guard.GUARD_CLOSE)
     assert guard.GUARD_NOTICE in text
 
@@ -1350,7 +1351,7 @@ async def test_value_bearing_tools_emit_no_structured_content(name, cfg_path, mo
     assert structured is None
     assert len(content) == 1 and isinstance(content[0], TextContent)
     text = content[0].text
-    assert text.startswith(guard.GUARD_OPEN)
+    assert text.startswith(f"{guard.GUARD_NOTICE}\n{guard.GUARD_OPEN}\n")
     assert text.endswith(guard.GUARD_CLOSE)
     assert guard.GUARD_NOTICE in text
 
@@ -1370,7 +1371,9 @@ async def test_value_bearing_tool_reaches_the_client_without_structured_content(
     assert result.isError is False
     assert result.structuredContent is None
     text = result.content[0].text
-    assert text.startswith(guard.GUARD_OPEN) and text.endswith(guard.GUARD_CLOSE)
+    assert text.startswith(f"{guard.GUARD_NOTICE}\n{guard.GUARD_OPEN}\n") and text.endswith(
+        guard.GUARD_CLOSE
+    )
     # The row itself is inside the fence — the only place it exists in the response.
     assert _fenced_payload(result.content[0])["rows"] == [{"id": 1}]
 
@@ -1530,7 +1533,7 @@ async def test_metadata_tool_keeps_structured_content_over_the_wire(cfg_path):
         "dev",
         "trusted",
     }
-    assert result.content[0].text.startswith(guard.GUARD_OPEN)
+    assert result.content[0].text.startswith(f"{guard.GUARD_NOTICE}\n{guard.GUARD_OPEN}\n")
 
 
 # ---- every tool answers one object with `meta` first ---------------------------
@@ -2074,11 +2077,11 @@ async def test_documented_banner_format_recovers_the_payload(cfg_path, monkeypat
     block = await _only_block(app, "get_table_schema", {"database": "prod", "table": "users"})
 
     lines = block.text.split("\n")
-    payload_lines = lines[lines.index(guard.GUARD_OPEN) + 2 : lines.index(guard.GUARD_CLOSE)]
+    payload_lines = lines[lines.index(guard.GUARD_OPEN) + 1 : lines.index(guard.GUARD_CLOSE)]
 
     assert len(payload_lines) > 1
     assert json.loads("\n".join(payload_lines))["table"] == "users"
-    assert f"the line {guard.GUARD_OPEN}, then one notice line" in app.instructions
+    assert f"one notice line, then the line {guard.GUARD_OPEN}" in app.instructions
     assert f"every line up to the line {guard.GUARD_CLOSE}" in app.instructions
 
 
