@@ -1949,31 +1949,33 @@ async def test_every_tool_parameter_has_a_schema_description(cfg_path):
     assert undocumented == []
 
 
-#: Each tool's (readOnlyHint, destructiveHint) as a client sees them.
+#: Each tool's (readOnlyHint, destructiveHint, idempotentHint) as a client sees them.
+#: Not idempotent: a cursor call advances or creates state, an export writes a new
+#: timestamped file, and a committed write can apply twice.
 _EXPECTED_HINTS = {
-    "list_databases": (True, False),
-    "list_tables": (True, False),
-    "get_table_schema": (True, False),
-    "get_database_schema": (False, False),
-    "dump_schema_faithful": (False, False),
-    "sample_table_rows": (True, False),
-    "find_columns": (True, False),
-    "search_value": (True, False),
-    "execute_read_query": (True, False),
-    "execute_write_query": (False, True),
-    "explain_query": (True, False),
-    "cancel_query": (False, True),
-    "open_query_cursor": (True, False),
-    "fetch_rows": (True, False),
-    "close_cursor": (False, False),
-    "get_object_definition": (True, False),
-    "diff_schemas": (True, False),
-    "check_sequences": (True, False),
-    "table_stats": (True, False),
-    "show_activity": (True, False),
-    "set_yolo_mode": (False, False),
-    "check_database": (True, False),
-    "doctor": (True, False),
+    "list_databases": (True, False, True),
+    "list_tables": (True, False, True),
+    "get_table_schema": (True, False, True),
+    "get_database_schema": (False, False, False),
+    "dump_schema_faithful": (False, False, False),
+    "sample_table_rows": (True, False, True),
+    "find_columns": (True, False, True),
+    "search_value": (True, False, True),
+    "execute_read_query": (True, False, True),
+    "execute_write_query": (False, True, False),
+    "explain_query": (True, False, True),
+    "cancel_query": (False, True, True),
+    "open_query_cursor": (True, False, False),
+    "fetch_rows": (True, False, False),
+    "close_cursor": (False, False, True),
+    "get_object_definition": (True, False, True),
+    "diff_schemas": (True, False, True),
+    "check_sequences": (True, False, True),
+    "table_stats": (True, False, True),
+    "show_activity": (True, False, True),
+    "set_yolo_mode": (False, False, True),
+    "check_database": (True, False, True),
+    "doctor": (True, False, True),
 }
 
 
@@ -1986,9 +1988,74 @@ async def test_every_tool_declares_its_behaviour_hints(cfg_path):
     for tool in tools:
         hints = tool.annotations
         assert hints is not None, tool.name
-        assert (hints.readOnlyHint, hints.destructiveHint) == _EXPECTED_HINTS[tool.name], tool.name
-        assert hints.idempotentHint is not None, tool.name
+        declared = (hints.readOnlyHint, hints.destructiveHint, hints.idempotentHint)
+        assert declared == _EXPECTED_HINTS[tool.name], tool.name
         assert hints.openWorldHint is (tool.name == "doctor"), tool.name
+
+
+#: Every default a tool advertises in its input schema. A client relies on these to
+#: know what an omitted argument means, so a changed default must be deliberate.
+_EXPECTED_DEFAULTS = {
+    "check_database": {"database": None},
+    "check_sequences": {"behind_only": True},
+    "doctor": {"offline": False},
+    "dump_schema_faithful": {"output_dir": None},
+    "execute_read_query": {"params": None, "timeout_ms": None},
+    "execute_write_query": {
+        "dry_run": True,
+        "params": None,
+        "skip_dry_run": False,
+        "timeout_ms": None,
+        "user_consent": False,
+    },
+    "explain_query": {"analyze": False, "params": None},
+    "fetch_rows": {"n": 100},
+    "find_columns": {"limit": None},
+    "get_database_schema": {"format": "json", "output_dir": None},
+    "get_table_schema": {"include_indexes": False},
+    "list_tables": {"limit": None, "pattern": None},
+    "open_query_cursor": {"params": None},
+    "sample_table_rows": {"n": 10},
+    "search_value": {"limit_per_column": 5, "tables": None},
+    "show_activity": {"include_query": False},
+    "table_stats": {"limit": None, "min_size_bytes": None, "table": None},
+}
+
+
+async def test_every_tool_advertises_its_expected_defaults(cfg_path):
+    app = server.build_server(cfg_path)
+
+    advertised = {}
+    for tool in await app.list_tools():
+        for param, spec in tool.inputSchema.get("properties", {}).items():
+            if "default" in spec:
+                advertised.setdefault(tool.name, {})[param] = spec["default"]
+
+    assert advertised == _EXPECTED_DEFAULTS
+
+
+#: How each shared parameter's description opens, on a tool that uses it. The opening
+#: is what a client reads first, so it states what to pass.
+_SHARED_PARAMETER_OPENINGS = [
+    ("list_tables", "database", "Name of a configured database, exactly as list_databases"),
+    ("get_table_schema", "table", "Table or view name exactly as list_tables shows it"),
+    ("execute_read_query", "sql", "One read-only SQL statement"),
+    ("execute_read_query", "params", "Values bound to the $1, $2, ... placeholders"),
+    ("execute_read_query", "timeout_ms", "Cancel the statement if it runs longer than"),
+    ("fetch_rows", "cursor_id", "The cursor_id returned by open_query_cursor"),
+    ("list_tables", "limit", "Return at most this many items"),
+    ("get_database_schema", "output_dir", "Directory on the machine running this server"),
+]
+
+
+@pytest.mark.parametrize(("tool_name", "param", "opening"), _SHARED_PARAMETER_OPENINGS)
+async def test_shared_parameter_description_opens_with_what_to_pass(
+    tool_name, param, opening, cfg_path
+):
+    app = server.build_server(cfg_path)
+    tool = await _listed_tool(app, tool_name)
+
+    assert tool.inputSchema["properties"][param]["description"].startswith(opening)
 
 
 async def test_database_parameter_names_list_databases_as_its_source(cfg_path):
