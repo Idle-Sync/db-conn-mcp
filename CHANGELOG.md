@@ -11,6 +11,10 @@ the time of that release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.8.1] — 2026-11-12
+
 ### Added
 
 - Every tool argument now has a description in the tool's input schema: what to pass, its
@@ -881,7 +885,8 @@ agents.
 - Setup and management CLI — `setup`, `status`, `add`, `clients`, `check`, `remove`, `yolo` —
   with auto-injection into 8 MCP clients.
 
-[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.6.2...v0.7.0
