@@ -17,6 +17,7 @@ Only the connection *name* is ever echoed — never the DSN (Rule 6).
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -52,18 +53,65 @@ SERVER_SCRIPT = "db-conn-mcp"
 REPO_URL = "https://github.com/Idle-Sync/db-conn-mcp"
 
 
+#: Set by a launcher that runs this server for its users (the npm package does) to the
+#: JSON list of strings an MCP client should run instead of this process's own
+#: executable, e.g. ``["/usr/local/bin/npx", "-y", "@idle-sync/db-conn-mcp@0.8.2"]``.
+LAUNCH_COMMAND_ENV = "DB_CONN_MCP_LAUNCH_COMMAND"
+
+#: A folder name uv gives its cached, throwaway environments (``uvx`` runs from one).
+_UV_ARCHIVE_DIR = re.compile(r"archive-v\d+")
+
+
+def _launch_override() -> list[str] | None:
+    """The command a launcher asked to be injected, or ``None`` when none was set."""
+    raw = os.environ.get(LAUNCH_COMMAND_ENV)
+    if not raw:
+        return None
+    try:
+        command = json.loads(raw)
+    except json.JSONDecodeError:
+        command = None
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(part, str) and part for part in command)
+    ):
+        raise ValueError(f"{LAUNCH_COMMAND_ENV} must be a JSON list of non-empty strings.")
+    return command
+
+
+def _inside_uv_cache(executable: str) -> bool:
+    """True when ``executable`` lives in a cached environment uv may delete later."""
+    return any(_UV_ARCHIVE_DIR.fullmatch(part) for part in Path(executable).parts)
+
+
 def server_launch(config_path: Path) -> tuple[str, list[str]]:
     """Return a ``(command, args)`` an MCP client can use to launch this server.
 
-    Prefers the **absolute path** of the installed console script (``shutil.which``),
-    which resolves whether the install is in a project ``.venv`` or a global/pipx
-    environment — so the client never needs the script on its own PATH. Falls back to
-    the current interpreter running the package as a module (``python -m db_conn_mcp``).
+    In order of preference:
+
+    1. The command a launcher put in :data:`LAUNCH_COMMAND_ENV`, so a client set up
+       through the npm package keeps launching through it.
+    2. When this process runs from uv's cache (``uvx db-conn-mcp setup``), ``uvx``
+       pinned to this version: the cached environment's own path disappears when the
+       cache is cleaned, while a ``uvx`` command rebuilds it.
+    3. The **absolute path** of the installed console script (``shutil.which``),
+       whether it lives in a project ``.venv`` or a global/pipx environment, so the
+       client never needs the script on its own PATH.
+    4. The current interpreter running the package as a module (``python -m``).
     """
+    config_args = ["--config", str(config_path)]
+    override = _launch_override()
+    if override:
+        return override[0], [*override[1:], *config_args]
     exe = shutil.which(SERVER_SCRIPT)
+    if exe and _inside_uv_cache(exe):
+        uvx = shutil.which("uvx")
+        if uvx:
+            return uvx, ["--from", f"db-conn-mcp=={__version__}", SERVER_SCRIPT, *config_args]
     if exe:
-        return exe, ["--config", str(config_path)]
-    return sys.executable, ["-m", "db_conn_mcp", "--config", str(config_path)]
+        return exe, config_args
+    return sys.executable, ["-m", "db_conn_mcp", *config_args]
 
 
 def build_parser() -> argparse.ArgumentParser:
