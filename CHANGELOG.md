@@ -13,6 +13,31 @@ the time of that release.
 
 Nothing yet.
 
+## [0.8.2] — 2026-11-12
+
+### Added
+
+- `DB_CONN_MCP_LAUNCH_COMMAND`: a launcher that runs this server for its users can set it
+  to the JSON list of strings an MCP client should run. `setup`, `add` and the dashboard
+  then inject that command, followed by `--config <path>`, in place of this process's own
+  executable. The npm package `@idle-sync/db-conn-mcp` uses it so a client set up with
+  `npx` keeps launching through `npx`.
+
+### Fixed
+
+- `uvx db-conn-mcp setup` no longer writes a path inside uv's cache into your MCP client.
+  That path stopped working as soon as the cache was cleaned (`uv cache clean`,
+  `uv cache prune`). Setup now writes a `uvx --from db-conn-mcp==<version> db-conn-mcp`
+  command, which rebuilds the environment when it is missing.
+
+### Breaking / Behaviour changes
+
+- If you run setup through `uvx`, your client entry now uses `uvx` and is pinned to the
+  version that ran setup. To move to a newer release, run `uvx db-conn-mcp@latest setup`
+  again. Entries written by an earlier `uvx` setup keep their old cache path; re-run setup
+  once to replace them. `db-conn-mcp doctor` flags an entry whose path no longer exists.
+- Installs through `pipx`, `pip` or `uv tool` are unchanged.
+
 ## [0.8.1] — 2026-11-12
 
 ### Added
@@ -885,7 +910,8 @@ agents.
 - Setup and management CLI — `setup`, `status`, `add`, `clients`, `check`, `remove`, `yolo` —
   with auto-injection into 8 MCP clients.
 
-[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Idle-Sync/db-conn-mcp/compare/v0.7.0...v0.7.1

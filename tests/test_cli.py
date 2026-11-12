@@ -12,6 +12,7 @@ import io
 import json
 import re
 import sys
+from pathlib import PureWindowsPath
 
 import pytest
 
@@ -262,6 +263,82 @@ def test_server_launch_falls_back_to_module(monkeypatch, tmp_path):
     assert command == cli.sys.executable
     assert args[:2] == ["-m", "db_conn_mcp"]
     assert str(tmp_path / "connections.json") in args
+
+
+_UV_CACHED_SCRIPT = "/home/u/.cache/uv/archive-v0/WH5FcTfq/bin/db-conn-mcp"
+
+
+def test_server_launch_under_uvx_injects_a_pinned_uvx_command(monkeypatch, tmp_path):
+    # uvx runs the server from uv's cache; that path vanishes when the cache is
+    # cleaned, so the client gets a uvx command that can rebuild it instead.
+    paths = {"db-conn-mcp": _UV_CACHED_SCRIPT, "uvx": "/home/u/.local/bin/uvx"}
+    monkeypatch.setattr(cli.shutil, "which", paths.get)
+
+    command, args = cli.server_launch(tmp_path / "connections.json")
+
+    assert command == "/home/u/.local/bin/uvx"
+    assert args == [
+        "--from",
+        f"db-conn-mcp=={cli.__version__}",
+        "db-conn-mcp",
+        "--config",
+        str(tmp_path / "connections.json"),
+    ]
+
+
+def test_server_launch_under_uvx_without_uvx_on_path_keeps_the_script(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli.shutil, "which", {"db-conn-mcp": _UV_CACHED_SCRIPT}.get)
+
+    command, args = cli.server_launch(tmp_path / "connections.json")
+
+    assert command == _UV_CACHED_SCRIPT
+    assert args == ["--config", str(tmp_path / "connections.json")]
+
+
+def test_server_launch_recognises_a_windows_uv_cache(monkeypatch, tmp_path):
+    cached = r"C:\Users\u\AppData\Local\uv\cache\archive-v0\abc\Scripts\db-conn-mcp.exe"
+    paths = {"db-conn-mcp": cached, "uvx": r"C:\Users\u\.local\bin\uvx.exe"}
+    monkeypatch.setattr(cli.shutil, "which", paths.get)
+    monkeypatch.setattr(cli, "Path", PureWindowsPath)
+
+    command, _args = cli.server_launch(tmp_path / "connections.json")
+
+    assert command == r"C:\Users\u\.local\bin\uvx.exe"
+
+
+def test_server_launch_prefers_the_launcher_command(monkeypatch, tmp_path):
+    # The npm launcher names itself, so a client set up through npx keeps using npx.
+    monkeypatch.setenv(
+        cli.LAUNCH_COMMAND_ENV, '["/usr/bin/npx", "-y", "@idle-sync/db-conn-mcp@1.2.3"]'
+    )
+    monkeypatch.setattr(cli.shutil, "which", {"db-conn-mcp": _UV_CACHED_SCRIPT}.get)
+
+    command, args = cli.server_launch(tmp_path / "connections.json")
+
+    assert command == "/usr/bin/npx"
+    assert args == [
+        "-y",
+        "@idle-sync/db-conn-mcp@1.2.3",
+        "--config",
+        str(tmp_path / "connections.json"),
+    ]
+
+
+@pytest.mark.parametrize("raw", ["npx -y pkg", "[]", '[""]', '["npx", 3]', '{"command": "npx"}'])
+def test_server_launch_rejects_a_malformed_launcher_command(raw, monkeypatch, tmp_path):
+    monkeypatch.setenv(cli.LAUNCH_COMMAND_ENV, raw)
+
+    with pytest.raises(ValueError, match=cli.LAUNCH_COMMAND_ENV):
+        cli.server_launch(tmp_path / "connections.json")
+
+
+def test_server_launch_ignores_an_empty_launcher_command(monkeypatch, tmp_path):
+    monkeypatch.setenv(cli.LAUNCH_COMMAND_ENV, "")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/venv/bin/db-conn-mcp")
+
+    command, _args = cli.server_launch(tmp_path / "connections.json")
+
+    assert command == "/venv/bin/db-conn-mcp"
 
 
 def test_inject_mcpservers_format():
